@@ -29,17 +29,51 @@ const (
 // Config is the agent-side DNS configuration. It is a VeloTrust model and is
 // deliberately independent of management database entities and wire formats.
 type Config struct {
-	Enabled        bool
-	ResolverGroups []ResolverGroup
-	Zones          []CustomZone
+	Enabled        bool            `json:"enabled"`
+	ResolverGroups []ResolverGroup `json:"resolver_groups,omitempty"`
+	Zones          []CustomZone    `json:"zones,omitempty"`
 }
 
 // ResolverGroup groups DNS resolvers and the domains routed to them.
 type ResolverGroup struct {
-	Resolvers            []netip.AddrPort
-	Domains              []string
-	Primary              bool
-	SearchDomainsEnabled bool
+	Resolvers            []netip.AddrPort `json:"resolvers"`
+	Domains              []string         `json:"domains"`
+	Primary              bool             `json:"primary,omitempty"`
+	SearchDomainsEnabled bool             `json:"search_domains_enabled,omitempty"`
+}
+
+// NormalizeDomain converts a DNS suffix to lower-case ASCII IDNA form and
+// validates its label boundaries. A trailing root dot is accepted.
+func NormalizeDomain(domain string) (string, error) {
+	if domain == "" || strings.TrimSpace(domain) != domain || strings.ContainsAny(domain, "*/\\") {
+		return "", fmt.Errorf("invalid DNS domain %q", domain)
+	}
+	trimmed := strings.TrimSuffix(domain, ".")
+	if trimmed == "" || strings.HasSuffix(trimmed, ".") {
+		return "", fmt.Errorf("invalid DNS domain %q", domain)
+	}
+	ascii, err := idna.Lookup.ToASCII(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("normalize DNS domain %q: %w", domain, err)
+	}
+	ascii = strings.ToLower(ascii)
+	if len(ascii) > 253 {
+		return "", fmt.Errorf("DNS domain %q exceeds 253 ASCII bytes", domain)
+	}
+	for _, label := range strings.Split(ascii, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", fmt.Errorf("DNS domain %q contains an invalid label", domain)
+		}
+	}
+	return ascii, nil
+}
+
+// MatchDomain reports whether name equals a suffix or is below it at a DNS
+// label boundary.
+func MatchDomain(name, suffix string) bool {
+	name = strings.TrimSuffix(strings.ToLower(name), ".")
+	suffix = strings.TrimSuffix(strings.ToLower(suffix), ".")
+	return name == suffix || strings.HasSuffix(name, "."+suffix)
 }
 
 // ParseResolverURL parses a UDP resolver endpoint in udp://<ip>:<port> form.

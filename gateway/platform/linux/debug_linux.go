@@ -61,6 +61,7 @@ func logTunnelConfiguration(desired config.Tunnel) {
 		"interface", desired.Interface,
 		"listen_port", desired.ListenPort,
 		"address", desired.Address,
+		"mtu", desired.EffectiveMTU(),
 		"peer_count", len(desired.Peers),
 	)
 	for _, configuredPeer := range desired.Peers {

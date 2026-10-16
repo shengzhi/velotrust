@@ -20,6 +20,9 @@ import (
 
 const maxConfigBytes = 2 << 20
 
+// DefaultTunnelMTU preserves the existing Gateway MTU when the field is omitted.
+const DefaultTunnelMTU = 1420
+
 var (
 	identifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 	interfacePattern  = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
@@ -42,9 +45,18 @@ type Tunnel struct {
 	Interface      string `json:"interface"`
 	Address        string `json:"address"`
 	ListenPort     uint16 `json:"listen_port"`
+	MTU            int    `json:"mtu,omitempty"`
 	PrivateKey     string `json:"private_key,omitempty"`
 	PrivateKeyFile string `json:"private_key_file,omitempty"`
 	Peers          []Peer `json:"peers,omitempty"`
+}
+
+// EffectiveMTU returns the configured MTU or the backwards-compatible default.
+func (t Tunnel) EffectiveMTU() int {
+	if t.MTU == 0 {
+		return DefaultTunnelMTU
+	}
+	return t.MTU
 }
 
 type Peer struct {
@@ -208,6 +220,7 @@ func scanJSONValue(decoder *json.Decoder) error {
 // Canonical returns an independent copy with network fields normalized for
 // stable reconciliation and idempotency checks.
 func (c Config) Canonical() Config {
+	c.Tunnel.MTU = c.Tunnel.EffectiveMTU()
 	c.Tunnel.Peers = append([]Peer(nil), c.Tunnel.Peers...)
 	for i := range c.Tunnel.Peers {
 		c.Tunnel.Peers[i].AllowedIPs = canonicalPrefixes(c.Tunnel.Peers[i].AllowedIPs)
@@ -394,6 +407,9 @@ func (c Config) Validate() error {
 	if !interfacePattern.MatchString(c.Tunnel.Interface) || c.Tunnel.Interface == "." || c.Tunnel.Interface == ".." {
 		return errors.New("tunnel.interface must be a valid Linux interface name")
 	}
+	if c.Tunnel.MTU != 0 && (c.Tunnel.MTU < 1280 || c.Tunnel.MTU > 9000) {
+		return errors.New("tunnel.mtu must be between 1280 and 9000")
+	}
 	address, err := netip.ParsePrefix(c.Tunnel.Address)
 	if err != nil || !address.IsValid() || address.Bits() == 0 || address.Addr().IsUnspecified() || address.Addr().IsMulticast() || address.Addr().Is4In6() {
 		return errors.New("tunnel.address must be a valid unicast IP prefix")
@@ -410,6 +426,8 @@ func (c Config) Validate() error {
 
 	peerIDs := make(map[string]struct{}, len(c.Tunnel.Peers))
 	peerKeys := make(map[string]struct{}, len(c.Tunnel.Peers))
+	allowedIPOwners := make(map[netip.Prefix]string)
+	var peerAllowedPrefixes []netip.Prefix
 	for i, peer := range c.Tunnel.Peers {
 		if !identifierPattern.MatchString(peer.ID) {
 			return fmt.Errorf("tunnel.peers[%d].id is invalid", i)
@@ -436,10 +454,26 @@ func (c Config) Validate() error {
 		if err := validatePrefixes(peer.AllowedIPs, c.AllowDefaultRoute); err != nil {
 			return fmt.Errorf("tunnel.peers[%d].allowed_ips: %w", i, err)
 		}
+		for _, rawPrefix := range peer.AllowedIPs {
+			prefix, _ := netip.ParsePrefix(rawPrefix)
+			prefix = prefix.Masked()
+			if owner, exists := allowedIPOwners[prefix]; exists {
+				return fmt.Errorf("tunnel.peers[%d].allowed_ips duplicates %s on peer %q", i, prefix, owner)
+			}
+			allowedIPOwners[prefix] = peer.ID
+			peerAllowedPrefixes = append(peerAllowedPrefixes, prefix)
+		}
 	}
 
 	if err := validatePrefixes(c.Routes, c.AllowDefaultRoute); err != nil {
 		return fmt.Errorf("routes: %w", err)
+	}
+	for i, rawRoute := range c.Routes {
+		route, _ := netip.ParsePrefix(rawRoute)
+		route = route.Masked()
+		if !routeCoveredByPeer(route, peerAllowedPrefixes) {
+			return fmt.Errorf("routes[%d] %s is not covered by any tunnel.peers[].allowed_ips prefix", i, route)
+		}
 	}
 	if err := validateNAT(c.NAT, c.Tunnel.Interface); err != nil {
 		return err
@@ -448,6 +482,15 @@ func (c Config) Validate() error {
 		return err
 	}
 	return nil
+}
+
+func routeCoveredByPeer(route netip.Prefix, peerPrefixes []netip.Prefix) bool {
+	for _, peerPrefix := range peerPrefixes {
+		if peerPrefix.Addr().Is4() == route.Addr().Is4() && peerPrefix.Bits() <= route.Bits() && peerPrefix.Contains(route.Addr()) {
+			return true
+		}
+	}
+	return false
 }
 
 func validateWireGuardKey(value string) error {
@@ -473,11 +516,11 @@ func validateEndpoint(endpoint string) error {
 	if err != nil {
 		return errors.New("must use host:port format")
 	}
-	if host == "" || strings.ContainsAny(host, " \t\r\n/") {
+	if host == "" || strings.ContainsAny(host, " \t\r\n/\\") {
 		return errors.New("host is empty or malformed")
 	}
-	port, err := strconv.Atoi(portText)
-	if err != nil || port < 1 || port > 65535 {
+	port, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil || port == 0 {
 		return errors.New("port must be between 1 and 65535")
 	}
 	return nil
@@ -487,7 +530,7 @@ func validatePrefixes(values []string, allowDefault bool) error {
 	seen := make(map[netip.Prefix]struct{}, len(values))
 	for i, value := range values {
 		prefix, err := netip.ParsePrefix(value)
-		if err != nil || !prefix.IsValid() || prefix.Addr().Is4In6() {
+		if err != nil || !prefix.IsValid() || prefix.Addr().Is4In6() || prefix.Addr().IsMulticast() || (prefix.Addr().IsUnspecified() && prefix.Bits() != 0) {
 			return fmt.Errorf("prefix %d is invalid", i)
 		}
 		prefix = prefix.Masked()

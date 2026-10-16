@@ -248,7 +248,7 @@ func runConnect(args []string, stdout, stderr io.Writer) int {
 	slog.Info("starting client tunnel", "instance_id", cfg.InstanceID, "interface", cfg.Tunnel.InterfaceName, "log_level", strings.ToLower(effectiveLogLevel))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := clienttunnel.Connect(ctx, configPath, *cfg.Tunnel, stdout); err != nil {
+	if err := clienttunnel.Connect(ctx, cfg.InstanceID, configPath, *cfg.Tunnel, stdout); err != nil {
 		fmt.Fprintf(stderr, "client connection stopped: %v\n", err)
 		return 1
 	}
@@ -291,12 +291,23 @@ func runDisconnect(args []string, stdout, stderr io.Writer) int {
 	if interfaceName == "" {
 		interfaceName = "VeloTrust"
 	}
-	if err := winplatform.CleanupTunnelNetwork(interfaceName); err != nil {
-		fmt.Fprintf(stderr, "clean up client tunnel networking: %v\n", err)
+	cleanupErr := errors.Join(
+		wrapCommandError("restore Windows DNS policy", winplatform.CleanupDNSCapture(cfg.InstanceID)),
+		wrapCommandError("clean up client tunnel networking", winplatform.CleanupTunnelNetwork(interfaceName)),
+	)
+	if cleanupErr != nil {
+		fmt.Fprintf(stderr, "disconnect cleanup failed: %v\n", cleanupErr)
 		return 1
 	}
-	fmt.Fprintln(stdout, "Client tunnel routes and manually assigned addresses were removed.")
+	fmt.Fprintln(stdout, "Client DNS policy, routes, and manually assigned addresses were restored.")
 	return 0
+}
+
+func wrapCommandError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", operation, err)
 }
 
 func inspectStatus() (StatusReport, error) {

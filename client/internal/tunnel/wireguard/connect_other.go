@@ -12,6 +12,6 @@ import (
 	clientconfig "velotrust/client/internal/config"
 )
 
-func Connect(context.Context, string, clientconfig.Tunnel, io.Writer) error {
+func Connect(context.Context, string, string, clientconfig.Tunnel, io.Writer) error {
 	return errors.New("live client tunnel connection is supported on Windows only")
 }

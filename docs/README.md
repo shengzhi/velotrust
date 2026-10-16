@@ -4,7 +4,9 @@
 
 - [项目与仓库架构](ARCHITECTURE.md)
 - [TODO LIST](../TODO.md)
+- [VeloTrust 客户端与 Gateway 网络配置契约](VeloTrust-网络配置契约.md)
 - [VeloTrust 客户端技术实现方案](VeloTrust-客户端技术实现方案.md)
+- [VeloTrust 网关节点技术实现方案](VeloTrust-网关节点技术实现方案.md)
 - [Windows Client CLI 测试手册](mannual.md)
 - [VeloTrust 平台技术实现方案](VeloTrust平台技术实现方案.md)
 - [VeloTrust 企业级零信任安全访问平台（ZTNA）技术方案](VeloTrust企业级零信任安全访问平台(ZTNA)技术方案.md)

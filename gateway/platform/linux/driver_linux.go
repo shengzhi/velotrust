@@ -35,7 +35,6 @@ const (
 	preroutingChainName  = "gateway_prerouting"
 	postroutingChainName = "gateway_postrouting"
 	managedRouteProto    = 253
-	defaultMTU           = 1420
 )
 
 type tunnelBackend interface {
@@ -99,14 +98,14 @@ func (d *Driver) ApplyTunnel(ctx context.Context, desired config.Tunnel) error {
 	if err := configureAddress(link, desired.Address); err != nil {
 		return fmt.Errorf("configure tunnel address: %w", err)
 	}
-	if err := netlink.LinkSetMTU(link, defaultMTU); err != nil {
+	if err := netlink.LinkSetMTU(link, desired.EffectiveMTU()); err != nil {
 		return fmt.Errorf("set tunnel MTU: %w", err)
 	}
 	if err := netlink.LinkSetUp(link); err != nil {
 		return fmt.Errorf("bring tunnel interface up: %w", err)
 	}
 	logTunnelConfiguration(desired)
-	slog.Debug("gateway tunnel interface is up", "interface", d.interfaceName, "address", desired.Address, "mtu", defaultMTU)
+	slog.Debug("gateway tunnel interface is up", "interface", d.interfaceName, "address", desired.Address, "mtu", desired.EffectiveMTU())
 	d.needsIPv4, d.needsIPv6 = tunnelFamilies(desired)
 	return nil
 }
@@ -496,7 +495,7 @@ func createUserspaceBackend(ctx context.Context, desired config.Tunnel) (tunnelB
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	tunDevice, err := tun.CreateTUN(desired.Interface, defaultMTU)
+	tunDevice, err := tun.CreateTUN(desired.Interface, desired.EffectiveMTU())
 	if err != nil {
 		return nil, fmt.Errorf("create userspace TUN interface: %w", err)
 	}

@@ -24,6 +24,7 @@ sudo /usr/local/bin/gateway-agent keygen --dir /etc/velotrust/gateway
     "interface": "vtrust0",
     "address": "10.100.0.1/24",
     "listen_port": 51820,
+    "mtu": 1380,
     "private_key_file": "wireguard.key",
     "peers": [
       {
@@ -68,6 +69,8 @@ sudo /usr/local/bin/gateway-agent run \
 
 Gateway Agent 会在 `listen_port` 上启动 WireGuard UDP 监听，并应用 Peer、路由和防火墙规则。需在 Gateway 主机防火墙及云安全组放行 UDP `51820`。运行用户还需要创建隧道、配置路由、nftables 和 IP 转发的权限。空 `rules` 表示默认拒绝转发。
 
+`tunnel.mtu` 以字节为单位，省略时 Gateway 使用 1420；客户端省略时使用 1380。建议按实际链路显式设置两端 MTU。Gateway 顶层 `routes` 的每个网段还必须被某个 Peer 的 `allowed_ips` 覆盖。
+
 启动日志会打印 `gateway WireGuard public key`。将该公钥填入客户端对应 Gateway 的 `tunnel.peers[].public_key`。
 
 较早版本可能还生成了 `node-identity.key` 和 `node-identity.pub`；当前版本不读取它们，也不会自动删除。确认没有其他程序依赖后，可自行安全删除这两个旧文件。
@@ -98,8 +101,11 @@ curl http://127.0.0.1:8765/readyz
 
 - 客户端 Peer 的 `public_key` 必须是客户端 WireGuard 公钥，`allowed_ips` 至少包含该客户端的隧道地址，例如 `10.100.0.2/32`。
 - Gateway 对外 Endpoint 使用 Gateway 主机可达地址和监听端口，例如 `gateway.example.com:51820`。
+- Client `allowed_ips` 生成 Windows 隧道路由；Gateway 顶层 `routes` 则显式创建经 WireGuard 接口的 Linux 路由。Gateway 的每条 `routes` 必须被至少一个 Peer 的 `allowed_ips` 覆盖，否则配置校验会拒绝。
 - 若资源位于 Gateway 直连的 LAN，优先确保 LAN 有返回隧道网段的路由；无法配置回程路由时，可为指定流量配置 SNAT。经其他隧道可达的网段则需配置对应路由和 Peer。
 - `rules` 必须显式允许需要的流量；只配置 WireGuard Peer 不会自动授权访问资源。
+
+Client 与 Gateway 的字段定义、Endpoint 角色、AllowedIPs、路由与 MTU 约定见[网络配置契约](VeloTrust-网络配置契约.md)。
 
 #### 为 LAN 访问配置 SNAT
 
@@ -173,7 +179,7 @@ $ClientDir = Join-Path $env:LOCALAPPDATA "VeloTrust\Client"
         "id": "gateway-site-a",
         "public_key": "替换为站点 A Gateway WireGuard 公钥",
         "endpoint": "gateway-a.example.com:51820",
-        "allowed_ips": ["10.100.0.1/32", "10.20.0.0/24"],
+        "allowed_ips": ["10.100.0.1/32", "10.20.0.0/24", "10.100.0.53/32", "10.100.0.54/32"],
         "persistent_keepalive": 25
       },
       {
@@ -183,12 +189,27 @@ $ClientDir = Join-Path $env:LOCALAPPDATA "VeloTrust\Client"
         "allowed_ips": ["10.100.0.3/32", "10.30.0.0/24"],
         "persistent_keepalive": 25
       }
-    ]
+    ],
+    "dns": {
+      "enabled": true,
+      "resolver_groups": [
+        {
+          "domains": ["corp.example.com", "internal.example.com"],
+          "resolvers": ["10.100.0.53:53"]
+        },
+        {
+          "domains": ["dev.internal.example.com"],
+          "resolvers": ["10.100.0.54:53"]
+        }
+      ]
+    }
   }
 }
 ```
 
 `peers` 中每项对应一个 Gateway，`allowed_ips` 填入该 Gateway 的隧道地址和资源网段，不要填默认路由。此例中客户端用同一个 WireGuard 公钥分别登记在两个 Gateway 上；每个 Gateway 仍独立执行自己的访问规则。各 peer 的 endpoint 不能被任何 `allowed_ips` 覆盖，否则客户端会拒绝连接以避免 UDP 流量递归进入隧道。不要把相同的精确网段分配给多个 Gateway；若远端网段冲突，为各 Gateway 配置不同的 NAT 映射网段。当前支持同时访问不同网段，尚不提供同一网段的主备故障切换。旧版单 Gateway 配置的 `peer` 字段仍兼容，新配置请使用 `peers` 数组。校验配置：
+
+DNS 示例中，`resolvers` 是企业 DNS 的 `IP:port` 地址，每个地址必须落在某个 Gateway Peer 的 `allowed_ips` 中，例如把 `10.100.0.53/32` 加入对应 Peer。域名按标签边界匹配，重叠后缀采用最长匹配。Windows Client 会把当前活动网络的系统 DNS 用作外部域名上游；内部域名只发给对应企业 DNS，失败时返回 `SERVFAIL`，不会回退到系统 DNS。
 
 ```powershell
 $ClientConfig = Join-Path $ClientDir "client.json"
@@ -205,7 +226,7 @@ $ClientConfig = Join-Path $env:LOCALAPPDATA "VeloTrust\Client\client.json"
 & $Exe connect --config $ClientConfig --log-level debug
 ```
 
-CLI 会创建一个 Wintun 接口、应用隧道地址和聚合后的路由，并持续运行。`--log-level debug` 会逐 Gateway 输出 Endpoint、公钥指纹、Peer 是否存在、握手时间和收发字节数，不会输出私钥。每个 Gateway 握手成功时会分别显示 `WireGuard handshake established with gateway "<id>".`。随后可在另一个窗口测试获准资源：
+CLI 会创建一个 Wintun 接口、应用隧道地址和聚合后的路由，并持续运行。启用 DNS 时，Client 会启动仅监听回环地址的 UDP/TCP 53 本地代理，并通过 Windows NRPT 将系统 DNS 查询导入代理；启动前会检查端口并用一次系统 DNS 查询验证接管。`--log-level debug` 会逐 Gateway 输出 Endpoint、公钥指纹、Peer 是否存在、握手时间和收发字节数，也会显示 DNS 查询选择的上游类别，不会输出私钥。每个 Gateway 握手成功时会分别显示 `WireGuard handshake established with gateway "<id>".`。随后可在另一个窗口测试获准资源：
 
 连接启动时会先打印 `Client WireGuard public key`。将该公钥加入每个允许该客户端连接的 Gateway 配置中的 `tunnel.peers[].public_key`，并确保对应的 `allowed_ips` 包含客户端隧道地址。Gateway 与 Client 打印的都是 WireGuard 公钥；不要交换或粘贴私钥文件。
 
@@ -213,7 +234,16 @@ CLI 会创建一个 Wintun 接口、应用隧道地址和聚合后的路由，�
 Test-NetConnection 10.20.0.10 -Port 443
 ```
 
-按 Ctrl+C 正常断开并清理本次配置。如果进程异常退出，在没有其他连接进程运行时执行：
+使用系统 DNS 客户端验证域名分流：
+
+```powershell
+Resolve-DnsName app.corp.example.com -DnsOnly
+Resolve-DnsName www.example.com -DnsOnly
+```
+
+在客户端 debug 日志中，内部域名应显示 `route=enterprise`，外部域名应显示 `route=original`。企业 DNS 地址必须经隧道路由可达，并由 Gateway 允许 UDP/TCP 53。可用 `Get-DnsClientNrptPolicy -Effective -Namespace "."` 查看全局 DNS 接管规则。
+
+按 Ctrl+C 正常断开并移除本实例的 DNS 接管规则、路由和隧道地址。如果进程被强制结束，Windows 会暂时保留指向本机代理的 DNS 规则；在没有其他连接进程运行时，先执行下面的恢复命令：
 
 ```powershell
 & $Exe disconnect --config $ClientConfig
@@ -227,4 +257,4 @@ Test-NetConnection 10.20.0.10 -Port 443
 
 ## 当前边界
 
-客户端连接使用本地静态配置，尚未实现用户登录、设备注册、控制面授权配置同步、Windows 后台服务、DNS 管理和休眠恢复。Gateway Agent 尚未连接管理控制面。真实 Windows 与 Gateway 环境的端到端握手和资源访问仍需在目标网络中验证。
+客户端使用本地静态 DNS 策略，尚未接入控制面策略下发和应用状态回报。DNS 接管通过 Windows DNS Client/NRPT 工作；自行发送 DNS、DoH 和 DoT 的应用不在本阶段拦截范围内。macOS/Linux DNS 接管、Windows 网络切换时的真实端到端验证、用户登录、设备注册、Windows 后台服务和休眠恢复尚未实现。Gateway Agent 尚未连接管理控制面。

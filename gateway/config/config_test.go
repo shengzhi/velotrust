@@ -24,8 +24,8 @@ func validConfig() Config {
 			Peers: []Peer{{
 				ID:         "site-east",
 				PublicKey:  testKey(2),
-				Endpoint:   "198.51.100.2:51820",
-				AllowedIPs: []string{"10.110.0.0/16"},
+				Endpoint:   "203.0.113.2:51820",
+				AllowedIPs: []string{"10.110.0.0/16", "192.0.2.0/24", "198.51.100.0/24"},
 			}},
 		},
 		Routes: []string{"192.0.2.7/24"},

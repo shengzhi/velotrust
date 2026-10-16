@@ -18,14 +18,22 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	clientdns "velotrust/client/internal/dns"
 )
 
 const MaxFileSize = 1 << 20
+
+// DefaultTunnelMTU is the Windows client interface MTU when the field is omitted.
+const DefaultTunnelMTU = 1380
 
 var instanceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 var peerIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 const maxTunnelPeers = 64
+const maxDNSResolverGroups = 32
+const maxDNSResolversPerGroup = 8
+const maxDNSDomainsPerGroup = 128
 
 // Local describes how this installation identifies its private control-plane
 // instance. It must never contain user credentials, device keys, or tokens.
@@ -41,12 +49,21 @@ type Local struct {
 // not represent an authorization decision; AllowedIPs must be provisioned by
 // an administrator and the gateway must enforce its own default-deny policy.
 type Tunnel struct {
-	InterfaceName  string `json:"interface_name,omitempty"`
-	Address        string `json:"address"`
-	PrivateKeyFile string `json:"private_key_file"`
-	MTU            int    `json:"mtu,omitempty"`
-	Peer           *Peer  `json:"peer,omitempty"`
-	Peers          []Peer `json:"peers,omitempty"`
+	InterfaceName  string            `json:"interface_name,omitempty"`
+	Address        string            `json:"address"`
+	PrivateKeyFile string            `json:"private_key_file"`
+	MTU            int               `json:"mtu,omitempty"`
+	Peer           *Peer             `json:"peer,omitempty"`
+	Peers          []Peer            `json:"peers,omitempty"`
+	DNS            *clientdns.Config `json:"dns,omitempty"`
+}
+
+// EffectiveMTU returns the configured interface MTU or its default.
+func (t Tunnel) EffectiveMTU() int {
+	if t.MTU == 0 {
+		return DefaultTunnelMTU
+	}
+	return t.MTU
 }
 
 type Peer struct {
@@ -67,6 +84,67 @@ func (t Tunnel) ConfiguredPeers() []Peer {
 		return []Peer{*t.Peer}
 	}
 	return nil
+}
+
+func validateDNS(profile clientdns.Config, allowedIPs map[netip.Prefix]int) error {
+	if !profile.Enabled {
+		if len(profile.ResolverGroups) != 0 || len(profile.Zones) != 0 {
+			return errors.New("dns.enabled must be true when DNS rules are configured")
+		}
+		return nil
+	}
+	if len(profile.ResolverGroups) == 0 || len(profile.ResolverGroups) > maxDNSResolverGroups {
+		return fmt.Errorf("dns.resolver_groups must contain between 1 and %d groups", maxDNSResolverGroups)
+	}
+	if len(profile.Zones) != 0 {
+		return errors.New("dns.zones are not supported by the client split DNS proxy")
+	}
+
+	seenDomains := make(map[string]int)
+	for groupIndex, group := range profile.ResolverGroups {
+		field := fmt.Sprintf("resolver_groups[%d]", groupIndex)
+		if len(group.Domains) == 0 || len(group.Domains) > maxDNSDomainsPerGroup {
+			return fmt.Errorf("%s.domains must contain between 1 and %d suffixes", field, maxDNSDomainsPerGroup)
+		}
+		if len(group.Resolvers) == 0 || len(group.Resolvers) > maxDNSResolversPerGroup {
+			return fmt.Errorf("%s.resolvers must contain between 1 and %d endpoints", field, maxDNSResolversPerGroup)
+		}
+		for domainIndex, rawDomain := range group.Domains {
+			domain, err := clientdns.NormalizeDomain(rawDomain)
+			if err != nil {
+				return fmt.Errorf("%s.domains[%d]: %w", field, domainIndex, err)
+			}
+			if previous, exists := seenDomains[domain]; exists {
+				return fmt.Errorf("%s.domains[%d] duplicates resolver_groups[%d] after normalization", field, domainIndex, previous)
+			}
+			seenDomains[domain] = groupIndex
+		}
+
+		seenResolvers := make(map[netip.AddrPort]struct{}, len(group.Resolvers))
+		for resolverIndex, resolver := range group.Resolvers {
+			if !resolver.IsValid() || resolver.Port() == 0 || resolver.Addr().IsUnspecified() || resolver.Addr().IsMulticast() || resolver.Addr().IsLoopback() || resolver.Addr().Is4In6() {
+				return fmt.Errorf("%s.resolvers[%d] must be a unicast IP:port endpoint", field, resolverIndex)
+			}
+			if _, exists := seenResolvers[resolver]; exists {
+				return fmt.Errorf("%s.resolvers[%d] is duplicated", field, resolverIndex)
+			}
+			seenResolvers[resolver] = struct{}{}
+			if !isAllowedTunnelDestination(resolver.Addr(), allowedIPs) {
+				return fmt.Errorf("%s.resolvers[%d] is outside all gateway peer allowed_ips; add a tunnel route for %s", field, resolverIndex, resolver.Addr())
+			}
+		}
+	}
+	return nil
+}
+
+func isAllowedTunnelDestination(address netip.Addr, allowedIPs map[netip.Prefix]int) bool {
+	address = address.WithZone("")
+	for prefix := range allowedIPs {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
 }
 
 // Load reads and validates a local client configuration file.
@@ -276,7 +354,7 @@ func (t Tunnel) Validate() error {
 		}
 		seenKeys[peer.PublicKey] = struct{}{}
 		host, port, endpointErr := net.SplitHostPort(peer.Endpoint)
-		if endpointErr != nil || host == "" || strings.TrimSpace(peer.Endpoint) != peer.Endpoint || strings.ContainsAny(peer.Endpoint, "\r\n\t /\\") {
+		if endpointErr != nil || host == "" || strings.TrimSpace(peer.Endpoint) != peer.Endpoint || strings.ContainsAny(host, " \r\n\t/\\") || strings.ContainsAny(peer.Endpoint, "\r\n\t/\\") {
 			return fmt.Errorf("%s.endpoint must be a host:port UDP endpoint", field)
 		}
 		portValue, err := strconv.ParseUint(port, 10, 16)
@@ -301,6 +379,11 @@ func (t Tunnel) Validate() error {
 				return fmt.Errorf("%s.allowed_ips[%d] duplicates the same prefix on peers[%d]; assign each exact prefix to only one gateway", field, i, previousPeer)
 			}
 			seenAllowedIPs[prefix] = peerIndex
+		}
+	}
+	if t.DNS != nil {
+		if err := validateDNS(*t.DNS, seenAllowedIPs); err != nil {
+			return fmt.Errorf("tunnel.dns: %w", err)
 		}
 	}
 	return nil

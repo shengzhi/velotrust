@@ -24,6 +24,12 @@ client-cli.exe connect --config "$env:LOCALAPPDATA\VeloTrust\Client\client.json"
 client-cli.exe disconnect --config "$env:LOCALAPPDATA\VeloTrust\Client\client.json"
 ```
 
-Windows 构建：`make build-client-cli-windows`，生成 `bin/client-cli-windows-amd64.exe`。`connect` 需要管理员权限和同目录的 `wintun.dll`，会在前台运行，按 Ctrl+C 断开并清理本次地址与路由。`tunnel.peers` 中每个 Gateway 有独立 endpoint、公钥和 `allowed_ips`；精确相同的路由不能分配给多个 Gateway，网段冲突应使用各自不同的 NAT 映射网段。目前支持同时连接不同资源网段，尚不提供同一网段的主备故障切换。可用 `connect --log-level debug` 查看每个 Gateway 的 Endpoint、公钥指纹、Peer 状态和握手统计；日志不包含私钥。`disconnect` 可在进程被强制结束后清理残留路由与地址。当前连接依赖管理员预置的静态 Peer 配置；用户登录、设备注册、控制面授权配置同步和后台 Windows 服务尚未实现。服务状态不能代替隧道握手或资源可达状态。
+Windows 构建：`make build-client-cli-windows`，生成 `bin/client-cli-windows-amd64.exe`。`connect` 需要管理员权限和同目录的 `wintun.dll`，会在前台运行，按 Ctrl+C 断开并清理本次地址与路由。`tunnel.peers` 中每个 Gateway 有独立 endpoint、公钥和 `allowed_ips`；精确相同的路由不能分配给多个 Gateway，网段冲突应使用各自不同的 NAT 映射网段。目前支持同时连接不同资源网段，尚不提供同一网段的主备故障切换。
+
+Windows Client 可通过 `tunnel.dns.resolver_groups` 启用 Split DNS：系统 DNS 查询经 NRPT 导入本地代理，企业域名按最长后缀匹配转发到企业 DNS，其他域名使用当前系统 DNS 上游。企业 DNS 地址必须被某个 Peer 的 `allowed_ips` 覆盖。Debug 日志显示所选上游类别，不输出私钥。正常断开会移除本实例的 DNS 接管规则；若进程被强制结束，使用 `disconnect` 清理残留 NRPT 规则、路由和地址。DoH/DoT 与应用自建 DNS 不由当前版本拦截。
+
+Client 与 Gateway 的地址、公钥、Endpoint、AllowedIPs、路由和 MTU 约定见[网络配置契约](../docs/VeloTrust-网络配置契约.md)。
+
+当前连接依赖管理员预置的静态 Peer 和 DNS 配置；用户登录、设备注册、控制面授权配置同步和后台 Windows 服务尚未实现。服务状态不能代替隧道握手或资源可达状态。
 
 详细测试步骤见[Windows Client CLI 测试手册](../docs/mannual.md)。

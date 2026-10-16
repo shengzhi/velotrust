@@ -21,6 +21,7 @@ import (
 	"time"
 
 	clientconfig "velotrust/client/internal/config"
+	"velotrust/client/internal/dnsproxy"
 	winplatform "velotrust/client/system/windows"
 
 	"golang.zx2c4.com/wireguard/conn"
@@ -28,8 +29,6 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
-
-const defaultMTU = 1380
 
 type configuredGateway struct {
 	id                 string
@@ -43,7 +42,7 @@ type configuredGateway struct {
 
 // Connect starts a static client-to-gateway WireGuard session in the current
 // process. It returns when the context is canceled and owns all tunnel cleanup.
-func Connect(ctx context.Context, configPath string, profile clientconfig.Tunnel, output io.Writer) (resultErr error) {
+func Connect(ctx context.Context, instanceID string, configPath string, profile clientconfig.Tunnel, output io.Writer) (resultErr error) {
 	if !winplatform.IsElevated() {
 		return errors.New("connect requires an elevated PowerShell session to create the Wintun interface and routes")
 	}
@@ -67,6 +66,34 @@ func Connect(ctx context.Context, configPath string, profile clientconfig.Tunnel
 	if err != nil {
 		return err
 	}
+	var localDNS *dnsproxy.Proxy
+	var cleanupDNSCapture func() error
+	if profile.DNS != nil && profile.DNS.Enabled {
+		if err := winplatform.CleanupDNSCapture(instanceID); err != nil {
+			return err
+		}
+		originalDNS, err := winplatform.DiscoverSystemDNS()
+		if err != nil {
+			return fmt.Errorf("discover original system DNS: %w", err)
+		}
+		localDNS, err = dnsproxy.New(*profile.DNS, originalDNS)
+		if err != nil {
+			return fmt.Errorf("prepare local DNS proxy: %w", err)
+		}
+		if err := localDNS.Start(); err != nil {
+			return fmt.Errorf("start local DNS proxy: %w", err)
+		}
+		slog.Info("prepared split DNS proxy", "enterprise_resolver_groups", len(profile.DNS.ResolverGroups), "original_resolver_count", len(originalDNS))
+		defer func() {
+			if cleanupDNSCapture != nil {
+				resultErr = errors.Join(resultErr, cleanupDNSCapture())
+			}
+			resultErr = errors.Join(resultErr, localDNS.Close())
+		}()
+		dnsMonitorCtx, cancelDNSMonitor := context.WithCancel(ctx)
+		defer cancelDNSMonitor()
+		startOriginalDNSMonitor(dnsMonitorCtx, localDNS)
+	}
 	for _, gateway := range gateways {
 		slog.Debug("resolved gateway WireGuard endpoint",
 			"gateway_id", gateway.id,
@@ -81,10 +108,7 @@ func Connect(ctx context.Context, configPath string, profile clientconfig.Tunnel
 	if interfaceName == "" {
 		interfaceName = "VeloTrust"
 	}
-	mtu := profile.MTU
-	if mtu == 0 {
-		mtu = defaultMTU
-	}
+	mtu := profile.EffectiveMTU()
 	slog.Debug("preparing client WireGuard tunnel",
 		"interface", interfaceName,
 		"address", profile.Address,
@@ -145,12 +169,43 @@ func Connect(ctx context.Context, configPath string, profile clientconfig.Tunnel
 		slog.Error("start client WireGuard device failed", "interface", interfaceName, "error", err)
 		return fmt.Errorf("start WireGuard tunnel: %w", err)
 	}
+	if localDNS != nil {
+		probeName, err := winplatform.DNSCaptureProbeName()
+		if err != nil {
+			return err
+		}
+		cleanupDNSCapture, err = winplatform.ApplyDNSCapture(instanceID, probeName)
+		if err != nil {
+			return err
+		}
+		slog.Info("Windows system DNS capture is active", "policy", "suffix-split", "resolver_groups", len(profile.DNS.ResolverGroups))
+	}
 	slog.Info("client WireGuard device started", "interface", interfaceName, "gateway_count", len(gateways))
 
 	if _, err := fmt.Fprintf(output, "Tunnel interface %q is running; gateways %d; assigned %s; routes %d. Press Ctrl+C to disconnect.\n", interfaceName, len(gateways), profile.Address, len(routes)); err != nil {
 		return fmt.Errorf("write connection status: %w", err)
 	}
-	return waitForTunnel(ctx, wgDevice, gateways, output)
+	return waitForTunnel(ctx, wgDevice, gateways, output, localDNS)
+}
+
+func startOriginalDNSMonitor(ctx context.Context, proxy *dnsproxy.Proxy) {
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				upstreams, err := winplatform.DiscoverSystemDNS()
+				if err != nil {
+					slog.Warn("refresh original DNS upstreams failed", "error", err)
+					continue
+				}
+				proxy.UpdateOriginalDNS(upstreams)
+			}
+		}
+	}()
 }
 
 func prepareGateways(peers []clientconfig.Peer) ([]configuredGateway, []string, error) {
@@ -222,7 +277,7 @@ func prepareGateways(peers []clientconfig.Peer) ([]configuredGateway, []string, 
 	return gateways, routes, nil
 }
 
-func waitForTunnel(ctx context.Context, wgDevice *device.Device, gateways []configuredGateway, output io.Writer) error {
+func waitForTunnel(ctx context.Context, wgDevice *device.Device, gateways []configuredGateway, output io.Writer, localDNS *dnsproxy.Proxy) error {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	startedAt := time.Now()
@@ -232,10 +287,19 @@ func waitForTunnel(ctx context.Context, wgDevice *device.Device, gateways []conf
 		pendingReported   bool
 	}
 	reporting := make([]peerReportingState, len(gateways))
+	var dnsDone <-chan struct{}
+	if localDNS != nil {
+		dnsDone = localDNS.Done()
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-dnsDone:
+			if err := localDNS.Err(); err != nil {
+				return fmt.Errorf("local DNS proxy stopped: %w", err)
+			}
+			return errors.New("local DNS proxy stopped unexpectedly")
 		case <-ticker.C:
 			state, err := wgDevice.IpcGet()
 			if err != nil {

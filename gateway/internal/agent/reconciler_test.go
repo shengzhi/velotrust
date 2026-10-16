@@ -23,7 +23,7 @@ func validConfig() config.Config {
 			Peers: []config.Peer{{
 				ID:         "site-east",
 				PublicKey:  "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
-				AllowedIPs: []string{"10.110.0.0/16"},
+				AllowedIPs: []string{"10.110.0.0/16", "192.0.2.0/24", "198.51.100.0/24"},
 			}},
 		},
 		Routes: []string{"192.0.2.0/24", "198.51.100.0/24"},
@@ -193,7 +193,8 @@ func TestApplyIsIdempotentAndRejectsStaleOrConflictingGenerations(t *testing.T) 
 	}
 
 	conflict := newer
-	conflict.Routes = []string{"203.0.113.0/24"}
+	conflict.Routes = []string{"10.120.0.0/16"}
+	conflict.Tunnel.Peers[0].AllowedIPs = append(conflict.Tunnel.Peers[0].AllowedIPs, "10.120.0.0/16")
 	if err := reconciler.Apply(context.Background(), conflict); !errors.Is(err, ErrGenerationConflict) {
 		t.Fatalf("same-generation conflict error = %v", err)
 	}
