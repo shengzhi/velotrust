@@ -1,0 +1,24 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Go build output
+/bin/
+*.test
+*.out
+
+# Web dependencies and build output
+node_modules/
+dist/
+coverage/
+
+# Platform build output
+target/
+build/
+
+# Local editor and operating-system files
+.DS_Store
+.idea/
+.vscode/
+*.zip

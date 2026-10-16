@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "instance_id": "example-enterprise",
+  "control_plane_url": "https://control.example.invalid",
+  "log_level": "info"
+}
