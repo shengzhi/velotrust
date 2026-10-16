@@ -1,8 +1,5 @@
-# signal
+# signal compatibility placeholder
 
-面向终端和网关 Agent 的南向 gRPC 接入服务，管理双向流会话、状态上报和控制指令传递。Protobuf 源定义统一维护在 `../shared/proto`。
+南向控制通道、节点会话、配置分发和运行状态上报统一归属 [`../hub`](../hub/README.md)。当前 `signal/` 与 `cmd/signal/` 仅保留旧目录占位，不再作为独立服务实现入口，避免与 HUB 重复维护业务逻辑。
 
-- `../cmd/signal`：按需独立部署时的服务入口。
-- `internal/auth`、`internal/session`：节点认证与会话生命周期。
-- `internal/stream`、`internal/dispatch`：双向流处理与指令分发。
-- `internal/report`：状态和运行结果接收。
+跨进程契约统一放在 `../shared/proto/`，HUB 生成的 Go 代码放在 `../shared/gen/go/`。

@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package velotrust.hub.v1;
+
+option go_package = "velotrust/shared/gen/go/hub/v1;hubv1";
+
+// HubControl is the authenticated control channel used by Client and Gateway
+// Agents. Business traffic must not be proxied through this stream.
+service HubControl {
+  rpc Connect(stream AgentMessage) returns (stream HubMessage);
+}
+
+enum NodeKind {
+  NODE_KIND_UNSPECIFIED = 0;
+  NODE_KIND_CLIENT = 1;
+  NODE_KIND_GATEWAY = 2;
+}
+
+message AgentMessage {
+  oneof body {
+    Hello hello = 1;
+    Heartbeat heartbeat = 2;
+    ConfigApplied config_applied = 3;
+    RuntimeStatus runtime_status = 4;
+  }
+}
+
+message Hello {
+  string node_id = 1;
+  NodeKind node_kind = 2;
+  string wireguard_public_key = 3;
+  string applied_config_revision = 4;
+}
+
+message Heartbeat {
+  uint64 sequence = 1;
+}
+
+message ConfigApplied {
+  string revision = 1;
+  bool success = 2;
+  string error_code = 3;
+}
+
+message RuntimeStatus {
+  uint32 connected_peer_count = 1;
+  string applied_config_revision = 2;
+}
+
+message HubMessage {
+  oneof body {
+    Welcome welcome = 1;
+    ConfigSnapshot config_snapshot = 2;
+    HeartbeatAck heartbeat_ack = 3;
+    Reauthenticate reauthenticate = 4;
+  }
+}
+
+message Welcome {
+  string session_id = 1;
+  uint32 heartbeat_interval_seconds = 2;
+}
+
+message ConfigSnapshot {
+  string revision = 1;
+  bytes sha256 = 2;
+  bytes payload = 3;
+}
+
+message HeartbeatAck {
+  uint64 sequence = 1;
+  int64 server_time_unix = 2;
+}
+
+message Reauthenticate {
+  string reason_code = 1;
+}
