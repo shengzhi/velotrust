@@ -19,7 +19,6 @@ import (
 
 type validationSummary struct {
 	GatewayID     string `json:"gateway_id"`
-	Generation    uint64 `json:"generation"`
 	Interface     string `json:"interface"`
 	Peers         int    `json:"peers"`
 	Routes        int    `json:"routes"`
@@ -147,7 +146,6 @@ func validateConfig(args []string, stdout, stderr io.Writer) int {
 	}
 	summary := validationSummary{
 		GatewayID:     cfg.GatewayID,
-		Generation:    cfg.Generation,
 		Interface:     cfg.Tunnel.Interface,
 		Peers:         len(cfg.Tunnel.Peers),
 		Routes:        len(cfg.Routes),

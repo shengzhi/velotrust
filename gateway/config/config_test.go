@@ -15,7 +15,6 @@ func validConfig() Config {
 	return Config{
 		SchemaVersion: 1,
 		GatewayID:     "gw-west-1",
-		Generation:    1,
 		Tunnel: Tunnel{
 			Interface:  "vtrust0",
 			Address:    "10.100.0.1/24",

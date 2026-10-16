@@ -29,7 +29,6 @@ func TestRunWithDriverCleansUpWhenHealthListenerCannotStart(t *testing.T) {
 	cfg := config.Config{
 		SchemaVersion: 1,
 		GatewayID:     "gw-test",
-		Generation:    1,
 		Tunnel: config.Tunnel{
 			Interface:  "vtrust0",
 			Address:    "10.100.0.1/24",
@@ -67,11 +66,11 @@ func TestFileConfigSourceDetectsReplacementAndSuppressesRepeatedInvalidState(t *
 		t.Fatalf("unchanged initial poll = (%v, %t, %t, %v), want no update", got, apply, changed, err)
 	}
 
-	cfg.Generation = 2
+	cfg.Tunnel.ListenPort = 51821
 	writeRuntimeConfig(t, path, cfg)
 	got, apply, changed, err := source.poll(false)
-	if err != nil || !apply || !changed || got == nil || got.Generation != 2 {
-		t.Fatalf("replacement poll = (%v, %t, %t, %v), want generation 2 update", got, apply, changed, err)
+	if err != nil || !apply || !changed || got == nil || got.Tunnel.ListenPort != 51821 {
+		t.Fatalf("replacement poll = (%v, %t, %t, %v), want changed config", got, apply, changed, err)
 	}
 
 	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
@@ -84,11 +83,11 @@ func TestFileConfigSourceDetectsReplacementAndSuppressesRepeatedInvalidState(t *
 		t.Fatalf("repeated invalid poll = (apply %t, changed %t, %v), want suppressed repeated state", apply, changed, err)
 	}
 
-	cfg.Generation = 3
+	cfg.Tunnel.ListenPort = 51822
 	writeRuntimeConfig(t, path, cfg)
 	got, apply, changed, err = source.poll(false)
-	if err != nil || !apply || !changed || got == nil || got.Generation != 3 {
-		t.Fatalf("repaired file poll = (%v, %t, %t, %v), want generation 3 update", got, apply, changed, err)
+	if err != nil || !apply || !changed || got == nil || got.Tunnel.ListenPort != 51822 {
+		t.Fatalf("repaired file poll = (%v, %t, %t, %v), want repaired config", got, apply, changed, err)
 	}
 }
 
@@ -103,7 +102,7 @@ func TestFileConfigSourceRetriesUnchangedValidConfigWhenRequested(t *testing.T) 
 	}
 	source := newFileConfigSource(path, digest)
 	got, apply, changed, err := source.poll(true)
-	if err != nil || !apply || changed || got == nil || got.Generation != cfg.Generation {
+	if err != nil || !apply || changed || got == nil || got.GatewayID != cfg.GatewayID {
 		t.Fatalf("retry poll = (%v, %t, %t, %v), want unchanged config retry", got, apply, changed, err)
 	}
 }
@@ -112,7 +111,6 @@ func runtimeTestConfig() config.Config {
 	return config.Config{
 		SchemaVersion: 1,
 		GatewayID:     "gw-test",
-		Generation:    1,
 		Tunnel: config.Tunnel{
 			Interface:  "vtrust0",
 			Address:    "10.100.0.1/24",

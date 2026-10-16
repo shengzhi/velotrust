@@ -19,7 +19,6 @@ sudo /usr/local/bin/gateway-agent keygen --dir /etc/velotrust/gateway
 {
   "schema_version": 1,
   "gateway_id": "gw-site-a",
-  "generation": 1,
   "tunnel": {
     "interface": "vtrust0",
     "address": "10.100.0.1/24",
@@ -95,7 +94,7 @@ curl http://127.0.0.1:8765/healthz
 curl http://127.0.0.1:8765/readyz
 ```
 
-`readyz` 表示配置已成功应用，不代表任何 Peer 已完成握手。修改配置时递增 `generation`，写入完整文件后再原子替换；运行中的 Agent 会监视配置变更并重新应用。
+`readyz` 表示配置已成功应用，不代表任何 Peer 已完成握手。修改配置后先校验，再将完整文件原子替换到配置路径；运行中的 Agent 会根据内容变化自动重新应用。
 
 ### 连接和转发条件
 
@@ -132,7 +131,7 @@ ip route get 10.20.0.10
 
 `source_prefix`、`destination_prefix` 和出口接口共同限定转换范围；`to_address` 必须是配置在该出口接口上的单个地址。若同一流量还经过 DNAT，`destination_prefix` 应填写 DNAT 后的真实目标网段。SNAT 不会授予访问权限，仍需由 `rules` 显式允许原始客户端地址到 LAN 资源的流量。ACL 在转换前匹配原始源地址。
 
-修改配置时递增 `generation`，再校验并重启或等待 Agent 热重载：
+修改配置后校验并重启或等待 Agent 热重载：
 
 ```sh
 sudo gateway-agent validate --config /etc/velotrust/gateway/gateway.json
@@ -163,7 +162,7 @@ $ClientDir = Join-Path $env:LOCALAPPDATA "VeloTrust\Client"
 
 将命令输出的客户端**公钥**交给 Gateway 管理员，填入 Gateway 配置中的 Peer。私钥保存在 `$ClientDir\client.key`，不要复制或发送该文件。
 
-将更新后的 Gateway 配置递增 `generation` 并应用后，在 `$ClientDir\client.json` 创建客户端连接配置：
+将更新后的 Gateway 配置应用后，在 `$ClientDir\client.json` 创建客户端连接配置：
 
 ```json
 {

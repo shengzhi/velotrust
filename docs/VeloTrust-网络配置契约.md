@@ -42,7 +42,6 @@ Gateway：
 {
   "schema_version": 1,
   "gateway_id": "gw-site-a",
-  "generation": 1,
   "tunnel": {
     "interface": "vtrust0",
     "address": "10.100.0.1/24",

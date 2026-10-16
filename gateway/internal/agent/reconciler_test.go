@@ -14,7 +14,6 @@ func validConfig() config.Config {
 	return config.Config{
 		SchemaVersion: 1,
 		GatewayID:     "gw-west-1",
-		Generation:    1,
 		Tunnel: config.Tunnel{
 			Interface:  "vtrust0",
 			Address:    "10.100.0.1/24",
@@ -157,7 +156,7 @@ func TestApplyFailureBlocksAndClosesDataplane(t *testing.T) {
 	}
 }
 
-func TestApplyIsIdempotentAndRejectsStaleOrConflictingGenerations(t *testing.T) {
+func TestApplyIsIdempotentAndReconcilesChangedConfig(t *testing.T) {
 	driver := &fakeDriver{}
 	reconciler, err := NewReconciler(driver)
 	if err != nil {
@@ -172,7 +171,7 @@ func TestApplyIsIdempotentAndRejectsStaleOrConflictingGenerations(t *testing.T) 
 		t.Fatalf("duplicate apply failed: %v", err)
 	}
 	if len(driver.calls) != callCount {
-		t.Fatal("duplicate generation caused dataplane changes")
+		t.Fatal("identical config caused dataplane changes")
 	}
 	equivalent := cfg
 	equivalent.Routes = []string{"198.51.100.8/24", "192.0.2.4/24"}
@@ -180,26 +179,27 @@ func TestApplyIsIdempotentAndRejectsStaleOrConflictingGenerations(t *testing.T) 
 		t.Fatalf("canonical equivalent config failed: %v", err)
 	}
 	if len(driver.calls) != callCount {
-		t.Fatal("equivalent generation caused dataplane changes")
+		t.Fatal("canonically equivalent config caused dataplane changes")
 	}
 
-	newer := cfg
-	newer.Generation = 2
-	if err := reconciler.Apply(context.Background(), newer); err != nil {
+	changed := cfg
+	changed.Rules = append([]config.ACLRule(nil), cfg.Rules...)
+	changed.Rules[0].PortTo = 8443
+	if err := reconciler.Apply(context.Background(), changed); err != nil {
 		t.Fatal(err)
 	}
-	if err := reconciler.Apply(context.Background(), cfg); !errors.Is(err, ErrStaleGeneration) {
-		t.Fatalf("stale generation error = %v", err)
+	changedCallCount := len(driver.calls)
+	if changedCallCount != callCount+7 {
+		t.Fatalf("changed config made %d dataplane calls, want %d", changedCallCount-callCount, 7)
 	}
-
-	conflict := newer
-	conflict.Routes = []string{"10.120.0.0/16"}
-	conflict.Tunnel.Peers[0].AllowedIPs = append(conflict.Tunnel.Peers[0].AllowedIPs, "10.120.0.0/16")
-	if err := reconciler.Apply(context.Background(), conflict); !errors.Is(err, ErrGenerationConflict) {
-		t.Fatalf("same-generation conflict error = %v", err)
+	if err := reconciler.Apply(context.Background(), changed); err != nil {
+		t.Fatalf("reapplying identical changed config failed: %v", err)
 	}
-	if got := reconciler.Status().Phase; got != PhaseDegraded {
-		t.Fatalf("conflicting generation phase = %s, want %s", got, PhaseDegraded)
+	if len(driver.calls) != changedCallCount {
+		t.Fatal("reapplying the same changed config caused dataplane changes")
+	}
+	if got := reconciler.Status().Phase; got != PhaseReady {
+		t.Fatalf("changed config phase = %s, want %s", got, PhaseReady)
 	}
 }
 
@@ -219,7 +219,7 @@ func TestApplyInvalidConfigFailsClosed(t *testing.T) {
 	}
 }
 
-func TestSameGenerationCanRecoverAfterConfigurationRejection(t *testing.T) {
+func TestUnchangedConfigCanRecoverAfterConfigurationRejection(t *testing.T) {
 	driver := &fakeDriver{}
 	reconciler, err := NewReconciler(driver)
 	if err != nil {
@@ -236,7 +236,7 @@ func TestSameGenerationCanRecoverAfterConfigurationRejection(t *testing.T) {
 		t.Fatalf("rejected config phase = %s, want %s", got, PhaseDegraded)
 	}
 	if err := reconciler.Apply(context.Background(), cfg); err != nil {
-		t.Fatalf("reapplying the same generation after recovery failed: %v", err)
+		t.Fatalf("reapplying the same config after recovery failed: %v", err)
 	}
 	if got := reconciler.Status().Phase; got != PhaseReady {
 		t.Fatalf("recovered config phase = %s, want %s", got, PhaseReady)

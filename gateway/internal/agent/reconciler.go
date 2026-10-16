@@ -14,9 +14,7 @@ import (
 )
 
 var (
-	ErrStaleGeneration    = errors.New("gateway config generation is stale")
-	ErrGenerationConflict = errors.New("gateway config generation conflicts with applied config")
-	ErrAgentStopped       = errors.New("gateway agent is stopped")
+	ErrAgentStopped = errors.New("gateway agent is stopped")
 )
 
 const cleanupTimeout = 5 * time.Second
@@ -50,17 +48,15 @@ const (
 // Snapshot contains operational status without exposing tunnel keys or raw
 // backend errors through the health endpoint.
 type Snapshot struct {
-	Phase      Phase     `json:"phase"`
-	Generation uint64    `json:"generation,omitempty"`
-	UpdatedAt  time.Time `json:"updated_at"`
-	Degraded   bool      `json:"degraded"`
+	Phase     Phase     `json:"phase"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Degraded  bool      `json:"degraded"`
 }
 
 type Reconciler struct {
 	mu           sync.Mutex
 	driver       Driver
 	phase        Phase
-	generation   uint64
 	configDigest [sha256.Size]byte
 	updatedAt    time.Time
 	started      bool
@@ -99,7 +95,7 @@ func (r *Reconciler) Start(ctx context.Context) error {
 	return nil
 }
 
-// Apply validates and applies a full desired-state generation. Traffic is
+// Apply validates and applies a full desired-state config. Traffic is
 // blocked before mutation, firewall rules are installed before routes, and
 // forwarding is enabled only after every stage succeeds.
 func (r *Reconciler) Apply(ctx context.Context, desired config.Config) error {
@@ -121,7 +117,6 @@ func (r *Reconciler) Apply(ctx context.Context, desired config.Config) error {
 	}
 	slog.Debug("applying gateway configuration",
 		"gateway_id", desired.GatewayID,
-		"generation", desired.Generation,
 		"interface", desired.Tunnel.Interface,
 		"listen_port", desired.Tunnel.ListenPort,
 		"peer_count", len(desired.Tunnel.Peers),
@@ -136,19 +131,8 @@ func (r *Reconciler) Apply(ctx context.Context, desired config.Config) error {
 	if r.stopped {
 		return ErrAgentStopped
 	}
-	if r.generation != 0 {
-		if desired.Generation < r.generation {
-			return ErrStaleGeneration
-		}
-		if desired.Generation == r.generation {
-			if digest == r.configDigest {
-				if r.phase == PhaseReady {
-					return nil
-				}
-			} else {
-				return r.failClosedLocked(ctx, ErrGenerationConflict)
-			}
-		}
+	if digest == r.configDigest && r.phase == PhaseReady {
+		return nil
 	}
 
 	stages := []struct {
@@ -165,19 +149,18 @@ func (r *Reconciler) Apply(ctx context.Context, desired config.Config) error {
 	}
 	for _, stage := range stages {
 		startedAt := time.Now()
-		slog.Debug("gateway configuration stage started", "generation", desired.Generation, "stage", stage.name)
+		slog.Debug("gateway configuration stage started", "stage", stage.name)
 		if err := stage.fn(); err != nil {
-			slog.Error("gateway configuration stage failed", "generation", desired.Generation, "stage", stage.name, "error", err)
+			slog.Error("gateway configuration stage failed", "stage", stage.name, "error", err)
 			return r.failClosedLocked(ctx, fmt.Errorf("%s: %w", stage.name, err))
 		}
-		slog.Debug("gateway configuration stage completed", "generation", desired.Generation, "stage", stage.name, "duration", time.Since(startedAt))
+		slog.Debug("gateway configuration stage completed", "stage", stage.name, "duration", time.Since(startedAt))
 	}
-	r.generation = desired.Generation
 	r.configDigest = digest
 	r.phase = PhaseReady
 	r.started = true
 	r.updatedAt = time.Now().UTC()
-	slog.Info("gateway configuration applied", "gateway_id", desired.GatewayID, "generation", desired.Generation, "phase", r.phase)
+	slog.Info("gateway configuration applied", "gateway_id", desired.GatewayID, "phase", r.phase)
 	return nil
 }
 
@@ -223,10 +206,9 @@ func (r *Reconciler) Status() Snapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return Snapshot{
-		Phase:      r.phase,
-		Generation: r.generation,
-		UpdatedAt:  r.updatedAt,
-		Degraded:   r.phase == PhaseDegraded,
+		Phase:     r.phase,
+		UpdatedAt: r.updatedAt,
+		Degraded:  r.phase == PhaseDegraded,
 	}
 }
 

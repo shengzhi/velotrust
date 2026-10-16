@@ -28,17 +28,53 @@ var (
 	interfacePattern  = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
 )
 
-// Config is the complete desired data-plane state for one gateway generation.
+// Config is the complete desired data-plane state for one gateway.
 // An empty rule list intentionally means deny all forwarded traffic.
 type Config struct {
 	SchemaVersion     uint32       `json:"schema_version"`
 	GatewayID         string       `json:"gateway_id"`
-	Generation        uint64       `json:"generation"`
 	AllowDefaultRoute bool         `json:"allow_default_route,omitempty"`
 	Tunnel            Tunnel       `json:"tunnel"`
 	Routes            []string     `json:"routes,omitempty"`
 	NAT               []NATMapping `json:"nat,omitempty"`
 	Rules             []ACLRule    `json:"rules,omitempty"`
+}
+
+// UnmarshalJSON accepts the former generation field for schema-version-1
+// configs, but ignores it. Desired-state identity is determined by content.
+func (c *Config) UnmarshalJSON(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	if legacyGeneration, exists := fields["generation"]; exists {
+		var value uint64
+		if err := json.Unmarshal(legacyGeneration, &value); err != nil || value == 0 {
+			return errors.New("legacy generation must be a positive integer")
+		}
+		delete(fields, "generation")
+	}
+
+	dataWithoutLegacyField, err := json.Marshal(fields)
+	if err != nil {
+		return fmt.Errorf("normalize gateway config: %w", err)
+	}
+	type configAlias Config
+	decoder := json.NewDecoder(bytes.NewReader(dataWithoutLegacyField))
+	decoder.DisallowUnknownFields()
+	var decoded configAlias
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("gateway config contains multiple JSON values")
+		}
+		return err
+	}
+	*c = Config(decoded)
+	return nil
 }
 
 type Tunnel struct {
@@ -400,9 +436,6 @@ func (c Config) Validate() error {
 	}
 	if !identifierPattern.MatchString(c.GatewayID) {
 		return errors.New("gateway_id must be 1 to 128 safe ASCII characters")
-	}
-	if c.Generation == 0 {
-		return errors.New("generation must be greater than zero")
 	}
 	if !interfacePattern.MatchString(c.Tunnel.Interface) || c.Tunnel.Interface == "." || c.Tunnel.Interface == ".." {
 		return errors.New("tunnel.interface must be a valid Linux interface name")

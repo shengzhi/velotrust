@@ -20,7 +20,7 @@ const (
 	dockerFirewallRefreshInterval = 15 * time.Second
 )
 
-// Run applies one validated local desired-state generation, serves health
+// Run applies one validated local desired-state config, serves health
 // endpoints, and keeps the gateway process alive until its context is canceled.
 func Run(ctx context.Context, cfg config.Config, healthAddress string) error {
 	if ctx == nil {
@@ -34,7 +34,7 @@ func Run(ctx context.Context, cfg config.Config, healthAddress string) error {
 }
 
 // RunFile loads a private config file, applies it, and watches for complete
-// replacement generations while keeping the gateway process alive.
+// replacements while keeping the gateway process alive.
 func RunFile(ctx context.Context, configPath, healthAddress string) error {
 	if ctx == nil {
 		return errors.New("context is required")
@@ -45,7 +45,6 @@ func RunFile(ctx context.Context, configPath, healthAddress string) error {
 	}
 	slog.Debug("loaded gateway configuration",
 		"gateway_id", cfg.GatewayID,
-		"generation", cfg.Generation,
 		"interface", cfg.Tunnel.Interface,
 		"listen_port", cfg.Tunnel.ListenPort,
 		"peer_count", len(cfg.Tunnel.Peers),
@@ -214,12 +213,12 @@ func serveUntilStopped(ctx context.Context, serveResult <-chan error, reconciler
 			if !apply {
 				continue
 			}
-			slog.Debug("gateway configuration reload detected", "generation", cfg.Generation, "changed", changed)
+			slog.Debug("gateway configuration reload detected", "changed", changed)
 			if err := reconciler.Apply(ctx, *cfg); err != nil {
 				if changed {
 					slog.Error("gateway configuration apply failed; forwarding remains blocked", "error", err)
 				}
-				retryApply = !errors.Is(err, agent.ErrStaleGeneration) && !errors.Is(err, agent.ErrGenerationConflict)
+				retryApply = true
 			} else {
 				retryApply = false
 			}

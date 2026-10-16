@@ -6,7 +6,7 @@ import (
 )
 
 // HealthHandler exposes readiness without returning config secrets or backend
-// error details. A gateway is ready only after a complete config generation is
+// error details. A gateway is ready only after a complete config snapshot is
 // applied successfully.
 func (r *Reconciler) HealthHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
