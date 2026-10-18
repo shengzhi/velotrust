@@ -107,20 +107,43 @@ func (db *Database) Find(v any, page Paging, orderBy []string, where string, arg
 }
 
 func (db *Database) Save(objects ...IModel) (int64, error) {
-	txn := db.NewDBTransaction()
-	defer txn.Close()
-	if err := txn.OpenTxn(); err != nil {
-		return 0, err
+	return db.SaveContext(context.Background(), objects...)
+}
+
+// SaveContext persists models through the Save lifecycle with the supplied
+// request cancellation and deadline context.
+func (db *Database) SaveContext(ctx context.Context, objects ...IModel) (int64, error) {
+	var count int64
+	err := db.WithSaveTransaction(ctx, func(tx *DBTransaction) error {
+		var err error
+		count, err = tx.Save(objects...)
+		return err
+	})
+	return count, err
+}
+
+// WithSaveTransaction runs repository reads/locks and model Save writes in a
+// single transaction. Mutations inside the callback must use tx.Save.
+func (db *Database) WithSaveTransaction(ctx context.Context, fn func(*DBTransaction) error) error {
+	if db == nil || db.engine == nil {
+		return fmt.Errorf("database engine is not initialized")
 	}
-	n, err := txn.Save(objects...)
-	if err != nil {
-		_ = txn.Rollback()
-		return 0, err
+	if fn == nil {
+		return fmt.Errorf("save transaction callback is nil")
 	}
-	if err := txn.Commit(); err != nil {
-		return 0, err
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	return n, nil
+	tx := NewDBTransaction(db.engine.NewSession().Context(ctx))
+	defer tx.Close()
+	if err := tx.OpenTxn(); err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 func (db *Database) SaveOne(v IModel) (int64, error) {

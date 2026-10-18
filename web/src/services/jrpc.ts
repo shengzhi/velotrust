@@ -46,6 +46,7 @@ const businessMessages: Record<string, string> = {
   IAM_WEBAUTHN_ORIGIN_INVALID: '当前访问域名不在 Management 的 WebAuthn 允许列表中。',
   IAM_USER_STATUS_DENIED: '不能禁用当前账号或最后一个有效平台管理员。',
   IAM_ROLE_GRANT_DENIED: '不能向当前登录账号授予或撤销角色。',
+  ENROLLMENT_INVALID_ARGUMENT: '注册凭证信息不完整或格式不正确，请检查输入内容。',
 };
 
 function errorMessage(error: RPCErrorPayload | null | undefined): string {

@@ -19,10 +19,10 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	webauthnlib "github.com/go-webauthn/webauthn/webauthn"
 	"golang.org/x/crypto/argon2"
+	servicecontext "velotrust/management/internal/context"
 	"velotrust/management/internal/lib/cache"
 	model "velotrust/management/internal/model/iam"
 	repository "velotrust/management/internal/repository/iam"
-	core "velotrust/management/internal/service"
 	appErrors "velotrust/pkg/errors"
 )
 
@@ -170,6 +170,7 @@ func (s *Service) Login(ctx context.Context, username, password, sourceIP, userA
 }
 
 func (s *Service) LoginWithTOTP(ctx context.Context, username, password, totpCode, sourceIP, userAgent, requestID string) (*SessionGrant, error) {
+	serviceCtx := servicecontext.FromContext(ctx)
 	username = strings.TrimSpace(username)
 	if username == "" || password == "" || len(username) > 64 || len(password) > 1024 {
 		return nil, invalidLogin()
@@ -180,7 +181,7 @@ func (s *Service) LoginWithTOTP(ctx context.Context, username, password, totpCod
 		ip = "unknown"
 	}
 	ipHash := s.throttleHash("source_ip", ip)
-	blocked, err := s.store.LoginBlocked(ctx, usernameHash, ipHash)
+	blocked, err := s.store.LoginBlocked(serviceCtx, usernameHash, ipHash)
 	if err != nil {
 		return nil, fmt.Errorf("check login throttle: %w", err)
 	}
@@ -188,14 +189,14 @@ func (s *Service) LoginWithTOTP(ctx context.Context, username, password, totpCod
 		return nil, invalidLogin()
 	}
 
-	user, err := s.store.FindUserByUsername(ctx, username)
+	user, err := s.store.FindUserByUsername(serviceCtx, username)
 	if err != nil {
 		return nil, fmt.Errorf("load login identity: %w", err)
 	}
 	validPassword := verifyPassword(user, password)
 	mfaUsed := false
 	if user != nil && user.UserStatus == "active" && validPassword {
-		authenticator, authErr := s.store.FindTOTPAuthenticator(ctx, user.ID)
+		authenticator, authErr := s.store.FindTOTPAuthenticator(serviceCtx, user.ID)
 		if authErr != nil {
 			return nil, fmt.Errorf("load IAM MFA authenticator: %w", authErr)
 		}
@@ -205,7 +206,7 @@ func (s *Service) LoginWithTOTP(ctx context.Context, username, password, totpCod
 				return nil, fmt.Errorf("load IAM MFA secret: %w", decryptErr)
 			}
 			step, ok := matchingTOTPStep(secret, totpCode, time.Now().UTC())
-			if !ok || s.store.ConsumeTOTP(ctx, user.ID, step) != nil {
+			if !ok || s.store.ConsumeTOTP(serviceCtx, user.ID, step) != nil {
 				validPassword = false
 			} else {
 				mfaUsed = true
@@ -214,7 +215,7 @@ func (s *Service) LoginWithTOTP(ctx context.Context, username, password, totpCod
 	}
 	if user == nil || user.UserStatus != "active" || !validPassword {
 		log := s.loginLog(user, "local", "failure", "invalid_credentials", sourceIP, userAgent, requestID, "")
-		if err := s.store.RecordLoginFailure(ctx, log, usernameHash, ipHash, loginThrottleFailures, loginThrottleWindowMinutes, loginThrottleBlockMinutes); err != nil {
+		if err := s.store.RecordLoginFailure(serviceCtx, log, usernameHash, ipHash, loginThrottleFailures, loginThrottleWindowMinutes, loginThrottleBlockMinutes); err != nil {
 			return nil, fmt.Errorf("record login failure: %w", err)
 		}
 		return nil, invalidLogin()
@@ -241,18 +242,19 @@ func (s *Service) LoginWithTOTP(ctx context.Context, username, password, totpCod
 	}
 	loginLog := s.loginLog(user, "local", "success", "", sourceIP, userAgent, requestID, sessionID)
 	loginLog.MFAUsed = mfaUsed
-	if err := s.store.CreateLoginSession(ctx, userSession, loginLog, sourceIP, usernameHash, ipHash); err != nil {
+	if err := s.store.CreateLoginSession(serviceCtx, userSession, loginLog, sourceIP, usernameHash, ipHash); err != nil {
 		return nil, fmt.Errorf("persist IAM login: %w", err)
 	}
 	return &SessionGrant{AccessToken: rawToken, TokenType: "Bearer", ExpiresAt: now.Add(s.opts.SessionIdleTTL), User: view(user)}, nil
 }
 
 func (s *Service) ResolveBearer(ctx context.Context, token string) (*model.UserSession, *model.User, error) {
+	serviceCtx := servicecontext.FromContext(ctx)
 	if len(token) < 40 || len(token) > 128 {
 		return nil, nil, appErrors.NewAuthError("IAM_UNAUTHENTICATED", appErrors.AuthUnauthenticated)
 	}
 	tokenHash := hashToken(token)
-	session, user, err := s.store.ResolveSession(ctx, tokenHash)
+	session, user, err := s.store.ResolveSession(serviceCtx, tokenHash)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve IAM bearer session: %w", err)
 	}
@@ -260,15 +262,16 @@ func (s *Service) ResolveBearer(ctx context.Context, token string) (*model.UserS
 	if session == nil || user == nil || user.UserStatus != "active" || session.IssuedAt.After(now) || !session.ExpiresAt.After(now) {
 		return nil, nil, appErrors.NewAuthError("IAM_UNAUTHENTICATED", appErrors.AuthUnauthenticated)
 	}
+	actorContext := servicecontext.New(serviceCtx, servicecontext.Principal{ID: fmt.Sprintf("%d", user.ID), Name: user.Username, EntityID: session.SessionID, Type: "user"}, servicecontext.RequestMeta{})
 	lastSeen := session.IssuedAt
 	if session.LastSeenAt != nil {
 		lastSeen = *session.LastSeenAt
 	}
 	if now.Sub(lastSeen) > s.opts.SessionIdleTTL {
-		_ = s.store.RevokeSession(context.WithoutCancel(ctx), session.SessionID, "idle_timeout")
+		_ = s.store.RevokeSession(actorContext.WithoutCancel(), session.SessionID, "idle_timeout")
 		return nil, nil, appErrors.NewAuthError("IAM_UNAUTHENTICATED", appErrors.AuthTokenExpired)
 	}
-	if err := s.store.TouchSession(ctx, session.SessionID, tokenHash, ""); err != nil {
+	if err := s.store.TouchSession(actorContext, session.SessionID, tokenHash, ""); err != nil {
 		return nil, nil, fmt.Errorf("update IAM session activity: %w", err)
 	}
 	return session, user, nil
@@ -278,10 +281,11 @@ func (s *Service) Logout(ctx context.Context, sessionID string) error {
 	if strings.TrimSpace(sessionID) == "" {
 		return appErrors.NewAuthError("IAM_UNAUTHENTICATED", appErrors.AuthUnauthenticated)
 	}
-	return s.store.RevokeSession(ctx, sessionID, "logout")
+	serviceCtx := servicecontext.FromContext(ctx)
+	return s.store.RevokeSession(serviceCtx, sessionID, "logout")
 }
 
-func (s *Service) CurrentUser(ctx *core.Context) (*UserView, error) {
+func (s *Service) CurrentUser(ctx *servicecontext.Context) (*UserView, error) {
 	if ctx == nil {
 		return nil, appErrors.NewAuthError("IAM_UNAUTHENTICATED", appErrors.AuthUnauthenticated)
 	}
@@ -322,10 +326,11 @@ func (s *Service) HasPermission(ctx context.Context, userID int64, permission st
 	if userID <= 0 || strings.TrimSpace(permission) == "" {
 		return false, nil
 	}
-	return s.store.HasPermission(ctx, userID, permission)
+	serviceCtx := servicecontext.FromContext(ctx)
+	return s.store.HasPermission(serviceCtx, userID, permission)
 }
 
-func (s *Service) ListUsers(ctx *core.Context, page, pageSize int) ([]UserView, int64, error) {
+func (s *Service) ListUsers(ctx *servicecontext.Context, page, pageSize int) ([]UserView, int64, error) {
 	if err := s.requirePermission(ctx, "iam.user.read"); err != nil {
 		return nil, 0, err
 	}
@@ -340,7 +345,7 @@ func (s *Service) ListUsers(ctx *core.Context, page, pageSize int) ([]UserView, 
 	return result, total, nil
 }
 
-func (s *Service) CreateUser(ctx *core.Context, input CreateUserInput) (*UserView, error) {
+func (s *Service) CreateUser(ctx *servicecontext.Context, input CreateUserInput) (*UserView, error) {
 	if err := s.requirePermission(ctx, "iam.user.write"); err != nil {
 		return nil, err
 	}
@@ -364,7 +369,7 @@ func (s *Service) CreateUser(ctx *core.Context, input CreateUserInput) (*UserVie
 		return nil, fmt.Errorf("generate WebAuthn user handle: %w", err)
 	}
 	actor, actorID := actorFromContext(ctx)
-	user := &model.User{Username: username, DisplayName: displayName, WebAuthnUserHandle: handle, PasswordSalt: &salt, PasswordHash: &hash, PasswordHashVersion: int16Ptr(PasswordHashVersion), AuthSource: "local", UserStatus: "active", MustChangePassword: true, CreatedBy: actor, UpdatedBy: actor, VersionNo: 1}
+	user := &model.User{Username: username, DisplayName: displayName, WebAuthnUserHandle: handle, PasswordSalt: &salt, PasswordHash: &hash, PasswordHashVersion: int16Ptr(PasswordHashVersion), AuthSource: "local", UserStatus: "active", MustChangePassword: true}
 	if email := strings.TrimSpace(input.Email); email != "" {
 		user.Email = &email
 	}
@@ -376,7 +381,7 @@ func (s *Service) CreateUser(ctx *core.Context, input CreateUserInput) (*UserVie
 	return &result, nil
 }
 
-func (s *Service) CreateRole(ctx *core.Context, input CreateRoleInput) (*model.Role, error) {
+func (s *Service) CreateRole(ctx *servicecontext.Context, input CreateRoleInput) (*model.Role, error) {
 	if err := s.requirePermission(ctx, "iam.role.write"); err != nil {
 		return nil, err
 	}
@@ -385,7 +390,7 @@ func (s *Service) CreateRole(ctx *core.Context, input CreateRoleInput) (*model.R
 		return nil, appErrors.NewClientError("IAM_INVALID_ARGUMENT", map[string]string{"role": "invalid"})
 	}
 	actor, actorID := actorFromContext(ctx)
-	role := &model.Role{RoleName: name, RoleCode: code, Status: "active", VersionNo: 1, CreatedBy: actor, UpdatedBy: actor}
+	role := &model.Role{RoleName: name, RoleCode: code, Status: "active"}
 	if input.Description != "" {
 		role.Description = &input.Description
 	}
@@ -396,14 +401,14 @@ func (s *Service) CreateRole(ctx *core.Context, input CreateRoleInput) (*model.R
 	return role, nil
 }
 
-func (s *Service) ListRoles(ctx *core.Context) ([]model.Role, error) {
+func (s *Service) ListRoles(ctx *servicecontext.Context) ([]model.Role, error) {
 	if err := s.requirePermission(ctx, "iam.role.read"); err != nil {
 		return nil, err
 	}
 	return s.store.ListRoles(ctx)
 }
 
-func (s *Service) ListRoleMenus(ctx *core.Context, roleID int64) ([]model.Menu, error) {
+func (s *Service) ListRoleMenus(ctx *servicecontext.Context, roleID int64) ([]model.Menu, error) {
 	if err := s.requirePermission(ctx, "iam.role.read"); err != nil {
 		return nil, err
 	}
@@ -417,7 +422,7 @@ func (s *Service) ListRoleMenus(ctx *core.Context, roleID int64) ([]model.Menu, 
 	return menus, err
 }
 
-func (s *Service) ListCurrentUserMenus(ctx *core.Context) ([]model.Menu, error) {
+func (s *Service) ListCurrentUserMenus(ctx *servicecontext.Context) ([]model.Menu, error) {
 	_, actorID := actorFromContext(ctx)
 	if actorID == nil || *actorID <= 0 {
 		return nil, appErrors.NewAuthError("IAM_UNAUTHENTICATED", appErrors.AuthUnauthenticated)
@@ -425,7 +430,7 @@ func (s *Service) ListCurrentUserMenus(ctx *core.Context) ([]model.Menu, error) 
 	return s.store.ListUserMenus(ctx, *actorID)
 }
 
-func (s *Service) SetRoleMenus(ctx *core.Context, roleID int64, menuIDs []int64) error {
+func (s *Service) SetRoleMenus(ctx *servicecontext.Context, roleID int64, menuIDs []int64) error {
 	if roleID <= 0 || len(menuIDs) > 1000 {
 		return appErrors.NewClientError("IAM_INVALID_ARGUMENT", map[string]string{"role_menus": "invalid"})
 	}
@@ -462,14 +467,14 @@ func (s *Service) SetRoleMenus(ctx *core.Context, roleID int64, menuIDs []int64)
 	}
 }
 
-func (s *Service) ListMenus(ctx *core.Context) ([]model.Menu, error) {
+func (s *Service) ListMenus(ctx *servicecontext.Context) ([]model.Menu, error) {
 	if err := s.requirePermission(ctx, "iam.role.read"); err != nil {
 		return nil, err
 	}
 	return s.store.ListMenus(ctx)
 }
 
-func (s *Service) CreateMenu(ctx *core.Context, input MenuInput) (*model.Menu, error) {
+func (s *Service) CreateMenu(ctx *servicecontext.Context, input MenuInput) (*model.Menu, error) {
 	if err := s.requirePermission(ctx, "iam.role.write"); err != nil {
 		return nil, err
 	}
@@ -478,7 +483,6 @@ func (s *Service) CreateMenu(ctx *core.Context, input MenuInput) (*model.Menu, e
 		return nil, err
 	}
 	actor, actorID := actorFromContext(ctx)
-	menu.CreatedBy, menu.UpdatedBy = actor, actor
 	audit := s.newAudit(ctx, actorID, actor, "iam.menu.create", "menu", menu.MenuCode, "success", nil)
 	if err := s.store.CreateMenu(ctx, menu, audit); err != nil {
 		if errors.Is(err, repository.ErrMenuCodeExists) {
@@ -492,7 +496,7 @@ func (s *Service) CreateMenu(ctx *core.Context, input MenuInput) (*model.Menu, e
 	return menu, nil
 }
 
-func (s *Service) UpdateMenu(ctx *core.Context, input MenuInput) (*model.Menu, error) {
+func (s *Service) UpdateMenu(ctx *servicecontext.Context, input MenuInput) (*model.Menu, error) {
 	if err := s.requirePermission(ctx, "iam.role.write"); err != nil {
 		return nil, err
 	}
@@ -505,7 +509,6 @@ func (s *Service) UpdateMenu(ctx *core.Context, input MenuInput) (*model.Menu, e
 	}
 	menu.ID = input.ID
 	actor, actorID := actorFromContext(ctx)
-	menu.UpdatedBy = actor
 	audit := s.newAudit(ctx, actorID, actor, "iam.menu.update", "menu", fmt.Sprintf("%d", menu.ID), "success", nil)
 	if err := s.store.UpdateMenu(ctx, menu, input.VersionNo, audit); err != nil {
 		if errors.Is(err, repository.ErrMenuCodeExists) {
@@ -528,7 +531,7 @@ func (s *Service) UpdateMenu(ctx *core.Context, input MenuInput) (*model.Menu, e
 	return menu, nil
 }
 
-func (s *Service) DeleteMenu(ctx *core.Context, menuID int64) error {
+func (s *Service) DeleteMenu(ctx *servicecontext.Context, menuID int64) error {
 	if err := s.requirePermission(ctx, "iam.role.write"); err != nil {
 		return err
 	}
@@ -590,15 +593,17 @@ func normalizeMenuInput(input MenuInput) (*model.Menu, error) {
 	if input.MenuType != "directory" && (input.ParentID == nil || *input.ParentID <= 0) {
 		return nil, appErrors.NewClientError("IAM_INVALID_ARGUMENT", map[string]string{"parent_id": "required_for_page"})
 	}
-	return &model.Menu{
+	menu := &model.Menu{
 		ParentID: input.ParentID, MenuName: name, MenuCode: code,
 		Path: optional(path), Component: optional(component), Icon: optional(icon),
 		SortOrder: input.SortOrder, MenuType: input.MenuType, Visible: input.Visible,
-		Status: input.Status, VersionNo: input.VersionNo,
-	}, nil
+		Status: input.Status,
+	}
+	menu.VersionNo = input.VersionNo
+	return menu, nil
 }
 
-func (s *Service) ListUserRoles(ctx *core.Context, userID int64) ([]model.Role, error) {
+func (s *Service) ListUserRoles(ctx *servicecontext.Context, userID int64) ([]model.Role, error) {
 	if err := s.requirePermission(ctx, "iam.user.read"); err != nil {
 		return nil, err
 	}
@@ -608,7 +613,7 @@ func (s *Service) ListUserRoles(ctx *core.Context, userID int64) ([]model.Role, 
 	return s.store.ListUserRoles(ctx, userID)
 }
 
-func (s *Service) ListRolePermissions(ctx *core.Context, roleID int64) ([]model.Permission, error) {
+func (s *Service) ListRolePermissions(ctx *servicecontext.Context, roleID int64) ([]model.Permission, error) {
 	if err := s.requirePermission(ctx, "iam.role.read"); err != nil {
 		return nil, err
 	}
@@ -618,7 +623,7 @@ func (s *Service) ListRolePermissions(ctx *core.Context, roleID int64) ([]model.
 	return s.store.ListRolePermissions(ctx, roleID)
 }
 
-func (s *Service) GrantRole(ctx *core.Context, userID, roleID int64) error {
+func (s *Service) GrantRole(ctx *servicecontext.Context, userID, roleID int64) error {
 	if userID <= 0 || roleID <= 0 {
 		return appErrors.NewClientError("IAM_INVALID_ARGUMENT", map[string]string{"role_grant": "invalid"})
 	}
@@ -632,7 +637,7 @@ func (s *Service) GrantRole(ctx *core.Context, userID, roleID int64) error {
 	return s.store.GrantRole(ctx, *actorID, userID, roleID, s.newAudit(ctx, actorID, actor, "iam.role.grant", "user_role", fmt.Sprintf("%d:%d", userID, roleID), "success", nil))
 }
 
-func (s *Service) RevokeRole(ctx *core.Context, userID, roleID int64) error {
+func (s *Service) RevokeRole(ctx *servicecontext.Context, userID, roleID int64) error {
 	if userID <= 0 || roleID <= 0 {
 		return appErrors.NewClientError("IAM_INVALID_ARGUMENT", map[string]string{"role_revoke": "invalid"})
 	}
@@ -646,14 +651,21 @@ func (s *Service) RevokeRole(ctx *core.Context, userID, roleID int64) error {
 	return s.store.RevokeRole(ctx, *actorID, userID, roleID, s.newAudit(ctx, actorID, actor, "iam.role.revoke", "user_role", fmt.Sprintf("%d:%d", userID, roleID), "success", nil))
 }
 
-func (s *Service) ListPermissionCatalog(ctx *core.Context) ([]model.Permission, error) {
+func (s *Service) ListPermissionCatalog(ctx *servicecontext.Context) ([]model.Permission, error) {
 	if err := s.requirePermission(ctx, "iam.role.read"); err != nil {
 		return nil, err
 	}
 	return s.store.ListPermissionCatalog(ctx)
 }
 
-func (s *Service) GrantPermission(ctx *core.Context, roleID, permissionID int64) error {
+func (s *Service) ListResourceCatalog(ctx *servicecontext.Context) ([]model.Resource, error) {
+	if err := s.requirePermission(ctx, "iam.role.read"); err != nil {
+		return nil, err
+	}
+	return s.store.ListResourceCatalog(ctx)
+}
+
+func (s *Service) GrantPermission(ctx *servicecontext.Context, roleID, permissionID int64) error {
 	if roleID <= 0 || permissionID <= 0 {
 		return appErrors.NewClientError("IAM_INVALID_ARGUMENT", map[string]string{"permission_grant": "invalid"})
 	}
@@ -668,7 +680,7 @@ func (s *Service) GrantPermission(ctx *core.Context, roleID, permissionID int64)
 		s.newAudit(ctx, actorID, actor, "iam.permission.grant", "role_permission", fmt.Sprintf("%d:%d", roleID, permissionID), "success", nil))
 }
 
-func (s *Service) RevokePermission(ctx *core.Context, roleID, permissionID int64) error {
+func (s *Service) RevokePermission(ctx *servicecontext.Context, roleID, permissionID int64) error {
 	if roleID <= 0 || permissionID <= 0 {
 		return appErrors.NewClientError("IAM_INVALID_ARGUMENT", map[string]string{"permission_revoke": "invalid"})
 	}
@@ -682,7 +694,7 @@ func (s *Service) RevokePermission(ctx *core.Context, roleID, permissionID int64
 	return s.store.RevokePermission(ctx, *actorID, roleID, permissionID, s.newAudit(ctx, actorID, actor, "iam.permission.revoke", "role_permission", fmt.Sprintf("%d:%d", roleID, permissionID), "success", nil))
 }
 
-func (s *Service) SetUserStatus(ctx *core.Context, userID int64, status string) error {
+func (s *Service) SetUserStatus(ctx *servicecontext.Context, userID int64, status string) error {
 	if userID <= 0 || (status != "active" && status != "disabled") {
 		return appErrors.NewClientError("IAM_INVALID_ARGUMENT", map[string]string{"user_status": "invalid"})
 	}
@@ -693,10 +705,10 @@ func (s *Service) SetUserStatus(ctx *core.Context, userID int64, status string) 
 	if err := s.requirePermission(ctx, "iam.user.write"); err != nil {
 		return err
 	}
-	return s.store.SetUserStatus(ctx, *actorID, userID, status, actor, s.newAudit(ctx, actorID, actor, "iam.user.status", "user", fmt.Sprintf("%d", userID), "success", nil))
+	return s.store.SetUserStatus(ctx, *actorID, userID, status, s.newAudit(ctx, actorID, actor, "iam.user.status", "user", fmt.Sprintf("%d", userID), "success", nil))
 }
 
-func (s *Service) ResetUserPassword(ctx *core.Context, userID int64, newPassword string) error {
+func (s *Service) ResetUserPassword(ctx *servicecontext.Context, userID int64, newPassword string) error {
 	if userID <= 0 || !validPasswordLength(newPassword) {
 		return appErrors.NewClientError("IAM_INVALID_ARGUMENT", map[string]string{"password": "must_be_8_chars_max_1024_bytes"})
 	}
@@ -712,10 +724,10 @@ func (s *Service) ResetUserPassword(ctx *core.Context, userID int64, newPassword
 		return fmt.Errorf("hash reset IAM password: %w", err)
 	}
 	audit := s.newAudit(ctx, actorID, actor, "iam.user.password_reset", "user", fmt.Sprintf("%d", userID), "success", nil)
-	return s.store.ResetUserPassword(ctx, *actorID, userID, salt, hash, PasswordHashVersion, actor, audit)
+	return s.store.ResetUserPassword(ctx, *actorID, userID, salt, hash, PasswordHashVersion, audit)
 }
 
-func (s *Service) ChangeOwnPassword(ctx *core.Context, currentPassword, newPassword string) error {
+func (s *Service) ChangeOwnPassword(ctx *servicecontext.Context, currentPassword, newPassword string) error {
 	userID, err := parseUserID(ctxUserID(ctx))
 	if err != nil {
 		return appErrors.NewAuthError("IAM_UNAUTHENTICATED", appErrors.AuthUnauthenticated)
@@ -746,7 +758,7 @@ func (s *Service) ChangeOwnPassword(ctx *core.Context, currentPassword, newPassw
 	return s.store.ChangeOwnPassword(ctx, userID, *user.PasswordHash, salt, hash, PasswordHashVersion, currentSessionID, audit)
 }
 
-func (s *Service) requirePermission(ctx *core.Context, permission string) error {
+func (s *Service) requirePermission(ctx *servicecontext.Context, permission string) error {
 	if ctx == nil {
 		return appErrors.NewAuthError("IAM_UNAUTHENTICATED", appErrors.AuthUnauthenticated)
 	}
@@ -765,6 +777,7 @@ func (s *Service) requirePermission(ctx *core.Context, permission string) error 
 }
 
 func (s *Service) BootstrapAdmin(ctx context.Context, username, displayName, password string) error {
+	serviceCtx := servicecontext.New(ctx, servicecontext.Principal{ID: "bootstrap", Name: "bootstrap"}, servicecontext.RequestMeta{})
 	username = strings.ToLower(strings.TrimSpace(username))
 	displayName = strings.TrimSpace(displayName)
 	if username == "" || len(username) > 64 || len(displayName) > 128 {
@@ -786,14 +799,14 @@ func (s *Service) BootstrapAdmin(ctx context.Context, username, displayName, pas
 	}
 	user := &model.User{Username: username, DisplayName: displayName, WebAuthnUserHandle: handle, PasswordSalt: &salt, PasswordHash: &hash, PasswordHashVersion: int16Ptr(PasswordHashVersion), AuthSource: "local", UserStatus: "active", MustChangePassword: true}
 	audit := &model.AuditLog{EventID: eventID(), UserName: "bootstrap", Action: "iam.bootstrap", TargetType: "user", TargetID: stringPtr(username), Result: "success", OccurredAt: time.Now().UTC()}
-	return s.store.BootstrapAdmin(ctx, user, audit)
+	return s.store.BootstrapAdmin(serviceCtx, user, audit)
 }
 
 func validPasswordLength(password string) bool {
 	return utf8.RuneCountInString(password) >= minPasswordLength && len(password) <= maxPasswordBytes
 }
 
-func (s *Service) newAudit(ctx *core.Context, actorID *int64, actor, action, targetType, targetID, result string, reason *string) *model.AuditLog {
+func (s *Service) newAudit(ctx *servicecontext.Context, actorID *int64, actor, action, targetType, targetID, result string, reason *string) *model.AuditLog {
 	var sourceIP, requestID *string
 	if ctx != nil {
 		if ctx.ClientIP() != "" {
@@ -903,7 +916,7 @@ func parseUserID(value string) (int64, error) {
 	return id, nil
 }
 
-func actorFromContext(ctx *core.Context) (string, *int64) {
+func actorFromContext(ctx *servicecontext.Context) (string, *int64) {
 	if ctx == nil {
 		return "system", nil
 	}

@@ -13,7 +13,10 @@ import (
 	"velotrust/pkg/jrpc"
 )
 
-type Handler struct{ service *appIAM.Service }
+type Handler struct {
+	service       *appIAM.Service
+	methodCatalog []MethodCatalogItem
+}
 
 func New(service *appIAM.Service) (*Handler, error) {
 	if service == nil {
@@ -49,6 +52,8 @@ var methodPolicies = map[string]middleware.IAMMethodPolicy{
 	"GrantRole":                 {Authenticated: true, Permission: "iam.role.grant"},
 	"RevokeRole":                {Authenticated: true, Permission: "iam.role.grant"},
 	"ListPermissionCatalog":     {Authenticated: true, Permission: "iam.role.read"},
+	"ListResourceCatalog":       {Authenticated: true, Permission: "iam.role.read"},
+	"ListMethodCatalog":         {Authenticated: true, Permission: "iam.role.read"},
 	"GrantPermission":           {Authenticated: true, Permission: "iam.role.write"},
 	"RevokePermission":          {Authenticated: true, Permission: "iam.role.write"},
 	"ListMenus":                 {Authenticated: true, Permission: "iam.role.read"},
@@ -65,14 +70,66 @@ func Register(server *jrpc.Server, service *appIAM.Service) error {
 	if err := server.RegisterServiceWithOptions(handler, "IAM", jrpc.ServiceOptions{PublicMethods: []string{"Login", "BeginPasskeyLogin", "FinishPasskeyLogin"}}, middleware.RequireIAMMethodPolicy(service, methodPolicies)); err != nil {
 		return err
 	}
-	for _, method := range server.Methods() {
-		if method.Service == "IAM" {
-			if _, ok := methodPolicies[method.Method]; !ok {
-				return fmt.Errorf("IAM JRPC method %s has no access declaration", method.Method)
-			}
+	catalog, err := buildMethodCatalog(server.Methods())
+	if err != nil {
+		return err
+	}
+	handler.methodCatalog = catalog
+	return nil
+}
+
+func buildMethodCatalog(methods []jrpc.MethodDescriptor) ([]MethodCatalogItem, error) {
+	catalog := make([]MethodCatalogItem, 0)
+	for _, method := range methods {
+		if method.Service != "IAM" {
+			continue
 		}
+		policy, ok := methodPolicies[method.Method]
+		if !ok {
+			return nil, fmt.Errorf("IAM JRPC method %s has no access declaration", method.Method)
+		}
+		if err := validateMethodPolicy(method.Method, policy); err != nil {
+			return nil, err
+		}
+		expectedAccess := jrpc.AccessAuthenticated
+		if policy.Public {
+			expectedAccess = jrpc.AccessPublic
+		}
+		if method.Access != expectedAccess {
+			return nil, fmt.Errorf("IAM JRPC method %s transport access does not match its policy", method.Method)
+		}
+		catalog = append(catalog, MethodCatalogItem{
+			MethodCode:     method.Service + "_" + method.Method,
+			ServiceName:    method.Service,
+			MethodName:     method.Method,
+			PolicyType:     methodPolicyType(policy),
+			PermissionCode: policy.Permission,
+		})
+	}
+	return catalog, nil
+}
+
+func validateMethodPolicy(method string, policy middleware.IAMMethodPolicy) error {
+	if policy.Public {
+		if policy.Authenticated || policy.Permission != "" {
+			return fmt.Errorf("IAM JRPC method %s has conflicting public and protected access declarations", method)
+		}
+		return nil
+	}
+	if !policy.Authenticated {
+		return fmt.Errorf("IAM JRPC method %s is not explicitly public or authenticated", method)
 	}
 	return nil
+}
+
+func methodPolicyType(policy middleware.IAMMethodPolicy) string {
+	if policy.Permission != "" {
+		return "permission"
+	}
+	if policy.Public {
+		return "public"
+	}
+	return "authenticated"
 }
 
 type LoginArgs struct {
@@ -109,7 +166,7 @@ func (h *Handler) Login(ctx *jrpc.Context, args *LoginArgs) (*LoginReply, error)
 			userAgent = ctx.HttpRequest.UserAgent()
 		}
 	}
-	return h.service.LoginWithTOTP(requestContext(ctx), args.Username, args.Password, args.TOTPCode, sourceIP, userAgent, requestID)
+	return h.service.LoginWithTOTP(middleware.AuthenticationContext(ctx), args.Username, args.Password, args.TOTPCode, sourceIP, userAgent, requestID)
 }
 
 type SetupTOTPArgs struct {
@@ -157,7 +214,7 @@ type BeginPasskeyLoginReply struct {
 }
 
 func (h *Handler) BeginPasskeyLogin(ctx *jrpc.Context, _ *struct{}) (*BeginPasskeyLoginReply, error) {
-	ceremony, err := h.service.BeginPasskeyLogin(requestContext(ctx), requestOrigin(ctx))
+	ceremony, err := h.service.BeginPasskeyLogin(middleware.AuthenticationContext(ctx), requestOrigin(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +237,7 @@ func (h *Handler) FinishPasskeyLogin(ctx *jrpc.Context, args *FinishPasskeyLogin
 			userAgent = ctx.HttpRequest.UserAgent()
 		}
 	}
-	return h.service.FinishPasskeyLogin(requestContext(ctx), args.ChallengeID, requestOrigin(ctx), args.Response, sourceIP, userAgent, requestID)
+	return h.service.FinishPasskeyLogin(middleware.AuthenticationContext(ctx), args.ChallengeID, requestOrigin(ctx), args.Response, sourceIP, userAgent, requestID)
 }
 
 type BeginPasskeyRegistrationReply struct {
@@ -233,7 +290,7 @@ func (h *Handler) Logout(ctx *jrpc.Context, _ *struct{}) (*LogoutReply, error) {
 	if ctx == nil || ctx.Identity == nil {
 		return nil, errors.New("IAM session is required")
 	}
-	if err := h.service.Logout(requestContext(ctx), ctx.Identity.EntityID()); err != nil {
+	if err := h.service.Logout(middleware.ServiceContext(ctx), ctx.Identity.EntityID()); err != nil {
 		return nil, err
 	}
 	return &LogoutReply{Success: true}, nil
@@ -501,12 +558,40 @@ type ListPermissionCatalogReply struct {
 	Items []model.Permission `json:"items"`
 }
 
+type ListResourceCatalogReply struct {
+	Items []model.Resource `json:"items"`
+}
+
+type MethodCatalogItem struct {
+	MethodCode     string `json:"method_code"`
+	ServiceName    string `json:"service_name"`
+	MethodName     string `json:"method_name"`
+	PolicyType     string `json:"policy_type"`
+	PermissionCode string `json:"permission_code,omitempty"`
+}
+
+type ListMethodCatalogReply struct {
+	Items []MethodCatalogItem `json:"items"`
+}
+
 func (h *Handler) ListPermissionCatalog(ctx *jrpc.Context, _ *struct{}) (*ListPermissionCatalogReply, error) {
 	permissions, err := h.service.ListPermissionCatalog(middleware.ServiceContext(ctx))
 	if err != nil {
 		return nil, err
 	}
 	return &ListPermissionCatalogReply{Items: permissions}, nil
+}
+
+func (h *Handler) ListResourceCatalog(ctx *jrpc.Context, _ *struct{}) (*ListResourceCatalogReply, error) {
+	resources, err := h.service.ListResourceCatalog(middleware.ServiceContext(ctx))
+	if err != nil {
+		return nil, err
+	}
+	return &ListResourceCatalogReply{Items: resources}, nil
+}
+
+func (h *Handler) ListMethodCatalog(_ *jrpc.Context, _ *struct{}) (*ListMethodCatalogReply, error) {
+	return &ListMethodCatalogReply{Items: append([]MethodCatalogItem(nil), h.methodCatalog...)}, nil
 }
 
 type ListRolePermissionsArgs struct {

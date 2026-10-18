@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { KeyRound, ListChecks, Plus, RefreshCw } from 'lucide-react';
-import { iamApi, IAMMenu, IAMRole } from '../../services/iam';
+import { KeyRound, Layers3, ListChecks, Plus, RefreshCw } from 'lucide-react';
+import { iamApi, IAMMenu, IAMPermission, IAMRole } from '../../services/iam';
 import { useAuth } from '../../contexts/AuthContext';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
@@ -72,6 +72,12 @@ export const Roles: React.FC = () => {
   const [menuSaving, setMenuSaving] = useState(false);
   const [allMenus, setAllMenus] = useState<IAMMenu[]>([]);
   const [selectedMenuIDs, setSelectedMenuIDs] = useState<Set<number>>(new Set());
+  const [permissionRole, setPermissionRole] = useState<IAMRole | null>(null);
+  const [permissionOpen, setPermissionOpen] = useState(false);
+  const [permissionLoading, setPermissionLoading] = useState(false);
+  const [permissionCatalog, setPermissionCatalog] = useState<IAMPermission[]>([]);
+  const [selectedPermissionIDs, setSelectedPermissionIDs] = useState<Set<number>>(new Set());
+  const [savingPermissionID, setSavingPermissionID] = useState<number | null>(null);
 
   const loadRoles = async () => {
     setLoading(true);
@@ -124,6 +130,66 @@ export const Roles: React.FC = () => {
       setMenuLoading(false);
     }
   };
+
+  const openPermissionEditor = async (role: IAMRole) => {
+    setPermissionRole(role);
+    setPermissionOpen(true);
+    setPermissionLoading(true);
+    try {
+      const [catalog, assigned] = await Promise.all([
+        iamApi.listPermissionCatalog(),
+        iamApi.listRolePermissions(role.id),
+      ]);
+      setPermissionCatalog(catalog);
+      setSelectedPermissionIDs(new Set(assigned.map((permission) => permission.id)));
+    } catch (err) {
+      error(err instanceof Error ? err.message : '加载角色权限失败。');
+      setPermissionOpen(false);
+    } finally {
+      setPermissionLoading(false);
+    }
+  };
+
+  const togglePermission = async (permission: IAMPermission) => {
+    if (!permissionRole) return;
+    const wasAssigned = selectedPermissionIDs.has(permission.id);
+    setSavingPermissionID(permission.id);
+    try {
+      if (wasAssigned) await iamApi.revokePermission(permissionRole.id, permission.id);
+      else await iamApi.grantPermission(permissionRole.id, permission.id);
+      setSelectedPermissionIDs((current) => {
+        const next = new Set(current);
+        if (wasAssigned) next.delete(permission.id);
+        else next.add(permission.id);
+        return next;
+      });
+      success(wasAssigned ? `已撤销「${permission.permission_name}」` : `已授予「${permission.permission_name}」`);
+    } catch (err) {
+      error(err instanceof Error ? err.message : '更新角色权限失败。');
+      return;
+    } finally {
+      setSavingPermissionID(null);
+    }
+    try {
+      await refreshCurrentUser();
+    } catch {
+      error('权限已保存，但当前会话权限刷新失败；请重新登录以同步最新权限。');
+    }
+  };
+
+  const permissionGroups = (() => {
+    const groups = new Map<number, { name: string; code: string; permissions: IAMPermission[] }>();
+    for (const permission of permissionCatalog) {
+      const group = groups.get(permission.resource_id) ?? {
+        name: permission.resource_name || permission.resource_code || '未命名资源',
+        code: permission.resource_code || '',
+        permissions: [],
+      };
+      group.permissions.push(permission);
+      groups.set(permission.resource_id, group);
+    }
+    return [...groups.entries()].sort((a, b) => a[1].code.localeCompare(b[1].code));
+  })();
 
   const toggleMenu = (node: MenuNode, checked: boolean) => {
     const descendants = descendantIDs(node);
@@ -218,7 +284,7 @@ export const Roles: React.FC = () => {
       </div>
 
       <Card className="overflow-hidden">
-        <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.3fr)_auto_auto_auto] gap-4 border-b border-slate-200 bg-slate-50 px-5 py-3 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+        <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.3fr)_auto_auto_minmax(220px,auto)] gap-4 border-b border-slate-200 bg-slate-50 px-5 py-3 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
           <span>名称</span><span>编码</span><span>说明</span><span>类型</span><span>状态</span><span className="text-right">操作</span>
         </div>
         {loading ? (
@@ -226,23 +292,28 @@ export const Roles: React.FC = () => {
         ) : roles.length === 0 ? (
           <div className="p-8"><EmptyState icon={KeyRound} title="暂无角色" description="有权限的管理员可以创建角色。" /></div>
         ) : roles.map((role) => (
-          <div key={role.id} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.3fr)_auto_auto_auto] items-center gap-4 border-b border-slate-100 px-5 py-4 last:border-0">
+          <div key={role.id} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.3fr)_auto_auto_minmax(220px,auto)] items-center gap-4 border-b border-slate-100 px-5 py-4 last:border-0">
             <div className="min-w-0"><div className="truncate text-sm font-semibold text-slate-800">{role.role_name}</div><div className="mt-1 text-[11px] text-slate-400">创建于 {formatDateTime(role.created_at)}</div></div>
             <span className="truncate font-mono text-xs text-slate-600">{role.role_code}</span>
             <span className="truncate text-xs text-slate-500">{role.description || '—'}</span>
             <Badge variant={role.is_system ? 'primary' : 'outline'}>{role.is_system ? '系统' : '自定义'}</Badge>
             <Badge variant={role.status === 'active' ? 'success' : 'slate'}>{role.status}</Badge>
             {canWrite ? (
-              <Button variant="outline" size="sm" onClick={() => void openMenuEditor(role)} disabled={role.is_system} title={role.is_system ? '系统角色菜单不可修改' : '配置角色菜单'}>
-                <ListChecks className="h-4 w-4" />配置菜单
-              </Button>
+              <div className="flex flex-wrap justify-end gap-2">
+                <Button variant="outline" size="sm" onClick={() => void openMenuEditor(role)} disabled={role.is_system || role.status !== 'active'} title={role.is_system ? '系统角色菜单不可修改' : '配置角色菜单'}>
+                  <ListChecks className="h-4 w-4" />配置菜单
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => void openPermissionEditor(role)} disabled={role.status !== 'active'} title={role.status !== 'active' ? '停用角色不可修改权限' : '配置角色操作权限'}>
+                  <Layers3 className="h-4 w-4" />配置权限
+                </Button>
+              </div>
             ) : <span className="text-right text-xs text-slate-400">—</span>}
           </div>
         ))}
       </Card>
 
       <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 text-xs leading-5 text-blue-800">
-        菜单授权只影响角色可见的导航和页面入口。JRPC 方法与业务操作仍由 IAM 权限码独立校验；系统角色菜单保持只读。
+        菜单授权决定导航可见性；资源操作权限决定业务操作授权。JRPC 方法映射由 Management 代码策略控制。系统角色菜单不可修改，系统角色权限可增加但不可撤销。
       </div>
 
       <Dialog isOpen={createOpen} onClose={() => setCreateOpen(false)} title="创建 IAM 角色" description="名称与唯一编码保存至 Management。" maxWidth="lg">
@@ -252,6 +323,75 @@ export const Roles: React.FC = () => {
           <label className="block space-y-1.5 text-xs font-medium text-slate-700">说明<Input maxLength={512} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} placeholder="可选" /></label>
           <div className="flex justify-end gap-2 pt-2"><Button type="button" variant="outline" onClick={() => setCreateOpen(false)}>取消</Button><Button type="submit" isLoading={saving}>创建角色</Button></div>
         </form>
+      </Dialog>
+
+      <Dialog
+        isOpen={permissionOpen}
+        onClose={() => setPermissionOpen(false)}
+        title={permissionRole ? `配置权限 · ${permissionRole.role_name}` : '配置角色权限'}
+        description="按资源查看操作权限。每次授权变更会立即写入 IAM 角色权限关系并由服务端复核。"
+        maxWidth="3xl"
+      >
+        <div className="space-y-4">
+          {permissionRole?.is_system && (
+            <div className="rounded-lg border border-amber-100 bg-amber-50 px-4 py-3 text-xs leading-5 text-amber-800">
+              系统角色的现有权限保持只读；管理员可以增加自己拥有的权限，系统角色权限不可撤销。
+            </div>
+          )}
+          <div className="max-h-[62vh] space-y-4 overflow-y-auto pr-1">
+            {permissionLoading ? (
+              <div className="p-8 text-center text-sm text-slate-500">正在加载资源和角色授权…</div>
+            ) : permissionGroups.length === 0 ? (
+              <div className="p-8 text-center text-sm text-slate-500">当前没有可配置的 active 权限。</div>
+            ) : permissionGroups.map(([resourceID, group]) => (
+              <Card key={resourceID} className="overflow-hidden">
+                <div className="flex items-center justify-between gap-3 border-b border-slate-100 bg-slate-50 px-4 py-3">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <Layers3 className="h-4 w-4 shrink-0 text-indigo-600" />
+                    <div className="min-w-0">
+                      <div className="truncate text-xs font-semibold text-slate-800">{group.name}</div>
+                      <div className="truncate font-mono text-[10px] text-slate-400">{group.code}</div>
+                    </div>
+                  </div>
+                  <Badge variant="outline">{group.permissions.length} 项</Badge>
+                </div>
+                <div className="divide-y divide-slate-100">
+                  {group.permissions.map((permission) => {
+                    const checked = selectedPermissionIDs.has(permission.id);
+                    const lockedSystemPermission = Boolean(permissionRole?.is_system && checked);
+                    return (
+                      <label key={permission.id} className="flex cursor-pointer items-start gap-3 px-4 py-3 hover:bg-slate-50/70">
+                        <input
+                          type="checkbox"
+                          aria-label={`${checked ? '撤销' : '授予'}${permission.permission_name}`}
+                          className="mt-1 h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+                          checked={checked}
+                          disabled={!canWrite || permissionLoading || savingPermissionID !== null || permission.status !== 'active' || lockedSystemPermission}
+                          onChange={() => void togglePermission(permission)}
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="flex flex-wrap items-center gap-2 text-xs font-medium text-slate-800">
+                            <span>{permission.permission_name}</span>
+                            <Badge variant="outline">{permission.action_code}</Badge>
+                            {checked && <Badge variant="primary">已授予</Badge>}
+                            {lockedSystemPermission && <Badge variant="slate">系统权限锁定</Badge>}
+                          </span>
+                          <span className="mt-1 block break-all font-mono text-[10px] text-slate-500">{permission.permission_code}</span>
+                          {permission.description && <span className="mt-1 block text-[11px] leading-5 text-slate-500">{permission.description}</span>}
+                        </span>
+                        {savingPermissionID === permission.id && <span className="text-[10px] text-slate-400">保存中…</span>}
+                      </label>
+                    );
+                  })}
+                </div>
+              </Card>
+            ))}
+          </div>
+          {!canWrite && <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">当前账号只有读取权限；修改角色授权需要 iam.role.write。</div>}
+          <div className="flex justify-end border-t border-slate-100 pt-3">
+            <Button type="button" variant="outline" onClick={() => setPermissionOpen(false)}>关闭</Button>
+          </div>
+        </div>
       </Dialog>
 
       <Dialog

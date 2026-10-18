@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
+	servicecontext "velotrust/management/internal/context"
 	model "velotrust/management/internal/model/iam"
-	core "velotrust/management/internal/service"
 	appErrors "velotrust/pkg/errors"
 )
 
@@ -15,7 +15,7 @@ type TOTPSetup struct {
 	OTPAuthURI string `json:"otpauth_uri"`
 }
 
-func (s *Service) SetupTOTP(ctx *core.Context, password string) (*TOTPSetup, error) {
+func (s *Service) SetupTOTP(ctx *servicecontext.Context, password string) (*TOTPSetup, error) {
 	userID, err := parseUserID(ctxUserID(ctx))
 	if err != nil {
 		return nil, appErrors.NewAuthError("IAM_UNAUTHENTICATED", appErrors.AuthUnauthenticated)
@@ -48,14 +48,14 @@ func (s *Service) SetupTOTP(ctx *core.Context, password string) (*TOTPSetup, err
 	}
 	actor, actorID := actorFromContext(ctx)
 	audit := s.newAudit(ctx, actorID, actor, "iam.totp.setup", "authenticator", fmt.Sprintf("%d:totp", userID), "success", nil)
-	row := &model.UserAuthenticator{UserID: userID, AuthenticatorType: "totp", SecretCiphertext: ciphertext, EncryptionKeyVersion: version, Status: "pending", CreatedAt: time.Now().UTC()}
+	row := &model.UserAuthenticator{UserID: userID, AuthenticatorType: "totp", SecretCiphertext: ciphertext, EncryptionKeyVersion: version, Status: "pending"}
 	if err := s.store.SavePendingTOTP(ctx, row, audit); err != nil {
 		return nil, fmt.Errorf("save pending TOTP authenticator: %w", err)
 	}
 	return &TOTPSetup{Secret: secret, OTPAuthURI: totpURI(secret, "VeloTrust", user.Username)}, nil
 }
 
-func (s *Service) ConfirmTOTP(ctx *core.Context, code string) error {
+func (s *Service) ConfirmTOTP(ctx *servicecontext.Context, code string) error {
 	userID, err := parseUserID(ctxUserID(ctx))
 	if err != nil {
 		return appErrors.NewAuthError("IAM_UNAUTHENTICATED", appErrors.AuthUnauthenticated)
@@ -87,7 +87,7 @@ func (s *Service) ConfirmTOTP(ctx *core.Context, code string) error {
 	return nil
 }
 
-func (s *Service) DisableTOTP(ctx *core.Context, password, code string) error {
+func (s *Service) DisableTOTP(ctx *servicecontext.Context, password, code string) error {
 	userID, err := parseUserID(ctxUserID(ctx))
 	if err != nil {
 		return appErrors.NewAuthError("IAM_UNAUTHENTICATED", appErrors.AuthUnauthenticated)

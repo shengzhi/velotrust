@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/robfig/cron/v3"
+	servicecontext "velotrust/management/internal/context"
 	model "velotrust/management/internal/model/schedule"
 	db "velotrust/management/internal/repository"
 	"velotrust/shared/constants"
@@ -18,7 +19,7 @@ import (
 
 type scheduledEntry struct {
 	cronEntry      cron.EntryID
-	version        int
+	version        int64
 	cron, taskCode string
 }
 
@@ -73,7 +74,8 @@ func (m *ScheduleManager) Start(ctx context.Context, syncEvery time.Duration) {
 }
 func (m *ScheduleManager) Stop() { stopped := m.cron.Stop(); <-stopped.Done() }
 
-func (m *ScheduleManager) Sync(_ context.Context) {
+func (m *ScheduleManager) Sync(ctx context.Context) {
+	ctx = servicecontext.FromContext(ctx)
 	var definitions []model.ScheduledTask
 	if err := db.Engine().Where("is_del=?", false).Find(&definitions); err != nil {
 		slog.Error("load scheduled tasks", "error", err)
@@ -115,7 +117,7 @@ func (m *ScheduleManager) Sync(_ context.Context) {
 			continue
 		}
 		m.entries[definition.ID] = scheduledEntry{cronEntry: id, version: definition.VersionNo, cron: expr, taskCode: definition.TaskCode}
-		m.saveNextRun(definition, m.cron.Entry(id).Next)
+		m.saveNextRun(ctx, definition, m.cron.Entry(id).Next)
 	}
 	for id, entry := range m.entries {
 		if _, ok := seen[id]; !ok {
@@ -148,6 +150,7 @@ func (m *ScheduleManager) run(taskID string) {
 	started := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), m.timeout)
 	defer cancel()
+	ctx = servicecontext.NewSystem(ctx)
 	result, err := implementation.Run(ctx)
 	finished := time.Now()
 	status, message := "SUCCESS", ""
@@ -157,9 +160,10 @@ func (m *ScheduleManager) run(taskID string) {
 		status, message = "FAILED", redact(err.Error())
 	}
 	duration := finished.Sub(started).Milliseconds()
+	actorName := servicecontext.FromContext(ctx).UserName()
 	execution := &model.ScheduledTaskExecution{ID: newID(), TaskID: definition.ID, ScheduledAt: started, StartedAt: started, FinishedAt: &finished, Status: status, DurationMS: &duration, ErrorMessage: message, ResultSummary: redact(result.Summary)}
-	execution.CreateNew("system")
-	if _, err := db.Save(execution); err != nil {
+	execution.CreateNew(actorName)
+	if _, err := db.SaveContext(servicecontext.FromContext(ctx), execution); err != nil {
 		slog.Error("save task execution", "error", err)
 	}
 	m.mu.Lock()
@@ -173,21 +177,21 @@ func (m *ScheduleManager) run(taskID string) {
 	if !next.IsZero() {
 		definition.NextRunAt = &next
 	}
-	definition.Update("system")
+	definition.Update(actorName)
 	definition.Cols("last_run_at", "next_run_at")
-	if _, err := db.Save(&definition); err != nil {
+	if _, err := db.SaveContext(servicecontext.FromContext(ctx), &definition); err != nil {
 		slog.Error("update task runtime state", "error", err)
 	}
 }
 
-func (m *ScheduleManager) saveNextRun(task *model.ScheduledTask, next time.Time) {
+func (m *ScheduleManager) saveNextRun(ctx context.Context, task *model.ScheduledTask, next time.Time) {
 	if next.IsZero() {
 		return
 	}
 	task.NextRunAt = &next
-	task.Update("system")
+	task.Update(servicecontext.FromContext(ctx).UserName())
 	task.Cols("next_run_at")
-	if _, err := db.Save(task); err != nil {
+	if _, err := db.SaveContext(servicecontext.FromContext(ctx), task); err != nil {
 		slog.Error("update next task run", "error", err)
 	}
 }

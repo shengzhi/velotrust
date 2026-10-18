@@ -15,9 +15,9 @@ import (
 
 	"github.com/go-webauthn/webauthn/protocol"
 	webauthnlib "github.com/go-webauthn/webauthn/webauthn"
+	servicecontext "velotrust/management/internal/context"
 	model "velotrust/management/internal/model/iam"
 	repository "velotrust/management/internal/repository/iam"
-	core "velotrust/management/internal/service"
 	appErrors "velotrust/pkg/errors"
 )
 
@@ -66,7 +66,7 @@ func (u *webAuthnUser) WebAuthnName() string                          { return u
 func (u *webAuthnUser) WebAuthnDisplayName() string                   { return u.user.DisplayName }
 func (u *webAuthnUser) WebAuthnCredentials() []webauthnlib.Credential { return u.credentials }
 
-func (s *Service) BeginPasskeyRegistration(ctx *core.Context, origin string) (*PasskeyRegistrationStart, error) {
+func (s *Service) BeginPasskeyRegistration(ctx *servicecontext.Context, origin string) (*PasskeyRegistrationStart, error) {
 	if s.webAuthn == nil || s.ceremonies == nil {
 		return nil, errors.New("WebAuthn is not configured")
 	}
@@ -111,7 +111,7 @@ func (s *Service) BeginPasskeyRegistration(ctx *core.Context, origin string) (*P
 	return &PasskeyRegistrationStart{ChallengeID: challengeID, Options: options}, nil
 }
 
-func (s *Service) FinishPasskeyRegistration(ctx *core.Context, challengeID, credentialName, origin string, response []byte) error {
+func (s *Service) FinishPasskeyRegistration(ctx *servicecontext.Context, challengeID, credentialName, origin string, response []byte) error {
 	if s.webAuthn == nil || s.ceremonies == nil {
 		return errors.New("WebAuthn is not configured")
 	}
@@ -162,12 +162,13 @@ func (s *Service) FinishPasskeyRegistration(ctx *core.Context, challengeID, cred
 		UserID: userID, RPID: s.opts.WebAuthnRPID, CredentialID: credential.ID, PublicKeyCOSE: credential.PublicKey,
 		SignatureCount: int64(credential.Authenticator.SignCount), AAGUID: credential.Authenticator.AAGUID, Transports: string(transports),
 		BackupEligible: credential.Flags.BackupEligible, BackupState: credential.Flags.BackupState,
-		CredentialName: strings.TrimSpace(credentialName), Status: "active", CreatedAt: time.Now().UTC(),
+		CredentialName: strings.TrimSpace(credentialName), Status: "active",
 	}
 	return s.store.CreateWebAuthnCredential(ctx, stored, audit)
 }
 
 func (s *Service) BeginPasskeyLogin(ctx context.Context, origin string) (*PasskeyLoginStart, error) {
+	serviceCtx := servicecontext.FromContext(ctx)
 	if s.webAuthn == nil || s.ceremonies == nil {
 		return nil, errors.New("WebAuthn is not configured")
 	}
@@ -181,7 +182,7 @@ func (s *Service) BeginPasskeyLogin(ctx context.Context, origin string) (*Passke
 	if err != nil {
 		return nil, fmt.Errorf("begin Passkey login: %w", err)
 	}
-	challengeID, err := s.saveChallenge(ctx, "webauthn_authentication", nil, origin, session)
+	challengeID, err := s.saveChallenge(serviceCtx, "webauthn_authentication", nil, origin, session)
 	if err != nil {
 		return nil, err
 	}
@@ -189,13 +190,14 @@ func (s *Service) BeginPasskeyLogin(ctx context.Context, origin string) (*Passke
 }
 
 func (s *Service) FinishPasskeyLogin(ctx context.Context, challengeID, origin string, response []byte, sourceIP, userAgent, requestID string) (*SessionGrant, error) {
+	serviceCtx := servicecontext.FromContext(ctx)
 	if s.webAuthn == nil || s.ceremonies == nil {
 		return nil, errors.New("WebAuthn is not configured")
 	}
 	if err := s.validateOrigin(origin); err != nil {
 		return nil, invalidLogin()
 	}
-	state, challenge, err := s.consumeChallenge(ctx, challengeID, "webauthn_authentication")
+	state, challenge, err := s.consumeChallenge(serviceCtx, challengeID, "webauthn_authentication")
 	if err != nil || challenge.Origin == nil || *challenge.Origin != origin {
 		return nil, invalidLogin()
 	}
@@ -204,7 +206,7 @@ func (s *Service) FinishPasskeyLogin(ctx context.Context, challengeID, origin st
 		if len(userHandle) == 0 || len(rawID) == 0 {
 			return nil, errors.New("discoverable Passkey response lacks a credential ID or user handle")
 		}
-		user, rows, findErr := s.store.FindUserByCredential(ctx, s.opts.WebAuthnRPID, rawID)
+		user, rows, findErr := s.store.FindUserByCredential(serviceCtx, s.opts.WebAuthnRPID, rawID)
 		if findErr != nil {
 			return nil, findErr
 		}
@@ -230,7 +232,7 @@ func (s *Service) FinishPasskeyLogin(ctx context.Context, challengeID, origin st
 	}
 	stored.SignatureCount = int64(credential.Authenticator.SignCount)
 	stored.BackupState = credential.Flags.BackupState
-	if err := s.store.UpdateWebAuthnCredentialUse(ctx, stored); err != nil {
+	if err := s.store.UpdateWebAuthnCredentialUse(serviceCtx, stored); err != nil {
 		return nil, invalidLogin()
 	}
 	rawToken, tokenHash, err := newToken()
@@ -244,13 +246,13 @@ func (s *Service) FinishPasskeyLogin(ctx context.Context, challengeID, origin st
 	now := time.Now().UTC()
 	session := &model.UserSession{SessionID: sessionID, UserID: candidate.user.ID, TokenHash: tokenHash, AuthLevel: "passkey", IssuedAt: now, ExpiresAt: now.Add(s.opts.SessionAbsoluteTTL), LastSeenAt: &now, SourceIP: optional(sourceIP), UserAgent: optional(userAgent), Status: "active"}
 	loginLog := s.loginLog(candidate.user, "passkey", "success", "", sourceIP, userAgent, requestID, sessionID)
-	if err := s.store.CreateLoginSession(ctx, session, loginLog, sourceIP, "", ""); err != nil {
+	if err := s.store.CreateLoginSession(serviceCtx, session, loginLog, sourceIP, "", ""); err != nil {
 		return nil, fmt.Errorf("persist Passkey login: %w", err)
 	}
 	return &SessionGrant{AccessToken: rawToken, TokenType: "Bearer", ExpiresAt: now.Add(s.opts.SessionIdleTTL), User: view(candidate.user)}, nil
 }
 
-func (s *Service) RevokePasskey(ctx *core.Context, credentialID int64) error {
+func (s *Service) RevokePasskey(ctx *servicecontext.Context, credentialID int64) error {
 	userID, err := parseUserID(ctxUserID(ctx))
 	if err != nil {
 		return appErrors.NewAuthError("IAM_UNAUTHENTICATED", appErrors.AuthUnauthenticated)
@@ -260,7 +262,7 @@ func (s *Service) RevokePasskey(ctx *core.Context, credentialID int64) error {
 	return s.store.RevokeWebAuthnCredential(ctx, userID, credentialID, audit)
 }
 
-func (s *Service) saveChallenge(ctx context.Context, typ string, userID *int64, origin string, session *webauthnlib.SessionData) (string, error) {
+func (s *Service) saveChallenge(ctx *servicecontext.Context, typ string, userID *int64, origin string, session *webauthnlib.SessionData) (string, error) {
 	if session == nil || session.Challenge == "" {
 		return "", errors.New("WebAuthn challenge data is empty")
 	}
@@ -274,7 +276,7 @@ func (s *Service) saveChallenge(ctx context.Context, typ string, userID *int64, 
 	rpID, originCopy := s.opts.WebAuthnRPID, origin
 	challenge := &model.AuthChallenge{ChallengeID: challengeID, UserID: userID, ChallengeType: typ,
 		ChallengeHash: hex.EncodeToString(challengeSum[:]), RPID: &rpID, Origin: &originCopy, ExpiresAt: expires,
-		AttemptCount: 0, MaxAttempts: 1, Status: "pending", CreatedAt: time.Now().UTC()}
+		AttemptCount: 0, MaxAttempts: 1, Status: "pending"}
 	if err := s.store.CreateAuthChallenge(ctx, challenge); err != nil {
 		return "", err
 	}
@@ -284,7 +286,7 @@ func (s *Service) saveChallenge(ctx context.Context, typ string, userID *int64, 
 	return challengeID, nil
 }
 
-func (s *Service) consumeChallenge(ctx context.Context, challengeID, expectedType string) (*webauthnlib.SessionData, *model.AuthChallenge, error) {
+func (s *Service) consumeChallenge(ctx *servicecontext.Context, challengeID, expectedType string) (*webauthnlib.SessionData, *model.AuthChallenge, error) {
 	if strings.TrimSpace(challengeID) == "" {
 		return nil, nil, appErrors.NewAuthError("IAM_PASSKEY_CHALLENGE_INVALID", appErrors.AuthUnauthenticated)
 	}
@@ -327,14 +329,14 @@ func ceremonyRequest(rpID, origin string, body []byte) *http.Request {
 	return request
 }
 
-func ctxUserID(ctx *core.Context) string {
+func ctxUserID(ctx *servicecontext.Context) string {
 	if ctx == nil {
 		return ""
 	}
 	return ctx.UserID()
 }
 
-func mustUserHandle(store repository.Store, ctx context.Context, userID int64) []byte {
+func mustUserHandle(store repository.Store, ctx *servicecontext.Context, userID int64) []byte {
 	user, err := store.FindUserByID(ctx, userID)
 	if err != nil || user == nil {
 		return nil

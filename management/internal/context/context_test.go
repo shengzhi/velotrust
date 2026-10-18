@@ -1,4 +1,4 @@
-package service
+package context
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 
 func TestContextCopiesRolesAndExposesRequestData(t *testing.T) {
 	roles := []string{"ADMIN", "AUDITOR"}
-	ctx := NewContext(context.Background(), Principal{ID: "u-1", Name: "Alice", Roles: roles}, RequestMeta{Language: "zh-CN", RequestID: "r-1", ClientIP: "127.0.0.1"})
+	ctx := New(context.Background(), Principal{ID: "u-1", Name: "Alice", Roles: roles}, RequestMeta{Language: "zh-CN", RequestID: "r-1", ClientIP: "127.0.0.1"})
 	roles[0] = "MUTATED"
 	got := ctx.Roles()
 	got[1] = "MUTATED"

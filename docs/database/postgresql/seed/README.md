@@ -25,3 +25,22 @@ navigation visibility.
 fresh bootstrap also assigns all currently active menus to `platform_admin` in
 the same transaction, regardless of whether bootstrap runs before or after
 migration `004`.
+
+`006_resource_permissions.sql` initializes the system resource and permission
+catalog for IAM, gateway registration, and IPAM, then grants every active
+catalog permission to the active system `platform_admin` role. It upserts catalog
+metadata, does not bump versions when nothing changed, preserves deliberately
+disabled resource/permission status, and adds missing role grants without
+changing other roles. Run it after Management migrations and administrator
+bootstrap; it fails clearly if the platform administrator role is missing. To
+apply it manually from the repository root:
+
+```sh
+psql "$DATABASE_DSN" -v ON_ERROR_STOP=1 -f docs/database/postgresql/seed/006_resource_permissions.sql
+```
+
+Migration `management/migrations/postgresql/008_ipam_network_catalog.sql`
+creates the persistent enterprise network catalog, gateway-to-network
+associations, and the IPAM network read/write permissions. These networks
+represent routed business/VPC ranges and remain separate from WireGuard overlay
+address pools.

@@ -8,6 +8,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
 	_ "modernc.org/sqlite"
+	servicecontext "velotrust/management/internal/context"
 	"velotrust/shared/repository/database"
 	"xorm.io/xorm"
 	"xorm.io/xorm/schemas"
@@ -130,6 +131,10 @@ func Save(objects ...database.IModel) (int64, error) {
 		return n, err
 	}
 	return n, nil
+}
+
+func SaveContext(ctx *servicecontext.Context, objects ...database.IModel) (int64, error) {
+	return DB().SaveContext(ctx, objects...)
 }
 
 func SaveSlice[T database.IModel](objects []T) (int64, error) {

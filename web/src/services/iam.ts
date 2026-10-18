@@ -43,9 +43,29 @@ export interface IAMPermission {
   permission_name: string;
   permission_code: string;
   resource_id: number;
+  resource_name?: string;
+  resource_code?: string;
+  resource_type?: string;
   action_code: string;
   description?: string | null;
   status: string;
+}
+
+export interface IAMResource {
+  id: number;
+  resource_name: string;
+  resource_code: string;
+  resource_type: string;
+  description?: string | null;
+  status: string;
+}
+
+export interface IAMMethodCatalogEntry {
+  method_code: string;
+  service_name: string;
+  method_name: string;
+  policy_type: 'public' | 'authenticated' | 'permission';
+  permission_code?: string;
 }
 
 export interface IAMMenu {
@@ -162,6 +182,12 @@ export const iamApi = {
 
   listPermissionCatalog: () =>
     jrpcCall<{ items: IAMPermission[] }>('IAM_ListPermissionCatalog', {}).then((result) => result.items ?? []),
+
+  listResourceCatalog: () =>
+    jrpcCall<{ items: IAMResource[] }>('IAM_ListResourceCatalog', {}).then((result) => result.items ?? []),
+
+  listMethodCatalog: () =>
+    jrpcCall<{ items: IAMMethodCatalogEntry[] }>('IAM_ListMethodCatalog', {}).then((result) => result.items ?? []),
 
   listRolePermissions: (roleId: number) =>
     jrpcCall<{ items: IAMPermission[] }>('IAM_ListRolePermissions', { role_id: roleId }).then((result) => result.items ?? []),

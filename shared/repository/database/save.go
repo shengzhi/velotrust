@@ -9,6 +9,21 @@ import (
 )
 
 func saveObject(txn *DBTransaction, obj IModel) (int64, error) {
+	if obj == nil {
+		return 0, fmt.Errorf("cannot save a nil model")
+	}
+	if table, ok := obj.(ITableName); !ok || strings.TrimSpace(table.TableName()) == "" {
+		return 0, fmt.Errorf("model %T must provide a table name", obj)
+	}
+	applyConditions := func() {
+		if conditional, ok := obj.(interface{ SaveConditions() []SaveCondition }); ok {
+			for _, condition := range conditional.SaveConditions() {
+				if strings.TrimSpace(condition.SQL) != "" {
+					txn.And(condition.SQL, condition.Args...)
+				}
+			}
+		}
+	}
 	switch obj.State() {
 	case ModelState_New:
 		return txn.InsertOne(obj)
@@ -20,7 +35,9 @@ func saveObject(txn *DBTransaction, obj IModel) (int64, error) {
 				return 0, err
 			}
 		}
-		return txn.ID(schemas.NewPK(values...)).And("version_no=?", obj.Version()).Cols(obj.UpdateCols()...).Update(obj)
+		txn.ID(schemas.NewPK(values...)).And("version_no=?", obj.Version())
+		applyConditions()
+		return txn.Cols(obj.UpdateCols()...).Update(obj)
 	case ModelState_SoftDeleted:
 		values := obj.PKValues()
 		if len(values) == 0 {
@@ -29,7 +46,9 @@ func saveObject(txn *DBTransaction, obj IModel) (int64, error) {
 				return 0, err
 			}
 		}
-		return txn.ID(schemas.NewPK(values...)).And("version_no=?", obj.Version()).Cols(obj.UpdateCols()...).Update(obj)
+		txn.ID(schemas.NewPK(values...)).And("version_no=?", obj.Version())
+		applyConditions()
+		return txn.Cols(obj.UpdateCols()...).Update(obj)
 	case ModelState_HardDeleted:
 		values := obj.PKValues()
 		if len(values) == 0 {
@@ -39,7 +58,9 @@ func saveObject(txn *DBTransaction, obj IModel) (int64, error) {
 			}
 		}
 		delObj := reflect.New(reflect.TypeOf(obj).Elem()).Interface()
-		return txn.ID(schemas.NewPK(values...)).And("version_no=?", obj.Version()).Delete(delObj)
+		txn.ID(schemas.NewPK(values...)).And("version_no=?", obj.Version())
+		applyConditions()
+		return txn.Delete(delObj)
 	}
 	return 0, fmt.Errorf("unknown model state")
 }

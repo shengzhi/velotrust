@@ -1,6 +1,7 @@
 package database
 
 import (
+	"errors"
 	"time"
 
 	"velotrust/shared/constants"
@@ -25,18 +26,28 @@ type IModel interface {
 
 	PKValues() []any
 
-	Version() int
+	Version() int64
 }
 
-// 基础模型
+// SaveCondition adds a trusted repository-owned predicate to an update or
+// delete. Values are always passed as bind parameters.
+type SaveCondition struct {
+	SQL  string
+	Args []any
+}
+
+var ErrVersionConflict = errors.New("database model version conflict")
+
+// BaseModel contains the metadata and lifecycle state required by Save.
 type BaseModel struct {
-	VersionNo  int        `gorm:"column:version_no" xorm:"'version_no' notnull comment('版本号')" json:"-"`
-	CreatedBy  string     `gorm:"column:created_by;size:45" xorm:"'created_by' notnull comment('创建人')" json:"created_by"`
-	CreatedAt  time.Time  `gorm:"column:created_at" xorm:"'created_at' notnull comment('创建时间')" json:"created_at"`
-	UpdatedBy  string     `gorm:"column:updated_by;size:45" xorm:"'updated_by' notnull comment('修改人')" json:"updated_by"`
-	UpdatedAt  time.Time  `gorm:"column:updated_at" xorm:"'updated_at' notnull comment('修改时间')" json:"updated_at"`
-	state      ModelState `gorm:"-" xorm:"-"`
-	updateCols []string   `gorm:"-" xorm:"-"`
+	VersionNo  int64           `gorm:"column:version_no" xorm:"'version_no' notnull comment('版本号')" json:"version_no"`
+	CreatedBy  string          `gorm:"column:created_by;size:45" xorm:"'created_by' notnull comment('创建人')" json:"created_by"`
+	CreatedAt  time.Time       `gorm:"column:created_at" xorm:"'created_at' notnull comment('创建时间')" json:"created_at"`
+	UpdatedBy  string          `gorm:"column:updated_by;size:45" xorm:"'updated_by' notnull comment('修改人')" json:"updated_by"`
+	UpdatedAt  time.Time       `gorm:"column:updated_at" xorm:"'updated_at' notnull comment('修改时间')" json:"updated_at"`
+	state      ModelState      `gorm:"-" xorm:"-"`
+	updateCols []string        `gorm:"-" xorm:"-"`
+	conditions []SaveCondition `gorm:"-" xorm:"-"`
 }
 
 // 可删除模型
@@ -46,11 +57,17 @@ type DeletableModel struct {
 }
 
 // Version returns model.VersionNo - 1.
-func (mb *BaseModel) Version() int { return mb.VersionNo - 1 }
+func (mb *BaseModel) Version() int64 { return mb.VersionNo - 1 }
 
 func (mb *BaseModel) PKValues() []any { return []any{} }
 
-func (mb *BaseModel) SetModelState(state ModelState) { mb.state = state }
+func (mb *BaseModel) SetModelState(state ModelState) {
+	mb.state = state
+	if state == ModelState_None {
+		mb.updateCols = nil
+		mb.conditions = nil
+	}
+}
 
 func (mb *BaseModel) State() ModelState { return mb.state }
 
@@ -76,6 +93,27 @@ func (mb *BaseModel) Update(name string) {
 	mb.state = ModelState_Modified
 }
 
+// AddSaveCondition constrains the row affected by a subsequent Save update.
+// Use only static SQL fragments from repository code and bind all values.
+func (mb *BaseModel) AddSaveCondition(sql string, args ...any) {
+	mb.conditions = append(mb.conditions, SaveCondition{SQL: sql, Args: append([]any(nil), args...)})
+}
+
+func (mb *BaseModel) SaveConditions() []SaveCondition {
+	conditions := make([]SaveCondition, len(mb.conditions))
+	copy(conditions, mb.conditions)
+	return conditions
+}
+
+// HardDelete marks the model for a version-checked physical deletion.
+func (mb *BaseModel) HardDelete() {
+	if mb.state == ModelState_HardDeleted {
+		return
+	}
+	mb.VersionNo++
+	mb.state = ModelState_HardDeleted
+}
+
 func (mb *BaseModel) Cols(colNames ...string) {
 	mb.updateCols = append(mb.updateCols, colNames...)
 }
@@ -96,14 +134,5 @@ func (mb *DeletableModel) SoftDelete(name string) {
 	mb.IsDeleted = true
 	mb.UpdatedAt = time.Now()
 	mb.UpdatedBy = name
-
 	mb.state = ModelState_SoftDeleted
-}
-
-func (mb *DeletableModel) HardDelete() {
-	if mb.state == ModelState_HardDeleted {
-		return
-	}
-	mb.VersionNo += 1
-	mb.state = ModelState_HardDeleted
 }

@@ -559,14 +559,14 @@ Passkey 与 TOTP 认证器使用不同的数据模型。服务端保存验证公
 | `network_name` | VARCHAR(128) | NOT NULL |
 | `network_code` | VARCHAR(64) | NOT NULL，唯一 |
 | `network_type` | VARCHAR(32) | `vpc`、`subnet`、`site`、`segment` 等 |
-| `cidr` | VARCHAR(64) | 网络网段；可空，按网络类型决定 |
+| `cidr` | CIDR | NOT NULL，标准化网段 |
 | `region` | VARCHAR(128) | 可空 |
 | `environment` | VARCHAR(32) | `prod`、`test`、`dev` 等 |
 | `description` | VARCHAR(512) | 可空 |
 | `status` | VARCHAR(24) | `active` / `disabled` |
 | 公共字段 | — | 标准公共字段 |
 
-创建或更新网段时必须检查 CIDR 合法性、地址池冲突及路由重叠。网络被纳管不意味着其中所有资源都对用户开放。
+Overlay 地址池不得与业务网段重叠；不同企业业务网段允许重叠，以支持多站点同址规划，但访问前需配置虚拟影子网段并由 Gateway 数据面落实 NAT。网络被纳管不意味着其中所有资源都对用户开放。
 
 ### 7.2 `t_ztna_node` — 控制面管理的网络节点
 
@@ -745,13 +745,21 @@ Passkey 与 TOTP 认证器使用不同的数据模型。服务端保存验证公
 
 字段：`id`、`event_id`、`event_type`、`severity`、`status`、`user_id`（可空）、`device_id`（可空）、`node_id`（可空）、`protected_resource_id`（可空）、`reason_code`、`details_json`（脱敏）、`occurred_at`、`acknowledged_at`、`acknowledged_by`、`resolved_at`、`resolved_by`。对 `event_id` 建唯一索引，对 `(status, severity, occurred_at)` 建查询索引。
 
-### 10.3 `t_ztna_address_pool` — 隧道地址池（按需启用）
+### 10.3 `t_ztna_overlay_network` — Overlay 全局地址范围（已实现）
 
-字段：`id`、`pool_name`、`network_cidr`、`address_family`、`allocation_strategy`、`status`、公共字段。创建时检查 CIDR 合法性、重叠和可分配地址范围。
+单例配置表，保存从 RFC1918 Class A 私有空间 `10.0.0.0/8` 中划定的全局 Overlay CIDR。通过 IPAM 页面显式初始化后，该 CIDR 即永久锁定，不允许修改；初始化使用 `version_no` 防止并发覆盖。创建企业业务网段前必须先初始化该范围，业务网段须使用相同地址族，但其地址范围不能与 Overlay 重叠。Overlay 地址池必须完全落在此范围内；全局范围不可与启用的企业业务网段或 NAT 虚拟影子网段重叠。未初始化时 API 的 `global_cidr` 为空，不能从已有地址池推算并伪装为已初始化。
 
-### 10.4 `t_ztna_address_lease` — 隧道地址分配记录（按需启用）
+### 10.4 `t_ztna_address_pool` — WireGuard Overlay 地址池（已实现）
 
-字段：`id`、`pool_id`、`address`、`owner_type`、`owner_id`、`status`、`allocated_at`、`released_at`。约束：在地址池范围内，活动租约的地址不可重复。释放地址前需确认节点/Peer 已完成撤销或重新配置。
+字段：`id`、`pool_name`、`network_cidr`、`pool_type`、`allocation_mode`、`idp_group`、`gateway_binding`、`color`、`description`、`status`、`created_by`、`created_at`、`updated_at`、`version_no`。首版仅接受 IPv4 /16 至 /30；`dynamic` 自动选择下一个空闲地址，`static` 必须指定池内未占用的主机地址。创建和 CIDR 更新时，在串行化事务内检查业务网段、其他启用地址池及 NAT 虚拟网段的重叠。
+
+### 10.5 `t_ztna_address_lease` — 隧道地址分配记录（已实现）
+
+字段：`id`、`pool_id`、`address`、`node_type`、`target_name`、`endpoint`、`allocation_mode`、`idp_group`、`wireguard_pubkey`、`status`、`allocated_at`、`released_at`、`created_by`。活动地址、目标和非空公钥有唯一约束；释放保留历史但释放地址可再次分配。IPAM 只登记节点公钥，不生成或保存 WireGuard 私钥。
+
+### 10.6 `t_ztna_nat_mapping` — 企业网络 NAT 映射台账（已实现）
+
+字段：`id`、`network_id`、`network_name`、`real_cidr`、`virtual_cidr`、`nat_type`、`enabled`、`description`、审计字段。`1:1_Bidirectional` 要求真实和虚拟网段前缀长度相同；SNAT 可不配置虚拟网段。当前实现负责持久化、校验和冲突检查，尚未将映射同步到 Gateway Agent，因此 `enabled` 只代表台账状态。
 
 ---
 
@@ -791,9 +799,11 @@ Passkey 与 TOTP 认证器使用不同的数据模型。服务端保存验证公
 | 中继 | `t_ztna_relay` | 启用中继时 | 中继能力与健康 |
 | 审计 | `t_iam_audit_log` | 必须 | 管理操作审计 |
 | 安全事件 | `t_ztna_security_event` | 建议 | 安全运营闭环 |
-| 地址管理 | `t_ztna_address_pool`、`t_ztna_address_lease` | 地址池集中管理时 | 地址分配与冲突控制 |
+| 地址管理 | `t_ztna_address_pool`、`t_ztna_address_lease` | 已实现 | Overlay 地址池、租约分配与释放历史 |
+| 地址管理 | `t_ztna_overlay_network` | 已实现 | 显式初始化的 Overlay 全局私有地址范围 |
+| 地址管理 | `t_ztna_nat_mapping` | 已实现（数据面同步待实现） | 企业网段 NAT 映射配置台账 |
 
-当前 PostgreSQL IAM 初始 schema 已创建 22 张表，包含 Passkey 凭证与挑战字段；暂不创建外部组织表（`t_iam_external_org`、`t_iam_external_identity_org`）和目录同步任务表（`t_iam_integration_sync_task`）。本表清单仍描述后续按需启用的完整模型。
+当前 PostgreSQL IAM 初始 schema 已创建 22 张表，包含 Passkey 凭证与挑战字段；暂不创建外部组织表（`t_iam_external_org`、`t_iam_external_identity_org`）和目录同步任务表（`t_iam_integration_sync_task`）。IPAM 网络目录、地址池、租约、NAT 台账及 Overlay 全局范围由后续版本化 migration 008/009/010 创建；ZTNA 设备、节点、受保护资源、策略、隧道、配置下发及安全事件业务表由 migration 011 创建。migration 011 只提供持久化结构，其中标记为建议或按需启用的实体尚不代表业务功能已实现。
 
 ---
 

@@ -1,7 +1,6 @@
 package iam
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +9,7 @@ import (
 	"time"
 
 	"github.com/lib/pq"
+	servicecontext "velotrust/management/internal/context"
 	"velotrust/management/internal/model/iam"
 	"velotrust/shared/repository/database"
 	"xorm.io/xorm"
@@ -26,6 +26,10 @@ var bootstrapPermissions = []struct {
 	{"iam.role.write", "Manage roles", "iam.role", "write"},
 	{"iam.role.grant", "Grant roles", "iam.role", "grant"},
 	{"iam.audit_log.read", "Read audit log", "iam.audit_log", "read"},
+	{"gateway.registration.read", "View gateway registration credentials", "gateway.registration", "read"},
+	{"gateway.registration.write", "Manage gateway registration credentials", "gateway.registration", "write"},
+	{"ipam.network.read", "View IPAM networks", "ipam.network", "read"},
+	{"ipam.network.write", "Manage IPAM networks", "ipam.network", "write"},
 }
 
 // Repository is the XORM adapter for the VeloTrust IAM schema.
@@ -41,7 +45,7 @@ func New(db *database.Database) (*Repository, error) {
 	return &Repository{db: db}, nil
 }
 
-func (r *Repository) FindUserByUsername(ctx context.Context, username string) (*iam.User, error) {
+func (r *Repository) FindUserByUsername(ctx *servicecontext.Context, username string) (*iam.User, error) {
 	user := new(iam.User)
 	s := r.db.Engine().NewSession().Context(ctx)
 	defer s.Close()
@@ -55,7 +59,7 @@ func (r *Repository) FindUserByUsername(ctx context.Context, username string) (*
 	return user, nil
 }
 
-func (r *Repository) FindUserByID(ctx context.Context, id int64) (*iam.User, error) {
+func (r *Repository) FindUserByID(ctx *servicecontext.Context, id int64) (*iam.User, error) {
 	user := new(iam.User)
 	s := r.db.Engine().NewSession().Context(ctx)
 	defer s.Close()
@@ -69,17 +73,17 @@ func (r *Repository) FindUserByID(ctx context.Context, id int64) (*iam.User, err
 	return user, nil
 }
 
-func (r *Repository) CreateUser(ctx context.Context, user *iam.User, audit *iam.AuditLog) error {
+func (r *Repository) CreateUser(ctx *servicecontext.Context, user *iam.User, audit *iam.AuditLog) error {
 	if user == nil {
 		return errors.New("IAM user is required")
 	}
-	return r.db.WithTransaction(ctx, func(s *xorm.Session) error {
-		if err := insertUser(s, user); err != nil {
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		if err := insertUser(ctx, tx, user); err != nil {
 			return fmt.Errorf("insert IAM user: %w", err)
 		}
 		if audit != nil {
 			audit.UserID = int64Ptr(user.ID)
-			if err := insertAudit(s, audit); err != nil {
+			if err := insertAudit(ctx, tx, audit); err != nil {
 				return fmt.Errorf("write IAM user audit: %w", err)
 			}
 		}
@@ -87,64 +91,70 @@ func (r *Repository) CreateUser(ctx context.Context, user *iam.User, audit *iam.
 	})
 }
 
-func insertUser(s *xorm.Session, user *iam.User) error {
-	now := time.Now().UTC()
-	if user.CreatedAt.IsZero() {
-		user.CreatedAt = now
+func insertUser(ctx *servicecontext.Context, tx *database.DBTransaction, user *iam.User) error {
+	if user.State() != database.ModelState_New {
+		user.CreateNew(ctx.UserName())
 	}
-	if user.UpdatedAt.IsZero() {
-		user.UpdatedAt = user.CreatedAt
-	}
-	if user.VersionNo == 0 {
-		user.VersionNo = 1
-	}
-	_, err := s.InsertOne(user)
+	_, err := tx.Save(user)
 	return err
 }
 
-func (r *Repository) CreateLoginSession(ctx context.Context, session *iam.UserSession, log *iam.LoginLog, clientIP, usernameHash, ipHash string) error {
+func (r *Repository) CreateLoginSession(ctx *servicecontext.Context, session *iam.UserSession, log *iam.LoginLog, clientIP, usernameHash, ipHash string) error {
 	if session == nil || log == nil {
 		return errors.New("session and login event are required")
 	}
-	return r.db.WithTransaction(ctx, func(s *xorm.Session) error {
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		s := tx.Session
 		now := time.Now().UTC()
-		session.CreatedAt = now
+		session.CreateNew(ctx.UserName())
 		if session.LastSeenAt == nil {
 			session.LastSeenAt = &now
 		}
-		if _, err := s.InsertOne(session); err != nil {
+		if _, err := tx.Save(session); err != nil {
 			return fmt.Errorf("insert IAM session: %w", err)
 		}
-		result, err := s.Exec("UPDATE "+iam.TableUser+" SET last_login_at=?, last_login_ip=?, updated_at=?, version_no=version_no+1 WHERE id=? AND user_status='active'", now, nullable(clientIP), now, session.UserID)
+		var user iam.User
+		found, err := s.SQL("SELECT * FROM "+iam.TableUser+" WHERE id=? AND user_status='active' FOR UPDATE", session.UserID).Get(&user)
 		if err != nil {
 			return fmt.Errorf("update IAM last login: %w", err)
 		}
-		affected, err := result.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("check IAM last login update: %w", err)
-		}
-		if affected != 1 {
+		if !found {
 			return errors.New("IAM user is no longer active")
+		}
+		user.LastLoginAt = &now
+		user.LastLoginIP = nullableStringPtr(clientIP)
+		user.Update(ctx.UserName())
+		user.Cols("last_login_at", "last_login_ip")
+		if _, err := tx.Save(&user); err != nil {
+			return fmt.Errorf("save IAM last login: %w", err)
 		}
 		if usernameHash != "" || ipHash != "" {
 			if usernameHash == "" || ipHash == "" {
 				return errors.New("both IAM login throttle keys are required")
 			}
-			if _, err := s.Exec("DELETE FROM "+iam.TableAuthThrottle+" WHERE bucket_key_hash IN (?, ?)", usernameHash, ipHash); err != nil {
-				return fmt.Errorf("clear successful IAM login throttle: %w", err)
+			var throttles []iam.AuthThrottle
+			if err := s.In("bucket_key_hash", usernameHash, ipHash).Find(&throttles); err != nil {
+				return fmt.Errorf("load successful IAM login throttle rows: %w", err)
+			}
+			for i := range throttles {
+				throttles[i].HardDelete()
+				if _, err := tx.Save(&throttles[i]); err != nil {
+					return fmt.Errorf("clear successful IAM login throttle: %w", err)
+				}
 			}
 		}
 		log.UserID = int64Ptr(session.UserID)
 		log.SessionID = stringPtr(session.SessionID)
 		log.OccurredAt = now
-		if _, err := s.InsertOne(log); err != nil {
+		log.CreateNew(ctx.UserName())
+		if _, err := tx.Save(log); err != nil {
 			return fmt.Errorf("insert IAM login event: %w", err)
 		}
 		return nil
 	})
 }
 
-func (r *Repository) LoginBlocked(ctx context.Context, usernameHash, ipHash string) (bool, error) {
+func (r *Repository) LoginBlocked(ctx *servicecontext.Context, usernameHash, ipHash string) (bool, error) {
 	var result struct {
 		Blocked bool `xorm:"'blocked'"`
 	}
@@ -159,7 +169,7 @@ func (r *Repository) LoginBlocked(ctx context.Context, usernameHash, ipHash stri
 	return result.Blocked, nil
 }
 
-func (r *Repository) RecordLoginFailure(ctx context.Context, log *iam.LoginLog, usernameHash, ipHash string, maxFailures, windowMinutes, blockMinutes int) error {
+func (r *Repository) RecordLoginFailure(ctx *servicecontext.Context, log *iam.LoginLog, usernameHash, ipHash string, maxFailures, windowMinutes, blockMinutes int) error {
 	if log == nil {
 		return errors.New("login event is required")
 	}
@@ -170,33 +180,64 @@ func (r *Repository) RecordLoginFailure(ctx context.Context, log *iam.LoginLog, 
 	window := time.Duration(windowMinutes) * time.Minute
 	windowStart := now.Truncate(window)
 	blockedUntil := now.Add(time.Duration(blockMinutes) * time.Minute)
-	return r.db.WithTransaction(ctx, func(s *xorm.Session) error {
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		s := tx.Session
 		for _, item := range []struct{ dimension, hash string }{{"username", usernameHash}, {"source_ip", ipHash}} {
-			query := "INSERT INTO " + iam.TableAuthThrottle + " (bucket_key_hash, dimension, window_started_at, failure_count, blocked_until, updated_at) VALUES (?, ?, ?, 1, CASE WHEN 1 >= ? THEN ? ELSE NULL END, ?) " +
-				"ON CONFLICT (dimension, bucket_key_hash, window_started_at) DO UPDATE SET failure_count=" + iam.TableAuthThrottle + ".failure_count + 1, blocked_until=CASE WHEN " + iam.TableAuthThrottle + ".failure_count + 1 >= ? THEN ? ELSE " + iam.TableAuthThrottle + ".blocked_until END, updated_at=?"
-			if _, err := s.Exec(query, item.hash, item.dimension, windowStart, maxFailures, blockedUntil, now, maxFailures, blockedUntil, now); err != nil {
-				return fmt.Errorf("update IAM login throttle: %w", err)
+			if item.hash == "" {
+				return errors.New("login throttle key is required")
+			}
+			if _, err := s.Exec("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", item.dimension+":"+item.hash+":"+windowStart.Format(time.RFC3339Nano)); err != nil {
+				return fmt.Errorf("lock IAM login throttle key: %w", err)
+			}
+			var throttle iam.AuthThrottle
+			found, err := s.Where("dimension=? AND bucket_key_hash=? AND window_started_at=?", item.dimension, item.hash, windowStart).ForUpdate().Get(&throttle)
+			if err != nil {
+				return fmt.Errorf("load IAM login throttle: %w", err)
+			}
+			if found {
+				throttle.FailureCount++
+				if throttle.FailureCount >= maxFailures {
+					throttle.BlockedUntil = &blockedUntil
+				}
+				throttle.Update(ctx.UserName())
+				throttle.Cols("failure_count", "blocked_until")
+			} else {
+				throttle = iam.AuthThrottle{BucketKeyHash: item.hash, Dimension: item.dimension, WindowStartedAt: windowStart, FailureCount: 1}
+				if throttle.FailureCount >= maxFailures {
+					throttle.BlockedUntil = &blockedUntil
+				}
+				throttle.CreateNew(ctx.UserName())
+			}
+			if _, err := tx.Save(&throttle); err != nil {
+				return fmt.Errorf("save IAM login throttle: %w", err)
 			}
 		}
 		log.OccurredAt = now
-		if _, err := s.InsertOne(log); err != nil {
+		log.CreateNew(ctx.UserName())
+		if _, err := tx.Save(log); err != nil {
 			return fmt.Errorf("insert failed IAM login event: %w", err)
 		}
 		return nil
 	})
 }
 
-func (r *Repository) ClearLoginThrottle(ctx context.Context, usernameHash, ipHash string) error {
-	s := r.db.Engine().NewSession().Context(ctx)
-	defer s.Close()
-	_, err := s.Exec("DELETE FROM "+iam.TableAuthThrottle+" WHERE bucket_key_hash IN (?, ?)", usernameHash, ipHash)
-	if err != nil {
-		return fmt.Errorf("clear IAM login throttle: %w", err)
-	}
-	return nil
+func (r *Repository) ClearLoginThrottle(ctx *servicecontext.Context, usernameHash, ipHash string) error {
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		var throttles []iam.AuthThrottle
+		if err := tx.In("bucket_key_hash", usernameHash, ipHash).Find(&throttles); err != nil {
+			return fmt.Errorf("load IAM login throttle rows: %w", err)
+		}
+		for i := range throttles {
+			throttles[i].HardDelete()
+			if _, err := tx.Save(&throttles[i]); err != nil {
+				return fmt.Errorf("clear IAM login throttle: %w", err)
+			}
+		}
+		return nil
+	})
 }
 
-func (r *Repository) ResolveSession(ctx context.Context, tokenHash string) (*iam.UserSession, *iam.User, error) {
+func (r *Repository) ResolveSession(ctx *servicecontext.Context, tokenHash string) (*iam.UserSession, *iam.User, error) {
 	session := new(iam.UserSession)
 	s := r.db.Engine().NewSession().Context(ctx)
 	defer s.Close()
@@ -214,44 +255,72 @@ func (r *Repository) ResolveSession(ctx context.Context, tokenHash string) (*iam
 	return session, user, nil
 }
 
-func (r *Repository) TouchSession(ctx context.Context, sessionID, tokenHash, clientIP string) error {
+func (r *Repository) TouchSession(ctx *servicecontext.Context, sessionID, tokenHash, clientIP string) error {
 	now := time.Now().UTC()
-	s := r.db.Engine().NewSession().Context(ctx)
-	defer s.Close()
-	result, err := s.Exec("UPDATE "+iam.TableUserSession+" SET last_seen_at=? WHERE session_id=? AND token_hash=? AND status='active' AND expires_at>?", now, sessionID, tokenHash, now)
-	if err != nil {
-		return fmt.Errorf("touch IAM session: %w", err)
-	}
-	rows, err := result.RowsAffected()
-	if err != nil || rows != 1 {
-		return fmt.Errorf("IAM session is no longer active")
-	}
-	return nil
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		var session iam.UserSession
+		found, err := tx.Where("session_id=? AND token_hash=? AND status='active' AND expires_at>?", sessionID, tokenHash, now).ForUpdate().Get(&session)
+		if err != nil {
+			return fmt.Errorf("load IAM session for touch: %w", err)
+		}
+		if !found {
+			return errors.New("IAM session is no longer active")
+		}
+		session.LastSeenAt = &now
+		session.Update(ctx.UserName())
+		session.Cols("last_seen_at")
+		session.AddSaveCondition("status=?", "active")
+		session.AddSaveCondition("expires_at>?", now)
+		if _, err := tx.Save(&session); err != nil {
+			return fmt.Errorf("touch IAM session: %w", err)
+		}
+		return nil
+	})
 }
 
-func (r *Repository) RevokeSession(ctx context.Context, sessionID, reason string) error {
+func (r *Repository) RevokeSession(ctx *servicecontext.Context, sessionID, reason string) error {
 	now := time.Now().UTC()
-	s := r.db.Engine().NewSession().Context(ctx)
-	defer s.Close()
-	_, err := s.Exec("UPDATE "+iam.TableUserSession+" SET status='revoked', revoked_at=?, revocation_reason=? WHERE session_id=? AND status='active'", now, reason, sessionID)
-	if err != nil {
-		return fmt.Errorf("revoke IAM session: %w", err)
-	}
-	return nil
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		var session iam.UserSession
+		found, err := tx.Where("session_id=? AND status='active'", sessionID).ForUpdate().Get(&session)
+		if err != nil {
+			return fmt.Errorf("load IAM session for revocation: %w", err)
+		}
+		if !found {
+			return nil
+		}
+		session.Status, session.RevokedAt, session.RevocationReason = "revoked", &now, &reason
+		session.Update(ctx.UserName())
+		session.Cols("status", "revoked_at", "revocation_reason")
+		session.AddSaveCondition("status=?", "active")
+		if _, err := tx.Save(&session); err != nil {
+			return fmt.Errorf("revoke IAM session: %w", err)
+		}
+		return nil
+	})
 }
 
-func (r *Repository) RevokeUserSessions(ctx context.Context, userID int64, reason string) error {
+func (r *Repository) RevokeUserSessions(ctx *servicecontext.Context, userID int64, reason string) error {
 	now := time.Now().UTC()
-	s := r.db.Engine().NewSession().Context(ctx)
-	defer s.Close()
-	_, err := s.Exec("UPDATE "+iam.TableUserSession+" SET status='revoked', revoked_at=?, revocation_reason=? WHERE user_id=? AND status='active'", now, reason, userID)
-	if err != nil {
-		return fmt.Errorf("revoke IAM user sessions: %w", err)
-	}
-	return nil
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		var sessions []iam.UserSession
+		if err := tx.Where("user_id=? AND status='active'", userID).ForUpdate().Find(&sessions); err != nil {
+			return fmt.Errorf("load IAM user sessions for revocation: %w", err)
+		}
+		for i := range sessions {
+			sessions[i].Status, sessions[i].RevokedAt, sessions[i].RevocationReason = "revoked", &now, &reason
+			sessions[i].Update(ctx.UserName())
+			sessions[i].Cols("status", "revoked_at", "revocation_reason")
+			sessions[i].AddSaveCondition("status=?", "active")
+			if _, err := tx.Save(&sessions[i]); err != nil {
+				return fmt.Errorf("revoke IAM user session: %w", err)
+			}
+		}
+		return nil
+	})
 }
 
-func (r *Repository) HasPermission(ctx context.Context, userID int64, code string) (bool, error) {
+func (r *Repository) HasPermission(ctx *servicecontext.Context, userID int64, code string) (bool, error) {
 	var result struct {
 		Allowed bool `xorm:"'allowed'"`
 	}
@@ -265,7 +334,7 @@ func (r *Repository) HasPermission(ctx context.Context, userID int64, code strin
 	return result.Allowed, nil
 }
 
-func (r *Repository) ListPermissions(ctx context.Context, userID int64) ([]string, error) {
+func (r *Repository) ListPermissions(ctx *servicecontext.Context, userID int64) ([]string, error) {
 	var rows []struct {
 		Code string `xorm:"'permission_code'"`
 	}
@@ -282,7 +351,7 @@ func (r *Repository) ListPermissions(ctx context.Context, userID int64) ([]strin
 	return result, nil
 }
 
-func (r *Repository) ListUsers(ctx context.Context, page, pageSize int) ([]iam.User, int64, error) {
+func (r *Repository) ListUsers(ctx *servicecontext.Context, page, pageSize int) ([]iam.User, int64, error) {
 	if page < 1 {
 		page = 1
 	}
@@ -303,19 +372,17 @@ func (r *Repository) ListUsers(ctx context.Context, page, pageSize int) ([]iam.U
 	return users, total, nil
 }
 
-func (r *Repository) CreateRole(ctx context.Context, role *iam.Role, audit *iam.AuditLog) error {
+func (r *Repository) CreateRole(ctx *servicecontext.Context, role *iam.Role, audit *iam.AuditLog) error {
 	if role == nil {
 		return errors.New("IAM role is required")
 	}
-	return r.db.WithTransaction(ctx, func(s *xorm.Session) error {
-		now := time.Now().UTC()
-		role.CreatedAt, role.UpdatedAt = now, now
-		role.VersionNo = 1
-		if _, err := s.InsertOne(role); err != nil {
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		role.CreateNew(ctx.UserName())
+		if _, err := tx.Save(role); err != nil {
 			return fmt.Errorf("insert IAM role: %w", err)
 		}
 		if audit != nil {
-			if err := insertAudit(s, audit); err != nil {
+			if err := insertAudit(ctx, tx, audit); err != nil {
 				return fmt.Errorf("write IAM role audit: %w", err)
 			}
 		}
@@ -323,7 +390,7 @@ func (r *Repository) CreateRole(ctx context.Context, role *iam.Role, audit *iam.
 	})
 }
 
-func (r *Repository) ListRoles(ctx context.Context) ([]iam.Role, error) {
+func (r *Repository) ListRoles(ctx *servicecontext.Context) ([]iam.Role, error) {
 	var roles []iam.Role
 	s := r.db.Engine().NewSession().Context(ctx)
 	defer s.Close()
@@ -333,7 +400,7 @@ func (r *Repository) ListRoles(ctx context.Context) ([]iam.Role, error) {
 	return roles, nil
 }
 
-func (r *Repository) ListUserRoles(ctx context.Context, userID int64) ([]iam.Role, error) {
+func (r *Repository) ListUserRoles(ctx *servicecontext.Context, userID int64) ([]iam.Role, error) {
 	var roles []iam.Role
 	s := r.db.Engine().NewSession().Context(ctx)
 	defer s.Close()
@@ -344,7 +411,7 @@ func (r *Repository) ListUserRoles(ctx context.Context, userID int64) ([]iam.Rol
 	return roles, nil
 }
 
-func (r *Repository) ListRolePermissions(ctx context.Context, roleID int64) ([]iam.Permission, error) {
+func (r *Repository) ListRolePermissions(ctx *servicecontext.Context, roleID int64) ([]iam.Permission, error) {
 	var permissions []iam.Permission
 	s := r.db.Engine().NewSession().Context(ctx)
 	defer s.Close()
@@ -352,10 +419,13 @@ func (r *Repository) ListRolePermissions(ctx context.Context, roleID int64) ([]i
 	if err := s.SQL(query, roleID).Find(&permissions); err != nil {
 		return nil, fmt.Errorf("list IAM permissions for role: %w", err)
 	}
+	if err := enrichPermissionResources(s, permissions); err != nil {
+		return nil, fmt.Errorf("load resource details for role permissions: %w", err)
+	}
 	return permissions, nil
 }
 
-func (r *Repository) ListRoleMenus(ctx context.Context, roleID int64) ([]iam.Menu, error) {
+func (r *Repository) ListRoleMenus(ctx *servicecontext.Context, roleID int64) ([]iam.Menu, error) {
 	if roleID <= 0 {
 		return nil, errors.New("positive IAM role ID is required")
 	}
@@ -377,7 +447,7 @@ func (r *Repository) ListRoleMenus(ctx context.Context, roleID int64) ([]iam.Men
 	return menus, nil
 }
 
-func (r *Repository) ListUserMenus(ctx context.Context, userID int64) ([]iam.Menu, error) {
+func (r *Repository) ListUserMenus(ctx *servicecontext.Context, userID int64) ([]iam.Menu, error) {
 	if userID <= 0 {
 		return nil, errors.New("positive IAM user ID is required")
 	}
@@ -394,11 +464,12 @@ func (r *Repository) ListUserMenus(ctx context.Context, userID int64) ([]iam.Men
 	return menus, nil
 }
 
-func (r *Repository) SetRoleMenus(ctx context.Context, actorID, roleID int64, menuIDs []int64, audit *iam.AuditLog) error {
+func (r *Repository) SetRoleMenus(ctx *servicecontext.Context, actorID, roleID int64, menuIDs []int64, audit *iam.AuditLog) error {
 	if actorID <= 0 || roleID <= 0 {
 		return errors.New("active actor and IAM role are required")
 	}
-	return r.db.WithTransaction(ctx, func(s *xorm.Session) error {
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		s := tx.Session
 		var role iam.Role
 		found, err := s.SQL("SELECT * FROM "+iam.TableRole+" WHERE id=? FOR UPDATE", roleID).Get(&role)
 		if err != nil {
@@ -446,11 +517,20 @@ func (r *Repository) SetRoleMenus(ctx context.Context, actorID, roleID int64, me
 		if equalInt64s(currentIDs, menuIDs) {
 			return nil
 		}
-		if _, err := s.Exec("DELETE FROM "+iam.TableRoleMenu+" WHERE role_id=?", roleID); err != nil {
-			return fmt.Errorf("remove previous IAM role menus: %w", err)
+		var previous []iam.RoleMenu
+		if err := s.Where("role_id=?", roleID).ForUpdate().Find(&previous); err != nil {
+			return fmt.Errorf("load previous IAM role menus: %w", err)
+		}
+		for i := range previous {
+			previous[i].HardDelete()
+			if _, err := tx.Save(&previous[i]); err != nil {
+				return fmt.Errorf("remove previous IAM role menu: %w", err)
+			}
 		}
 		for _, menuID := range menuIDs {
-			if _, err := s.Exec("INSERT INTO "+iam.TableRoleMenu+" (role_id, menu_id, created_at, created_by) VALUES (?, ?, CURRENT_TIMESTAMP, ?)", roleID, menuID, auditActor(audit)); err != nil {
+			link := &iam.RoleMenu{RoleID: roleID, MenuID: menuID}
+			link.CreateNew(ctx.UserName())
+			if _, err := tx.Save(link); err != nil {
 				return fmt.Errorf("assign menu to IAM role: %w", err)
 			}
 		}
@@ -460,10 +540,11 @@ func (r *Repository) SetRoleMenus(ctx context.Context, actorID, roleID int64, me
 			if err != nil {
 				return fmt.Errorf("marshal IAM role menu audit: %w", err)
 			}
-			if _, err := s.Exec("UPDATE "+iam.TableRole+" SET updated_at=CURRENT_TIMESTAMP, updated_by=?, version_no=version_no+1 WHERE id=?", auditActor(audit), roleID); err != nil {
+			role.Update(ctx.UserName())
+			if _, err := tx.Save(&role); err != nil {
 				return fmt.Errorf("update IAM role menu version: %w", err)
 			}
-			if err := insertAudit(s, audit); err != nil {
+			if err := insertAudit(ctx, tx, audit); err != nil {
 				return fmt.Errorf("write IAM role menu audit: %w", err)
 			}
 		}
@@ -483,7 +564,7 @@ func equalInt64s(a, b []int64) bool {
 	return true
 }
 
-func (r *Repository) ListMenus(ctx context.Context) ([]iam.Menu, error) {
+func (r *Repository) ListMenus(ctx *servicecontext.Context) ([]iam.Menu, error) {
 	var menus []iam.Menu
 	s := r.db.Engine().NewSession().Context(ctx)
 	defer s.Close()
@@ -493,29 +574,44 @@ func (r *Repository) ListMenus(ctx context.Context) ([]iam.Menu, error) {
 	return menus, nil
 }
 
-func (r *Repository) CreateMenu(ctx context.Context, menu *iam.Menu, audit *iam.AuditLog) error {
+func (r *Repository) CreateMenu(ctx *servicecontext.Context, menu *iam.Menu, audit *iam.AuditLog) error {
 	if menu == nil {
 		return errors.New("IAM menu is required")
 	}
-	return r.db.WithTransaction(ctx, func(s *xorm.Session) error {
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		s := tx.Session
 		if err := validateMenuParent(s, menu); err != nil {
 			return err
 		}
-		now := time.Now().UTC()
-		menu.CreatedAt, menu.UpdatedAt = now, now
-		menu.VersionNo = 1
-		if _, err := s.InsertOne(menu); err != nil {
+		menu.CreateNew(ctx.UserName())
+		if _, err := tx.Save(menu); err != nil {
 			if errors.Is(menuWriteError(err), ErrMenuCodeExists) {
 				return ErrMenuCodeExists
 			}
 			return fmt.Errorf("insert IAM menu: %w", err)
 		}
-		if _, err := s.Exec("INSERT INTO "+iam.TableRoleMenu+" (role_id, menu_id, created_at, created_by) SELECT id, ?, CURRENT_TIMESTAMP, 'system' FROM "+iam.TableRole+" WHERE role_code=? AND status='active' ON CONFLICT (role_id, menu_id) DO NOTHING", menu.ID, platformAdminRole); err != nil {
-			return fmt.Errorf("assign new menu to platform administrator: %w", err)
+		var admins []iam.Role
+		if err := s.Where("role_code=? AND status='active'", platformAdminRole).Find(&admins); err != nil {
+			return fmt.Errorf("find platform administrator role for new menu: %w", err)
+		}
+		for _, admin := range admins {
+			var existing iam.RoleMenu
+			found, err := s.Where("role_id=? AND menu_id=?", admin.ID, menu.ID).Get(&existing)
+			if err != nil {
+				return fmt.Errorf("check platform administrator menu assignment: %w", err)
+			}
+			if found {
+				continue
+			}
+			link := &iam.RoleMenu{RoleID: admin.ID, MenuID: menu.ID}
+			link.CreateNew(ctx.UserName())
+			if _, err := tx.Save(link); err != nil {
+				return fmt.Errorf("assign new menu to platform administrator: %w", err)
+			}
 		}
 		if audit != nil {
 			audit.TargetID = stringPtr(fmt.Sprintf("%d", menu.ID))
-			if err := insertAudit(s, audit); err != nil {
+			if err := insertAudit(ctx, tx, audit); err != nil {
 				return fmt.Errorf("write IAM menu creation audit: %w", err)
 			}
 		}
@@ -523,11 +619,12 @@ func (r *Repository) CreateMenu(ctx context.Context, menu *iam.Menu, audit *iam.
 	})
 }
 
-func (r *Repository) UpdateMenu(ctx context.Context, menu *iam.Menu, expectedVersion int64, audit *iam.AuditLog) error {
+func (r *Repository) UpdateMenu(ctx *servicecontext.Context, menu *iam.Menu, expectedVersion int64, audit *iam.AuditLog) error {
 	if menu == nil || menu.ID <= 0 || expectedVersion <= 0 {
 		return errors.New("IAM menu and expected version are required")
 	}
-	return r.db.WithTransaction(ctx, func(s *xorm.Session) error {
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		s := tx.Session
 		current := new(iam.Menu)
 		found, err := s.ID(menu.ID).Get(current)
 		if err != nil {
@@ -555,29 +652,24 @@ func (r *Repository) UpdateMenu(ctx context.Context, menu *iam.Menu, expectedVer
 		if menu.ParentID != nil && *menu.ParentID == menu.ID {
 			return ErrMenuParentInvalid
 		}
-		now := time.Now().UTC()
-		values := map[string]interface{}{
-			"parent_id": menu.ParentID, "menu_name": menu.MenuName, "menu_code": menu.MenuCode,
-			"path": menu.Path, "component": menu.Component, "icon": menu.Icon,
-			"sort_order": menu.SortOrder, "menu_type": menu.MenuType, "visible": menu.Visible,
-			"status": menu.Status, "updated_at": now, "updated_by": menu.UpdatedBy,
-			"version_no": expectedVersion + 1,
-		}
-		rows, err := s.Table(iam.TableMenu).Where("id=? AND version_no=?", menu.ID, expectedVersion).Update(values)
-		if err != nil {
+		current.ParentID, current.MenuName, current.MenuCode = menu.ParentID, menu.MenuName, menu.MenuCode
+		current.Path, current.Component, current.Icon = menu.Path, menu.Component, menu.Icon
+		current.SortOrder, current.MenuType, current.Visible, current.Status = menu.SortOrder, menu.MenuType, menu.Visible, menu.Status
+		current.Update(ctx.UserName())
+		current.Cols("parent_id", "menu_name", "menu_code", "path", "component", "icon", "sort_order", "menu_type", "visible", "status")
+		if _, err := tx.Save(current); err != nil {
+			if errors.Is(err, database.ErrVersionConflict) {
+				return ErrMenuVersionConflict
+			}
 			if errors.Is(menuWriteError(err), ErrMenuCodeExists) {
 				return ErrMenuCodeExists
 			}
 			return fmt.Errorf("update IAM menu: %w", err)
 		}
-		if rows != 1 {
-			return ErrMenuVersionConflict
-		}
-		menu.VersionNo = expectedVersion + 1
-		menu.UpdatedAt = now
+		*menu = *current
 		if audit != nil {
 			audit.TargetID = stringPtr(fmt.Sprintf("%d", menu.ID))
-			if err := insertAudit(s, audit); err != nil {
+			if err := insertAudit(ctx, tx, audit); err != nil {
 				return fmt.Errorf("write IAM menu update audit: %w", err)
 			}
 		}
@@ -585,11 +677,12 @@ func (r *Repository) UpdateMenu(ctx context.Context, menu *iam.Menu, expectedVer
 	})
 }
 
-func (r *Repository) DeleteMenu(ctx context.Context, menuID int64, audit *iam.AuditLog) error {
+func (r *Repository) DeleteMenu(ctx *servicecontext.Context, menuID int64, audit *iam.AuditLog) error {
 	if menuID <= 0 {
 		return errors.New("positive IAM menu ID is required")
 	}
-	return r.db.WithTransaction(ctx, func(s *xorm.Session) error {
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		s := tx.Session
 		menu := new(iam.Menu)
 		found, err := s.ID(menuID).Get(menu)
 		if err != nil {
@@ -612,7 +705,8 @@ func (r *Repository) DeleteMenu(ctx context.Context, menuID int64, audit *iam.Au
 		if counts.Roles > 0 {
 			return ErrMenuAssignedToRole
 		}
-		if _, err := s.ID(menuID).Delete(new(iam.Menu)); err != nil {
+		menu.HardDelete()
+		if _, err := tx.Save(menu); err != nil {
 			return fmt.Errorf("delete IAM menu: %w", err)
 		}
 		if audit != nil {
@@ -622,7 +716,7 @@ func (r *Repository) DeleteMenu(ctx context.Context, menuID int64, audit *iam.Au
 				return fmt.Errorf("encode IAM menu deletion audit: %w", err)
 			}
 			audit.ChangesJSON = changes
-			if err := insertAudit(s, audit); err != nil {
+			if err := insertAudit(ctx, tx, audit); err != nil {
 				return fmt.Errorf("write IAM menu deletion audit: %w", err)
 			}
 		}
@@ -663,14 +757,15 @@ func menuWriteError(err error) error {
 	return err
 }
 
-func (r *Repository) GrantRole(ctx context.Context, actorID, userID, roleID int64, audit *iam.AuditLog) error {
+func (r *Repository) GrantRole(ctx *servicecontext.Context, actorID, userID, roleID int64, audit *iam.AuditLog) error {
 	if actorID <= 0 || userID <= 0 || roleID <= 0 {
 		return errors.New("active actor, user, and role are required")
 	}
 	if actorID == userID {
 		return errors.New("an operator cannot grant a role to themselves")
 	}
-	return r.db.WithTransaction(ctx, func(s *xorm.Session) error {
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		s := tx.Session
 		var count struct {
 			Value int64 `xorm:"'count'"`
 		}
@@ -691,13 +786,21 @@ func (r *Repository) GrantRole(ctx context.Context, actorID, userID, roleID int6
 		if unauthorized.Count != 0 {
 			return errors.New("an operator cannot grant permissions they do not have")
 		}
-		_, err := s.Exec("INSERT INTO "+iam.TableUserRole+" (user_id, role_id, created_at, created_by) VALUES (?, ?, CURRENT_TIMESTAMP, ?) ON CONFLICT (user_id, role_id) DO NOTHING", userID, roleID, auditActor(audit))
+		var assignment iam.UserRole
+		found, err := s.Where("user_id=? AND role_id=?", userID, roleID).Get(&assignment)
 		if err != nil {
-			return fmt.Errorf("grant IAM role: %w", err)
+			return fmt.Errorf("check IAM role assignment: %w", err)
+		}
+		if !found {
+			assignment = iam.UserRole{UserID: userID, RoleID: roleID}
+			assignment.CreateNew(ctx.UserName())
+			if _, err := tx.Save(&assignment); err != nil {
+				return fmt.Errorf("grant IAM role: %w", err)
+			}
 		}
 		if audit != nil {
 			audit.UserID = int64Ptr(userID)
-			if err := insertAudit(s, audit); err != nil {
+			if err := insertAudit(ctx, tx, audit); err != nil {
 				return fmt.Errorf("write IAM role grant audit: %w", err)
 			}
 		}
@@ -705,11 +808,12 @@ func (r *Repository) GrantRole(ctx context.Context, actorID, userID, roleID int6
 	})
 }
 
-func (r *Repository) RevokeRole(ctx context.Context, actorID, userID, roleID int64, audit *iam.AuditLog) error {
+func (r *Repository) RevokeRole(ctx *servicecontext.Context, actorID, userID, roleID int64, audit *iam.AuditLog) error {
 	if actorID <= 0 || userID <= 0 || roleID <= 0 || actorID == userID {
 		return errors.New("active operator, target user, and role are required")
 	}
-	return r.db.WithTransaction(ctx, func(s *xorm.Session) error {
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		s := tx.Session
 		if _, err := s.Exec("LOCK TABLE " + iam.TableUserRole + " IN EXCLUSIVE MODE"); err != nil {
 			return fmt.Errorf("lock IAM role assignments: %w", err)
 		}
@@ -752,17 +856,20 @@ func (r *Repository) RevokeRole(ctx context.Context, actorID, userID, roleID int
 				return errors.New("cannot revoke the last active platform administrator role")
 			}
 		}
-		result, err := s.Exec("DELETE FROM "+iam.TableUserRole+" WHERE user_id=? AND role_id=?", userID, roleID)
+		var assignment iam.UserRole
+		found, err = s.Where("user_id=? AND role_id=?", userID, roleID).ForUpdate().Get(&assignment)
 		if err != nil {
-			return fmt.Errorf("revoke IAM role: %w", err)
+			return fmt.Errorf("load IAM role assignment for revocation: %w", err)
 		}
-		changed, err := result.RowsAffected()
-		if err != nil {
-			return err
+		if found {
+			assignment.HardDelete()
+			if _, err := tx.Save(&assignment); err != nil {
+				return fmt.Errorf("revoke IAM role: %w", err)
+			}
 		}
-		if changed > 0 && audit != nil {
+		if found && audit != nil {
 			audit.TargetID = stringPtr(fmt.Sprintf("%d:%d", userID, roleID))
-			if err := insertAudit(s, audit); err != nil {
+			if err := insertAudit(ctx, tx, audit); err != nil {
 				return fmt.Errorf("write IAM role revoke audit: %w", err)
 			}
 		}
@@ -770,7 +877,7 @@ func (r *Repository) RevokeRole(ctx context.Context, actorID, userID, roleID int
 	})
 }
 
-func (r *Repository) ListPermissionCatalog(ctx context.Context) ([]iam.Permission, error) {
+func (r *Repository) ListPermissionCatalog(ctx *servicecontext.Context) ([]iam.Permission, error) {
 	var permissions []iam.Permission
 	s := r.db.Engine().NewSession().Context(ctx)
 	defer s.Close()
@@ -778,14 +885,50 @@ func (r *Repository) ListPermissionCatalog(ctx context.Context) ([]iam.Permissio
 	if err := s.SQL(query).Find(&permissions); err != nil {
 		return nil, fmt.Errorf("list active IAM permission catalog: %w", err)
 	}
+	if err := enrichPermissionResources(s, permissions); err != nil {
+		return nil, fmt.Errorf("load resource details for permission catalog: %w", err)
+	}
 	return permissions, nil
 }
 
-func (r *Repository) GrantPermission(ctx context.Context, actorID, roleID, permissionID int64, audit *iam.AuditLog) error {
+func (r *Repository) ListResourceCatalog(ctx *servicecontext.Context) ([]iam.Resource, error) {
+	var resources []iam.Resource
+	s := r.db.Engine().NewSession().Context(ctx)
+	defer s.Close()
+	if err := s.Table(iam.TableResource).OrderBy("resource_code ASC").Find(&resources); err != nil {
+		return nil, fmt.Errorf("list IAM resource catalog: %w", err)
+	}
+	return resources, nil
+}
+
+func enrichPermissionResources(s *xorm.Session, permissions []iam.Permission) error {
+	if len(permissions) == 0 {
+		return nil
+	}
+	var resources []iam.Resource
+	if err := s.Table(iam.TableResource).Cols("id", "resource_name", "resource_code", "resource_type").Find(&resources); err != nil {
+		return err
+	}
+	byID := make(map[int64]iam.Resource, len(resources))
+	for _, resource := range resources {
+		byID[resource.ID] = resource
+	}
+	for index := range permissions {
+		if resource, ok := byID[permissions[index].ResourceID]; ok {
+			permissions[index].ResourceName = resource.ResourceName
+			permissions[index].ResourceCode = resource.ResourceCode
+			permissions[index].ResourceType = resource.ResourceType
+		}
+	}
+	return nil
+}
+
+func (r *Repository) GrantPermission(ctx *servicecontext.Context, actorID, roleID, permissionID int64, audit *iam.AuditLog) error {
 	if actorID <= 0 || roleID <= 0 || permissionID <= 0 {
 		return errors.New("active actor, role, and permission are required")
 	}
-	return r.db.WithTransaction(ctx, func(s *xorm.Session) error {
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		s := tx.Session
 		var count struct {
 			Value int64 `xorm:"'count'"`
 		}
@@ -796,12 +939,20 @@ func (r *Repository) GrantPermission(ctx context.Context, actorID, roleID, permi
 		if count.Value != 1 {
 			return errors.New("active role and permission are required")
 		}
-		_, err := s.Exec("INSERT INTO "+iam.TableRolePermission+" (role_id, permission_id, created_at, created_by) VALUES (?, ?, CURRENT_TIMESTAMP, ?) ON CONFLICT (role_id, permission_id) DO NOTHING", roleID, permissionID, auditActor(audit))
+		var assignment iam.RolePermission
+		found, err := s.Where("role_id=? AND permission_id=?", roleID, permissionID).Get(&assignment)
 		if err != nil {
-			return fmt.Errorf("grant IAM permission: %w", err)
+			return fmt.Errorf("check IAM permission assignment: %w", err)
+		}
+		if !found {
+			assignment = iam.RolePermission{RoleID: roleID, PermissionID: permissionID}
+			assignment.CreateNew(ctx.UserName())
+			if _, err := tx.Save(&assignment); err != nil {
+				return fmt.Errorf("grant IAM permission: %w", err)
+			}
 		}
 		if audit != nil {
-			if err := insertAudit(s, audit); err != nil {
+			if err := insertAudit(ctx, tx, audit); err != nil {
 				return fmt.Errorf("write IAM permission grant audit: %w", err)
 			}
 		}
@@ -809,11 +960,12 @@ func (r *Repository) GrantPermission(ctx context.Context, actorID, roleID, permi
 	})
 }
 
-func (r *Repository) RevokePermission(ctx context.Context, actorID, roleID, permissionID int64, audit *iam.AuditLog) error {
+func (r *Repository) RevokePermission(ctx *servicecontext.Context, actorID, roleID, permissionID int64, audit *iam.AuditLog) error {
 	if actorID <= 0 || roleID <= 0 || permissionID <= 0 {
 		return errors.New("active operator, role, and permission are required")
 	}
-	return r.db.WithTransaction(ctx, func(s *xorm.Session) error {
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		s := tx.Session
 		var allowed struct {
 			Count int64 `xorm:"'count'"`
 		}
@@ -837,17 +989,20 @@ func (r *Repository) RevokePermission(ctx context.Context, actorID, roleID, perm
 		if role.IsSystem {
 			return errors.New("permissions on system roles cannot be revoked")
 		}
-		result, err := s.Exec("DELETE FROM "+iam.TableRolePermission+" WHERE role_id=? AND permission_id=?", roleID, permissionID)
+		var assignment iam.RolePermission
+		found, err = s.Where("role_id=? AND permission_id=?", roleID, permissionID).ForUpdate().Get(&assignment)
 		if err != nil {
-			return fmt.Errorf("revoke IAM permission: %w", err)
+			return fmt.Errorf("load IAM permission assignment for revocation: %w", err)
 		}
-		changed, err := result.RowsAffected()
-		if err != nil {
-			return err
+		if found {
+			assignment.HardDelete()
+			if _, err := tx.Save(&assignment); err != nil {
+				return fmt.Errorf("revoke IAM permission: %w", err)
+			}
 		}
-		if changed > 0 && audit != nil {
+		if found && audit != nil {
 			audit.TargetID = stringPtr(fmt.Sprintf("%d:%d", roleID, permissionID))
-			if err := insertAudit(s, audit); err != nil {
+			if err := insertAudit(ctx, tx, audit); err != nil {
 				return fmt.Errorf("write IAM permission revoke audit: %w", err)
 			}
 		}
@@ -855,11 +1010,12 @@ func (r *Repository) RevokePermission(ctx context.Context, actorID, roleID, perm
 	})
 }
 
-func (r *Repository) SetUserStatus(ctx context.Context, actorID, userID int64, status, updatedBy string, audit *iam.AuditLog) error {
+func (r *Repository) SetUserStatus(ctx *servicecontext.Context, actorID, userID int64, status string, audit *iam.AuditLog) error {
 	if actorID <= 0 || userID <= 0 || actorID == userID || (status != "active" && status != "disabled") {
 		return errors.New("valid operator, target user, and status are required")
 	}
-	return r.db.WithTransaction(ctx, func(s *xorm.Session) error {
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		s := tx.Session
 		if _, err := s.Exec("LOCK TABLE " + iam.TableUserRole + " IN EXCLUSIVE MODE"); err != nil {
 			return fmt.Errorf("lock IAM role assignments: %w", err)
 		}
@@ -873,21 +1029,21 @@ func (r *Repository) SetUserStatus(ctx context.Context, actorID, userID int64, s
 			}
 			return errors.New("active user write permission is required")
 		}
-		var target struct {
-			Status string `xorm:"'user_status'"`
-		}
-		found, err := s.Table(iam.TableUser).Where("id=?", userID).Get(&target)
+		var target iam.User
+		found, err := s.Where("id=?", userID).ForUpdate().Get(&target)
 		if err != nil {
 			return err
 		}
 		if !found {
 			return errors.New("IAM user not found")
 		}
-		if target.Status == status {
+		if target.UserStatus == status {
 			return nil
 		}
-		now := time.Now().UTC()
-		if _, err := s.Exec("UPDATE "+iam.TableUser+" SET user_status=?, updated_at=?, updated_by=?, version_no=version_no+1 WHERE id=?", status, now, updatedBy, userID); err != nil {
+		target.UserStatus = status
+		target.Update(ctx.UserName())
+		target.Cols("user_status")
+		if _, err := tx.Save(&target); err != nil {
 			return fmt.Errorf("update IAM user status: %w", err)
 		}
 		if status == "disabled" {
@@ -901,14 +1057,14 @@ func (r *Repository) SetUserStatus(ctx context.Context, actorID, userID int64, s
 			if admins.Count == 0 {
 				return errors.New("cannot disable the last active platform administrator")
 			}
-			if _, err := s.Exec("UPDATE "+iam.TableUserSession+" SET status='revoked', revoked_at=?, revocation_reason='user_disabled' WHERE user_id=? AND status='active'", now, userID); err != nil {
+			if err := revokeUserSessions(ctx, tx, s, userID, "user_disabled"); err != nil {
 				return fmt.Errorf("revoke disabled user's sessions: %w", err)
 			}
 		}
 		if audit != nil {
 			audit.TargetID = stringPtr(fmt.Sprintf("%d", userID))
-			audit.ChangesJSON = []byte(fmt.Sprintf(`{"user_status":{"from":%q,"to":%q}}`, target.Status, status))
-			if err := insertAudit(s, audit); err != nil {
+			audit.ChangesJSON = []byte(fmt.Sprintf(`{"user_status":{"from":%q,"to":%q}}`, target.UserStatus, status))
+			if err := insertAudit(ctx, tx, audit); err != nil {
 				return fmt.Errorf("write IAM user status audit: %w", err)
 			}
 		}
@@ -916,11 +1072,12 @@ func (r *Repository) SetUserStatus(ctx context.Context, actorID, userID int64, s
 	})
 }
 
-func (r *Repository) ResetUserPassword(ctx context.Context, actorID, userID int64, salt, hash string, version int16, updatedBy string, audit *iam.AuditLog) error {
+func (r *Repository) ResetUserPassword(ctx *servicecontext.Context, actorID, userID int64, salt, hash string, version int16, audit *iam.AuditLog) error {
 	if actorID <= 0 || userID <= 0 || actorID == userID || salt == "" || hash == "" || version <= 0 {
 		return errors.New("valid operator, target user, and password hash are required")
 	}
-	return r.db.WithTransaction(ctx, func(s *xorm.Session) error {
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		s := tx.Session
 		var actor struct {
 			Count int64 `xorm:"'count'"`
 		}
@@ -931,27 +1088,31 @@ func (r *Repository) ResetUserPassword(ctx context.Context, actorID, userID int6
 			}
 			return errors.New("active user write permission is required")
 		}
-		var target struct {
-			ID int64 `xorm:"'id'"`
-		}
-		found, err := s.Table(iam.TableUser).Where("id=?", userID).Get(&target)
+		var target iam.User
+		found, err := s.Where("id=?", userID).ForUpdate().Get(&target)
 		if err != nil {
 			return err
 		}
 		if !found {
 			return errors.New("IAM user not found")
 		}
-		now := time.Now().UTC()
-		if _, err := s.Exec("UPDATE "+iam.TableUser+" SET password_salt=?, password_hash=?, password_hash_version=?, auth_source=CASE WHEN auth_source='external' THEN 'mixed' ELSE auth_source END, must_change_password=TRUE, updated_at=?, updated_by=?, version_no=version_no+1 WHERE id=?", salt, hash, version, now, updatedBy, userID); err != nil {
+		target.PasswordSalt, target.PasswordHash, target.PasswordHashVersion = &salt, &hash, &version
+		if target.AuthSource == "external" {
+			target.AuthSource = "mixed"
+		}
+		target.MustChangePassword = true
+		target.Update(ctx.UserName())
+		target.Cols("password_salt", "password_hash", "password_hash_version", "auth_source", "must_change_password")
+		if _, err := tx.Save(&target); err != nil {
 			return fmt.Errorf("reset IAM user password: %w", err)
 		}
-		if _, err := s.Exec("UPDATE "+iam.TableUserSession+" SET status='revoked', revoked_at=?, revocation_reason='password_reset' WHERE user_id=? AND status='active'", now, userID); err != nil {
+		if err := revokeUserSessions(ctx, tx, s, userID, "password_reset"); err != nil {
 			return fmt.Errorf("revoke sessions after IAM password reset: %w", err)
 		}
 		if audit != nil {
 			audit.TargetID = stringPtr(fmt.Sprintf("%d", userID))
 			audit.ChangesJSON = []byte(`{"password":"reset","must_change_password":true}`)
-			if err := insertAudit(s, audit); err != nil {
+			if err := insertAudit(ctx, tx, audit); err != nil {
 				return fmt.Errorf("write IAM password reset audit: %w", err)
 			}
 		}
@@ -959,30 +1120,36 @@ func (r *Repository) ResetUserPassword(ctx context.Context, actorID, userID int6
 	})
 }
 
-func (r *Repository) ChangeOwnPassword(ctx context.Context, userID int64, expectedHash, salt, hash string, version int16, currentSessionID string, audit *iam.AuditLog) error {
+func (r *Repository) ChangeOwnPassword(ctx *servicecontext.Context, userID int64, expectedHash, salt, hash string, version int16, currentSessionID string, audit *iam.AuditLog) error {
 	if userID <= 0 || expectedHash == "" || salt == "" || hash == "" || version <= 0 || strings.TrimSpace(currentSessionID) == "" {
 		return errors.New("active user, current session, and password hashes are required")
 	}
-	return r.db.WithTransaction(ctx, func(s *xorm.Session) error {
-		now := time.Now().UTC()
-		result, err := s.Exec("UPDATE "+iam.TableUser+" SET password_salt=?, password_hash=?, password_hash_version=?, must_change_password=FALSE, updated_at=?, updated_by=username, version_no=version_no+1 WHERE id=? AND user_status='active' AND password_hash=?", salt, hash, version, now, userID, expectedHash)
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		s := tx.Session
+		var user iam.User
+		found, err := s.SQL("SELECT * FROM "+iam.TableUser+" WHERE id=? AND user_status='active' AND password_hash=? FOR UPDATE", userID, expectedHash).Get(&user)
 		if err != nil {
 			return fmt.Errorf("change IAM user password: %w", err)
 		}
-		changed, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if changed != 1 {
+		if !found {
 			return errors.New("IAM password changed concurrently or user is inactive")
 		}
-		if _, err := s.Exec("UPDATE "+iam.TableUserSession+" SET status='revoked', revoked_at=?, revocation_reason='password_changed' WHERE user_id=? AND status='active' AND session_id<>?", now, userID, currentSessionID); err != nil {
+		user.PasswordSalt, user.PasswordHash, user.PasswordHashVersion = &salt, &hash, &version
+		user.MustChangePassword = false
+		user.Update(ctx.UserName())
+		user.Cols("password_salt", "password_hash", "password_hash_version", "must_change_password")
+		user.AddSaveCondition("user_status=?", "active")
+		user.AddSaveCondition("password_hash=?", expectedHash)
+		if _, err := tx.Save(&user); err != nil {
+			return fmt.Errorf("save IAM password change: %w", err)
+		}
+		if err := revokeUserSessions(ctx, tx, s, userID, "password_changed", currentSessionID); err != nil {
 			return fmt.Errorf("revoke other sessions after IAM password change: %w", err)
 		}
 		if audit != nil {
 			audit.TargetID = stringPtr(fmt.Sprintf("%d", userID))
 			audit.ChangesJSON = []byte(`{"password":"changed","must_change_password":false}`)
-			if err := insertAudit(s, audit); err != nil {
+			if err := insertAudit(ctx, tx, audit); err != nil {
 				return fmt.Errorf("write IAM password change audit: %w", err)
 			}
 		}
@@ -990,7 +1157,7 @@ func (r *Repository) ChangeOwnPassword(ctx context.Context, userID int64, expect
 	})
 }
 
-func (r *Repository) FindTOTPAuthenticator(ctx context.Context, userID int64) (*iam.UserAuthenticator, error) {
+func (r *Repository) FindTOTPAuthenticator(ctx *servicecontext.Context, userID int64) (*iam.UserAuthenticator, error) {
 	row := new(iam.UserAuthenticator)
 	s := r.db.Engine().NewSession().Context(ctx)
 	defer s.Close()
@@ -1004,11 +1171,12 @@ func (r *Repository) FindTOTPAuthenticator(ctx context.Context, userID int64) (*
 	return row, nil
 }
 
-func (r *Repository) SavePendingTOTP(ctx context.Context, row *iam.UserAuthenticator, audit *iam.AuditLog) error {
+func (r *Repository) SavePendingTOTP(ctx *servicecontext.Context, row *iam.UserAuthenticator, audit *iam.AuditLog) error {
 	if row == nil || row.UserID <= 0 || row.SecretCiphertext == "" || row.EncryptionKeyVersion == "" {
 		return errors.New("valid pending TOTP authenticator is required")
 	}
-	return r.db.WithTransaction(ctx, func(s *xorm.Session) error {
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		s := tx.Session
 		var user struct {
 			Count int64 `xorm:"'count'"`
 		}
@@ -1018,20 +1186,38 @@ func (r *Repository) SavePendingTOTP(ctx context.Context, row *iam.UserAuthentic
 		if user.Count != 1 {
 			return errors.New("active IAM user is required")
 		}
-		query := "INSERT INTO " + iam.TableUserAuthenticator + " (user_id, authenticator_type, secret_ciphertext, encryption_key_version, status, verified_at, last_used_at, last_used_step, created_at, updated_at) VALUES (?, 'totp', ?, ?, 'pending', NULL, NULL, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT (user_id, authenticator_type) DO UPDATE SET secret_ciphertext=EXCLUDED.secret_ciphertext, encryption_key_version=EXCLUDED.encryption_key_version, status='pending', verified_at=NULL, last_used_at=NULL, last_used_step=0, updated_at=CURRENT_TIMESTAMP WHERE " + iam.TableUserAuthenticator + ".status IN ('pending','disabled','revoked')"
-		result, err := s.Exec(query, row.UserID, row.SecretCiphertext, row.EncryptionKeyVersion)
+		var current iam.UserAuthenticator
+		found, err := s.Where("user_id=? AND authenticator_type='totp'", row.UserID).ForUpdate().Get(&current)
 		if err != nil {
-			return fmt.Errorf("save pending IAM TOTP authenticator: %w", err)
+			return fmt.Errorf("load existing IAM TOTP authenticator: %w", err)
 		}
-		changed, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if changed != 1 {
-			return errors.New("an active TOTP authenticator already exists")
+		if found {
+			if current.Status != "pending" && current.Status != "disabled" && current.Status != "revoked" {
+				return errors.New("an active TOTP authenticator already exists")
+			}
+			current.SecretCiphertext = row.SecretCiphertext
+			current.EncryptionKeyVersion = row.EncryptionKeyVersion
+			current.Status = "pending"
+			current.VerifiedAt = nil
+			current.LastUsedAt = nil
+			current.LastUsedStep = 0
+			current.Update(ctx.UserName())
+			current.Cols("secret_ciphertext", "encryption_key_version", "status", "verified_at", "last_used_at", "last_used_step")
+			current.AddSaveCondition("status IN ('pending','disabled','revoked')")
+			if _, err := tx.Save(&current); err != nil {
+				return fmt.Errorf("save pending IAM TOTP authenticator: %w", err)
+			}
+			*row = current
+		} else {
+			row.AuthenticatorType = "totp"
+			row.Status = "pending"
+			row.CreateNew(ctx.UserName())
+			if _, err := tx.Save(row); err != nil {
+				return fmt.Errorf("create pending IAM TOTP authenticator: %w", err)
+			}
 		}
 		if audit != nil {
-			if err := insertAudit(s, audit); err != nil {
+			if err := insertAudit(ctx, tx, audit); err != nil {
 				return fmt.Errorf("write IAM TOTP setup audit: %w", err)
 			}
 		}
@@ -1039,22 +1225,37 @@ func (r *Repository) SavePendingTOTP(ctx context.Context, row *iam.UserAuthentic
 	})
 }
 
-func (r *Repository) ActivateTOTP(ctx context.Context, userID, step int64, audit *iam.AuditLog) error {
-	return r.db.WithTransaction(ctx, func(s *xorm.Session) error {
+func (r *Repository) ActivateTOTP(ctx *servicecontext.Context, userID, step int64, audit *iam.AuditLog) error {
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		s := tx.Session
 		now := time.Now().UTC()
-		result, err := s.Exec("UPDATE "+iam.TableUserAuthenticator+" SET status='active', verified_at=?, last_used_at=?, last_used_step=?, updated_at=? WHERE user_id=? AND authenticator_type='totp' AND status='pending' AND EXISTS (SELECT 1 FROM "+iam.TableUser+" WHERE id=? AND user_status='active')", now, now, step, now, userID, userID)
-		if err != nil {
-			return fmt.Errorf("activate IAM TOTP authenticator: %w", err)
+		var user struct {
+			Count int64 `xorm:"'count'"`
 		}
-		changed, err := result.RowsAffected()
-		if err != nil {
+		if _, err := s.SQL("SELECT COUNT(*) AS count FROM "+iam.TableUser+" WHERE id=? AND user_status='active'", userID).Get(&user); err != nil {
 			return err
 		}
-		if changed != 1 {
+		if user.Count != 1 {
+			return errors.New("active IAM user is required")
+		}
+		var authenticator iam.UserAuthenticator
+		found, err := s.Where("user_id=? AND authenticator_type='totp' AND status='pending'", userID).ForUpdate().Get(&authenticator)
+		if err != nil {
+			return fmt.Errorf("load pending IAM TOTP authenticator: %w", err)
+		}
+		if !found {
 			return errors.New("pending TOTP setup was not found")
 		}
+		authenticator.Status, authenticator.VerifiedAt = "active", &now
+		authenticator.LastUsedAt, authenticator.LastUsedStep = &now, step
+		authenticator.Update(ctx.UserName())
+		authenticator.Cols("status", "verified_at", "last_used_at", "last_used_step")
+		authenticator.AddSaveCondition("status=?", "pending")
+		if _, err := tx.Save(&authenticator); err != nil {
+			return fmt.Errorf("activate IAM TOTP authenticator: %w", err)
+		}
 		if audit != nil {
-			if err := insertAudit(s, audit); err != nil {
+			if err := insertAudit(ctx, tx, audit); err != nil {
 				return fmt.Errorf("write IAM TOTP activation audit: %w", err)
 			}
 		}
@@ -1062,33 +1263,60 @@ func (r *Repository) ActivateTOTP(ctx context.Context, userID, step int64, audit
 	})
 }
 
-func (r *Repository) ConsumeTOTP(ctx context.Context, userID, step int64) error {
-	result, err := r.db.Engine().Context(ctx).Exec("UPDATE "+iam.TableUserAuthenticator+" SET last_used_step=?, last_used_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE user_id=? AND authenticator_type='totp' AND status='active' AND last_used_step < ?", step, userID, step)
-	if err != nil {
-		return fmt.Errorf("consume IAM TOTP code: %w", err)
-	}
-	changed, err := result.RowsAffected()
-	if err != nil || changed != 1 {
-		return errors.New("TOTP code is invalid or already used")
-	}
-	return nil
+func (r *Repository) ConsumeTOTP(ctx *servicecontext.Context, userID, step int64) error {
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		now := time.Now().UTC()
+		var authenticator iam.UserAuthenticator
+		found, err := tx.Where("user_id=? AND authenticator_type='totp' AND status='active' AND last_used_step<?", userID, step).ForUpdate().Get(&authenticator)
+		if err != nil {
+			return fmt.Errorf("load IAM TOTP authenticator for code consumption: %w", err)
+		}
+		if !found {
+			return errors.New("TOTP code is invalid or already used")
+		}
+		authenticator.LastUsedStep, authenticator.LastUsedAt = step, &now
+		authenticator.Update(ctx.UserName())
+		authenticator.Cols("last_used_step", "last_used_at")
+		authenticator.AddSaveCondition("status=?", "active")
+		authenticator.AddSaveCondition("last_used_step<?", step)
+		if _, err := tx.Save(&authenticator); err != nil {
+			return fmt.Errorf("consume IAM TOTP code: %w", err)
+		}
+		return nil
+	})
 }
 
-func (r *Repository) DisableTOTP(ctx context.Context, userID, step int64, audit *iam.AuditLog) error {
-	return r.db.WithTransaction(ctx, func(s *xorm.Session) error {
-		result, err := s.Exec("UPDATE "+iam.TableUserAuthenticator+" SET status='disabled', last_used_step=?, last_used_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE user_id=? AND authenticator_type='totp' AND status='active' AND last_used_step < ? AND EXISTS (SELECT 1 FROM "+iam.TableUser+" WHERE id=? AND user_status='active')", step, userID, step, userID)
+func (r *Repository) DisableTOTP(ctx *servicecontext.Context, userID, step int64, audit *iam.AuditLog) error {
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		s := tx.Session
+		var user struct {
+			Count int64 `xorm:"'count'"`
+		}
+		if _, err := s.SQL("SELECT COUNT(*) AS count FROM "+iam.TableUser+" WHERE id=? AND user_status='active'", userID).Get(&user); err != nil {
+			return err
+		}
+		if user.Count != 1 {
+			return errors.New("active IAM user is required")
+		}
+		var authenticator iam.UserAuthenticator
+		found, err := s.Where("user_id=? AND authenticator_type='totp' AND status='active' AND last_used_step<?", userID, step).ForUpdate().Get(&authenticator)
 		if err != nil {
 			return fmt.Errorf("disable IAM TOTP authenticator: %w", err)
 		}
-		changed, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if changed != 1 {
+		if !found {
 			return errors.New("active TOTP authenticator was not found")
 		}
+		now := time.Now().UTC()
+		authenticator.Status, authenticator.LastUsedStep, authenticator.LastUsedAt = "disabled", step, &now
+		authenticator.Update(ctx.UserName())
+		authenticator.Cols("status", "last_used_step", "last_used_at")
+		authenticator.AddSaveCondition("status=?", "active")
+		authenticator.AddSaveCondition("last_used_step<?", step)
+		if _, err := tx.Save(&authenticator); err != nil {
+			return fmt.Errorf("disable IAM TOTP authenticator: %w", err)
+		}
 		if audit != nil {
-			if err := insertAudit(s, audit); err != nil {
+			if err := insertAudit(ctx, tx, audit); err != nil {
 				return fmt.Errorf("write IAM TOTP disable audit: %w", err)
 			}
 		}
@@ -1096,18 +1324,21 @@ func (r *Repository) DisableTOTP(ctx context.Context, userID, step int64, audit 
 	})
 }
 
-func (r *Repository) WriteAudit(ctx context.Context, audit *iam.AuditLog) error {
+func (r *Repository) WriteAudit(ctx *servicecontext.Context, audit *iam.AuditLog) error {
 	if audit == nil {
 		return errors.New("IAM audit record is required")
 	}
-	return r.db.WithTransaction(ctx, func(s *xorm.Session) error { return insertAudit(s, audit) })
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		return insertAudit(ctx, tx, audit)
+	})
 }
 
-func (r *Repository) BootstrapAdmin(ctx context.Context, user *iam.User, audit *iam.AuditLog) error {
+func (r *Repository) BootstrapAdmin(ctx *servicecontext.Context, user *iam.User, audit *iam.AuditLog) error {
 	if user == nil || audit == nil {
 		return errors.New("bootstrap user and audit record are required")
 	}
-	return r.db.WithTransaction(ctx, func(s *xorm.Session) error {
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		s := tx.Session
 		if _, err := s.Exec("LOCK TABLE " + iam.TableUserRole + " IN EXCLUSIVE MODE"); err != nil {
 			return fmt.Errorf("lock IAM bootstrap state: %w", err)
 		}
@@ -1121,63 +1352,91 @@ func (r *Repository) BootstrapAdmin(ctx context.Context, user *iam.User, audit *
 		if admins.Count > 0 {
 			return errors.New("VeloTrust bootstrap is already complete")
 		}
-		now := time.Now().UTC()
 		var role iam.Role
 		found, err := s.Where("role_code=?", platformAdminRole).Get(&role)
 		if err != nil {
 			return err
 		}
 		if !found {
-			role = iam.Role{RoleName: "Platform Administrator", RoleCode: platformAdminRole, IsSystem: true, Status: "active", CreatedAt: now, UpdatedAt: now, VersionNo: 1, CreatedBy: "bootstrap", UpdatedBy: "bootstrap"}
-			if _, err := s.InsertOne(&role); err != nil {
+			role = iam.Role{RoleName: "Platform Administrator", RoleCode: platformAdminRole, IsSystem: true, Status: "active"}
+			role.CreateNew(ctx.UserName())
+			if _, err := tx.Save(&role); err != nil {
 				return fmt.Errorf("create platform administrator role: %w", err)
 			}
 		}
-		if _, err := s.Exec("INSERT INTO "+iam.TableRoleMenu+" (role_id, menu_id, created_at, created_by) SELECT ?, id, ?, 'bootstrap' FROM "+iam.TableMenu+" WHERE status='active' ON CONFLICT (role_id, menu_id) DO NOTHING", role.ID, now); err != nil {
-			return fmt.Errorf("assign active menus to platform administrator role: %w", err)
+		var menus []iam.Menu
+		if err := s.Where("status='active'").Find(&menus); err != nil {
+			return fmt.Errorf("load active menus for platform administrator: %w", err)
+		}
+		for _, menu := range menus {
+			var assignment iam.RoleMenu
+			found, err := s.Where("role_id=? AND menu_id=?", role.ID, menu.ID).Get(&assignment)
+			if err != nil {
+				return fmt.Errorf("check administrator menu assignment: %w", err)
+			}
+			if found {
+				continue
+			}
+			assignment = iam.RoleMenu{RoleID: role.ID, MenuID: menu.ID}
+			assignment.CreateNew(ctx.UserName())
+			if _, err := tx.Save(&assignment); err != nil {
+				return fmt.Errorf("assign active menu to platform administrator role: %w", err)
+			}
 		}
 		user.UserStatus, user.AuthSource = "active", "local"
-		user.CreatedBy, user.UpdatedBy = "bootstrap", "bootstrap"
-		if err := insertUser(s, user); err != nil {
+		if err := insertUser(ctx, tx, user); err != nil {
 			return fmt.Errorf("create bootstrap user: %w", err)
 		}
-		if _, err := s.Exec("INSERT INTO "+iam.TableUserRole+" (user_id, role_id, created_at, created_by) VALUES (?, ?, ?, ?)", user.ID, role.ID, now, "bootstrap"); err != nil {
+		assignment := &iam.UserRole{UserID: user.ID, RoleID: role.ID}
+		assignment.CreateNew(ctx.UserName())
+		if _, err := tx.Save(assignment); err != nil {
 			return fmt.Errorf("assign platform administrator role: %w", err)
 		}
 		for _, seed := range bootstrapPermissions {
-			resource := &iam.Resource{ResourceName: seed.resource, ResourceCode: seed.resource, ResourceType: "management", Status: "active", CreatedAt: now, UpdatedAt: now, CreatedBy: "bootstrap", UpdatedBy: "bootstrap", VersionNo: 1}
+			resource := &iam.Resource{ResourceName: seed.resource, ResourceCode: seed.resource, ResourceType: "management", Status: "active"}
 			found, err := s.Where("resource_code=?", seed.resource).Get(resource)
 			if err != nil {
 				return err
 			}
 			if !found {
-				if _, err := s.InsertOne(resource); err != nil {
+				resource.CreateNew(ctx.UserName())
+				if _, err := tx.Save(resource); err != nil {
 					return fmt.Errorf("create IAM resource seed: %w", err)
 				}
 			}
-			permission := &iam.Permission{PermissionName: seed.name, PermissionCode: seed.code, ResourceID: resource.ID, ActionCode: seed.action, Status: "active", CreatedAt: now, UpdatedAt: now, CreatedBy: "bootstrap", UpdatedBy: "bootstrap", VersionNo: 1}
+			permission := &iam.Permission{PermissionName: seed.name, PermissionCode: seed.code, ResourceID: resource.ID, ActionCode: seed.action, Status: "active"}
 			found, err = s.Where("permission_code=?", seed.code).Get(permission)
 			if err != nil {
 				return err
 			}
 			if !found {
-				if _, err := s.InsertOne(permission); err != nil {
+				permission.CreateNew(ctx.UserName())
+				if _, err := tx.Save(permission); err != nil {
 					return fmt.Errorf("create IAM permission seed: %w", err)
 				}
 			}
-			if _, err := s.Exec("INSERT INTO "+iam.TableRolePermission+" (role_id, permission_id, created_at, created_by) VALUES (?, ?, ?, ?) ON CONFLICT (role_id, permission_id) DO NOTHING", role.ID, permission.ID, now, "bootstrap"); err != nil {
-				return fmt.Errorf("assign IAM permission seed: %w", err)
+			var assignment iam.RolePermission
+			found, err = s.Where("role_id=? AND permission_id=?", role.ID, permission.ID).Get(&assignment)
+			if err != nil {
+				return fmt.Errorf("check IAM permission seed assignment: %w", err)
+			}
+			if !found {
+				assignment = iam.RolePermission{RoleID: role.ID, PermissionID: permission.ID}
+				assignment.CreateNew(ctx.UserName())
+				if _, err := tx.Save(&assignment); err != nil {
+					return fmt.Errorf("assign IAM permission seed: %w", err)
+				}
 			}
 		}
 		audit.UserID = int64Ptr(user.ID)
-		if err := insertAudit(s, audit); err != nil {
+		if err := insertAudit(ctx, tx, audit); err != nil {
 			return fmt.Errorf("write bootstrap audit: %w", err)
 		}
 		return nil
 	})
 }
 
-func (r *Repository) ListWebAuthnCredentials(ctx context.Context, userID int64, rpID string) ([]iam.WebAuthnCredential, error) {
+func (r *Repository) ListWebAuthnCredentials(ctx *servicecontext.Context, userID int64, rpID string) ([]iam.WebAuthnCredential, error) {
 	var credentials []iam.WebAuthnCredential
 	s := r.db.Engine().NewSession().Context(ctx)
 	defer s.Close()
@@ -1188,7 +1447,7 @@ func (r *Repository) ListWebAuthnCredentials(ctx context.Context, userID int64, 
 	return credentials, nil
 }
 
-func (r *Repository) FindUserByCredential(ctx context.Context, rpID string, credentialID []byte) (*iam.User, []iam.WebAuthnCredential, error) {
+func (r *Repository) FindUserByCredential(ctx *servicecontext.Context, rpID string, credentialID []byte) (*iam.User, []iam.WebAuthnCredential, error) {
 	var credential iam.WebAuthnCredential
 	s := r.db.Engine().NewSession().Context(ctx)
 	found, err := s.Where("rp_id=? AND credential_id=? AND status='active'", rpID, credentialID).Get(&credential)
@@ -1209,7 +1468,7 @@ func (r *Repository) FindUserByCredential(ctx context.Context, rpID string, cred
 	return user, credentials, err
 }
 
-func (r *Repository) CreateAuthChallenge(ctx context.Context, challenge *iam.AuthChallenge) error {
+func (r *Repository) CreateAuthChallenge(ctx *servicecontext.Context, challenge *iam.AuthChallenge) error {
 	if challenge == nil || challenge.ChallengeID == "" || challenge.ChallengeHash == "" || challenge.ChallengeType == "" {
 		return errors.New("complete WebAuthn challenge is required")
 	}
@@ -1219,64 +1478,63 @@ func (r *Repository) CreateAuthChallenge(ctx context.Context, challenge *iam.Aut
 	if challenge.MaxAttempts == 0 {
 		challenge.MaxAttempts = 1
 	}
-	if challenge.CreatedAt.IsZero() {
-		challenge.CreatedAt = time.Now().UTC()
-	}
-	s := r.db.Engine().NewSession().Context(ctx)
-	defer s.Close()
-	if _, err := s.InsertOne(challenge); err != nil {
-		return fmt.Errorf("create WebAuthn challenge: %w", err)
-	}
-	return nil
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		challenge.CreateNew(ctx.UserName())
+		if _, err := tx.Save(challenge); err != nil {
+			return fmt.Errorf("save WebAuthn challenge: %w", err)
+		}
+		return nil
+	})
 }
 
-func (r *Repository) ConsumeAuthChallenge(ctx context.Context, challengeID, challengeHash string) (*iam.AuthChallenge, error) {
-	challenge := new(iam.AuthChallenge)
-	s := r.db.Engine().NewSession().Context(ctx)
-	defer s.Close()
-	found, err := s.Where("challenge_id=? AND challenge_hash=? AND status='pending' AND expires_at>CURRENT_TIMESTAMP AND attempt_count<max_attempts", challengeID, challengeHash).Get(challenge)
-	if err != nil {
-		return nil, fmt.Errorf("load WebAuthn challenge: %w", err)
-	}
-	if !found {
-		return nil, nil
-	}
-	now := time.Now().UTC()
-	result, err := s.Exec("UPDATE "+iam.TableAuthChallenge+" SET status='consumed', consumed_at=?, attempt_count=attempt_count+1 WHERE challenge_id=? AND challenge_hash=? AND status='pending' AND expires_at>? AND attempt_count<max_attempts", now, challengeID, challengeHash, now)
-	if err != nil {
-		return nil, fmt.Errorf("consume WebAuthn challenge: %w", err)
-	}
-	rows, err := result.RowsAffected()
+func (r *Repository) ConsumeAuthChallenge(ctx *servicecontext.Context, challengeID, challengeHash string) (*iam.AuthChallenge, error) {
+	var challenge *iam.AuthChallenge
+	err := r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		now := time.Now().UTC()
+		challenge = new(iam.AuthChallenge)
+		found, err := tx.Where("challenge_id=? AND challenge_hash=? AND status='pending' AND expires_at>? AND attempt_count<max_attempts", challengeID, challengeHash, now).ForUpdate().Get(challenge)
+		if err != nil {
+			return fmt.Errorf("load WebAuthn challenge: %w", err)
+		}
+		if !found {
+			challenge = nil
+			return nil
+		}
+		challenge.Status, challenge.AttemptCount, challenge.ConsumedAt = "consumed", challenge.AttemptCount+1, &now
+		challenge.Update(ctx.UserName())
+		challenge.Cols("status", "attempt_count", "consumed_at")
+		challenge.AddSaveCondition("status=?", "pending")
+		challenge.AddSaveCondition("expires_at>?", now)
+		challenge.AddSaveCondition("attempt_count<max_attempts")
+		if _, err := tx.Save(challenge); err != nil {
+			return fmt.Errorf("consume WebAuthn challenge: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	if rows != 1 {
-		return nil, nil
-	}
-	challenge.Status, challenge.AttemptCount, challenge.ConsumedAt = "consumed", challenge.AttemptCount+1, &now
 	return challenge, nil
 }
 
-func (r *Repository) CreateWebAuthnCredential(ctx context.Context, credential *iam.WebAuthnCredential, audit *iam.AuditLog) error {
+func (r *Repository) CreateWebAuthnCredential(ctx *servicecontext.Context, credential *iam.WebAuthnCredential, audit *iam.AuditLog) error {
 	if credential == nil || len(credential.CredentialID) == 0 || len(credential.PublicKeyCOSE) == 0 {
 		return errors.New("complete WebAuthn credential is required")
 	}
-	return r.db.WithTransaction(ctx, func(s *xorm.Session) error {
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
 		if credential.Status == "" {
 			credential.Status = "active"
-		}
-		if credential.CreatedAt.IsZero() {
-			credential.CreatedAt = time.Now().UTC()
 		}
 		if credential.Transports == "" {
 			credential.Transports = "[]"
 		}
-		if _, err := s.InsertOne(credential); err != nil {
+		credential.CreateNew(ctx.UserName())
+		if _, err := tx.Save(credential); err != nil {
 			return fmt.Errorf("save WebAuthn credential: %w", err)
 		}
 		if audit != nil {
 			audit.UserID = int64Ptr(credential.UserID)
-			if err := insertAudit(s, audit); err != nil {
+			if err := insertAudit(ctx, tx, audit); err != nil {
 				return fmt.Errorf("write WebAuthn registration audit: %w", err)
 			}
 		}
@@ -1284,38 +1542,55 @@ func (r *Repository) CreateWebAuthnCredential(ctx context.Context, credential *i
 	})
 }
 
-func (r *Repository) UpdateWebAuthnCredentialUse(ctx context.Context, credential *iam.WebAuthnCredential) error {
+func (r *Repository) UpdateWebAuthnCredentialUse(ctx *servicecontext.Context, credential *iam.WebAuthnCredential) error {
 	if credential == nil || credential.ID <= 0 {
 		return errors.New("WebAuthn credential ID is required")
 	}
-	now := time.Now().UTC()
-	s := r.db.Engine().NewSession().Context(ctx)
-	defer s.Close()
-	result, err := s.Exec("UPDATE "+iam.TableWebAuthnCredential+" SET signature_count=?, backup_state=?, last_used_at=? WHERE id=? AND status='active' AND (signature_count=0 OR ?>signature_count)", credential.SignatureCount, credential.BackupState, now, credential.ID, credential.SignatureCount)
-	if err != nil {
-		return fmt.Errorf("update WebAuthn credential usage: %w", err)
-	}
-	rows, err := result.RowsAffected()
-	if err != nil || rows != 1 {
-		return errors.New("WebAuthn credential counter did not advance or credential was revoked")
-	}
-	return nil
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		now := time.Now().UTC()
+		var current iam.WebAuthnCredential
+		found, err := tx.Where("id=? AND status='active' AND (signature_count=0 OR signature_count<?)", credential.ID, credential.SignatureCount).ForUpdate().Get(&current)
+		if err != nil {
+			return fmt.Errorf("load WebAuthn credential usage: %w", err)
+		}
+		if !found {
+			return errors.New("WebAuthn credential counter did not advance or credential was revoked")
+		}
+		current.SignatureCount, current.BackupState, current.LastUsedAt = credential.SignatureCount, credential.BackupState, &now
+		current.Update(ctx.UserName())
+		current.Cols("signature_count", "backup_state", "last_used_at")
+		current.AddSaveCondition("status=?", "active")
+		current.AddSaveCondition("signature_count=0 OR signature_count<?", credential.SignatureCount)
+		if _, err := tx.Save(&current); err != nil {
+			return fmt.Errorf("update WebAuthn credential usage: %w", err)
+		}
+		return nil
+	})
 }
 
-func (r *Repository) RevokeWebAuthnCredential(ctx context.Context, userID, credentialID int64, audit *iam.AuditLog) error {
-	return r.db.WithTransaction(ctx, func(s *xorm.Session) error {
+func (r *Repository) RevokeWebAuthnCredential(ctx *servicecontext.Context, userID, credentialID int64, audit *iam.AuditLog) error {
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		s := tx.Session
 		now := time.Now().UTC()
-		result, err := s.Exec("UPDATE "+iam.TableWebAuthnCredential+" SET status='revoked', revoked_at=?, revocation_reason='user_request' WHERE user_id=? AND id=? AND status='active'", now, userID, credentialID)
+		var credential iam.WebAuthnCredential
+		found, err := s.Where("user_id=? AND id=? AND status='active'", userID, credentialID).ForUpdate().Get(&credential)
 		if err != nil {
 			return fmt.Errorf("revoke WebAuthn credential: %w", err)
 		}
-		rows, err := result.RowsAffected()
-		if err != nil || rows != 1 {
+		if !found {
 			return errors.New("active WebAuthn credential not found")
+		}
+		reason := "user_request"
+		credential.Status, credential.RevokedAt, credential.RevocationReason = "revoked", &now, &reason
+		credential.Update(ctx.UserName())
+		credential.Cols("status", "revoked_at", "revocation_reason")
+		credential.AddSaveCondition("status=?", "active")
+		if _, err := tx.Save(&credential); err != nil {
+			return fmt.Errorf("revoke WebAuthn credential: %w", err)
 		}
 		if audit != nil {
 			audit.UserID = int64Ptr(userID)
-			if err := insertAudit(s, audit); err != nil {
+			if err := insertAudit(ctx, tx, audit); err != nil {
 				return fmt.Errorf("write WebAuthn revocation audit: %w", err)
 			}
 		}
@@ -1323,7 +1598,7 @@ func (r *Repository) RevokeWebAuthnCredential(ctx context.Context, userID, crede
 	})
 }
 
-func insertAudit(s *xorm.Session, audit *iam.AuditLog) error {
+func insertAudit(ctx *servicecontext.Context, tx *database.DBTransaction, audit *iam.AuditLog) error {
 	if audit.EventID == "" || audit.Action == "" || audit.TargetType == "" || audit.Result == "" {
 		return errors.New("IAM audit event is incomplete")
 	}
@@ -1335,24 +1610,46 @@ func insertAudit(s *xorm.Session, audit *iam.AuditLog) error {
 	if audit.OccurredAt.IsZero() {
 		audit.OccurredAt = time.Now().UTC()
 	}
-	if _, err := s.InsertOne(audit); err != nil {
+	if audit.State() != database.ModelState_New {
+		audit.CreateNew(ctx.UserName())
+	}
+	if _, err := tx.Save(audit); err != nil {
 		return err
 	}
 	return nil
 }
 
-func auditActor(audit *iam.AuditLog) string {
-	if audit == nil || audit.UserName == "" {
-		return "system"
+func revokeUserSessions(ctx *servicecontext.Context, tx *database.DBTransaction, s *xorm.Session, userID int64, reason string, exceptSessionID ...string) error {
+	query := "user_id=? AND status='active'"
+	args := []any{userID}
+	if len(exceptSessionID) > 0 && exceptSessionID[0] != "" {
+		query += " AND session_id<>?"
+		args = append(args, exceptSessionID[0])
 	}
-	return audit.UserName
+	var sessions []iam.UserSession
+	if err := s.Where(query, args...).ForUpdate().Find(&sessions); err != nil {
+		return fmt.Errorf("load active IAM sessions for revocation: %w", err)
+	}
+	now := time.Now().UTC()
+	for i := range sessions {
+		sessions[i].Status = "revoked"
+		sessions[i].RevokedAt = &now
+		sessions[i].RevocationReason = &reason
+		sessions[i].Update(ctx.UserName())
+		sessions[i].Cols("status", "revoked_at", "revocation_reason")
+		sessions[i].AddSaveCondition("status=?", "active")
+		if _, err := tx.Save(&sessions[i]); err != nil {
+			return fmt.Errorf("save revoked IAM session: %w", err)
+		}
+	}
+	return nil
 }
 
-func nullable(value string) any {
+func nullableStringPtr(value string) *string {
 	if strings.TrimSpace(value) == "" {
 		return nil
 	}
-	return value
+	return &value
 }
 
 func int64Ptr(value int64) *int64    { return &value }

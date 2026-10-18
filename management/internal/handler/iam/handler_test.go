@@ -31,4 +31,39 @@ func TestAllIAMJRPCMethodsHaveDeclaredAccessPolicies(t *testing.T) {
 			}
 		}
 	}
+
+	catalog, err := buildMethodCatalog(methods)
+	if err != nil {
+		t.Fatalf("build JRPC method catalog: %v", err)
+	}
+	if len(catalog) == 0 {
+		t.Fatal("JRPC method catalog is empty")
+	}
+	registeredIAMMethods := 0
+	for _, method := range methods {
+		if method.Service == "IAM" {
+			registeredIAMMethods++
+		}
+	}
+	if len(catalog) != registeredIAMMethods {
+		t.Fatalf("catalog has %d entries for %d registered IAM methods", len(catalog), registeredIAMMethods)
+	}
+	byCode := make(map[string]MethodCatalogItem, len(catalog))
+	for _, item := range catalog {
+		byCode[item.MethodCode] = item
+	}
+	if item, ok := byCode["IAM_Login"]; !ok || item.PolicyType != "public" {
+		t.Errorf("login method should be listed as public, got %+v, found=%v", item, ok)
+	}
+	if item, ok := byCode["IAM_ListUsers"]; !ok || item.PolicyType != "permission" || item.PermissionCode != "iam.user.read" {
+		t.Errorf("user listing should map to iam.user.read, got %+v, found=%v", item, ok)
+	}
+	if item, ok := byCode["IAM_SetupTOTP"]; !ok || item.PolicyType != "authenticated" {
+		t.Errorf("TOTP setup should require authentication, got %+v, found=%v", item, ok)
+	}
+
+	missingPolicy := append(append([]jrpc.MethodDescriptor(nil), methods...), jrpc.MethodDescriptor{Service: "IAM", Method: "Unmapped", Access: jrpc.AccessAuthenticated})
+	if _, err := buildMethodCatalog(missingPolicy); err == nil {
+		t.Fatal("method catalog accepted a JRPC method without an access declaration")
+	}
 }

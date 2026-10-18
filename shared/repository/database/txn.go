@@ -13,6 +13,7 @@ type DBTransaction struct {
 	once             sync.Once
 	hasTxn, finished bool
 	beginErr         error
+	savedModels      []IModel
 }
 
 func NewDBTransaction(sess *xorm.Session) *DBTransaction {
@@ -49,6 +50,10 @@ func (tn *DBTransaction) Commit() error {
 		return err
 	}
 	tn.finished = true
+	for _, model := range tn.savedModels {
+		model.SetModelState(ModelState_None)
+	}
+	tn.savedModels = nil
 	return nil
 }
 
@@ -64,15 +69,23 @@ func (tn *DBTransaction) Save(objects ...IModel) (int64, error) {
 	for i := range objects {
 		value := reflect.ValueOf(objects[i])
 		if !value.IsValid() || (value.Kind() == reflect.Ptr && value.IsNil()) {
-			continue
+			return 0, fmt.Errorf("cannot save a nil model")
 		}
 		if n, err := saveObject(tn, objects[i]); err != nil {
 			return 0, err
 		} else {
 			if n != 1 {
-				return 0, fmt.Errorf("save table %s failed", objects[i].(ITableName).TableName())
+				table := "<unknown>"
+				if named, ok := objects[i].(ITableName); ok {
+					table = named.TableName()
+				}
+				if n == 0 && objects[i].State() != ModelState_New {
+					return 0, fmt.Errorf("%w: save table %s affected no rows", ErrVersionConflict, table)
+				}
+				return 0, fmt.Errorf("save table %s affected %d rows", table, n)
 			}
 			cnt += n
+			tn.savedModels = append(tn.savedModels, objects[i])
 		}
 	}
 	return cnt, nil

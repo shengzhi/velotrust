@@ -10,12 +10,18 @@ import (
 	"time"
 
 	"velotrust/management/internal/config"
+	enrollmentHandler "velotrust/management/internal/handler/enrollment"
 	"velotrust/management/internal/handler/iam"
+	ipamHandler "velotrust/management/internal/handler/ipam"
 	"velotrust/management/internal/lib/cache"
 	"velotrust/management/internal/lib/logger"
 	"velotrust/management/internal/middleware"
+	appEnrollmentRepo "velotrust/management/internal/repository/enrollment"
 	appIAMRepo "velotrust/management/internal/repository/iam"
+	appIPAMRepo "velotrust/management/internal/repository/ipam"
+	appEnrollmentService "velotrust/management/internal/service/enrollment"
 	appIAMService "velotrust/management/internal/service/iam"
+	appIPAMService "velotrust/management/internal/service/ipam"
 	management "velotrust/management/runtime"
 	"velotrust/pkg/ioc"
 	"velotrust/pkg/jrpc"
@@ -93,6 +99,24 @@ func Build(conf *config.Config, listenAddr, version string) (*management.Server,
 		return nil, nil, nil, fmt.Errorf("resolve IAM service from IOC: %w", err)
 	}
 	resolver := middleware.SessionIdentityResolver(service)
+	enrollmentService, err := ioc.GetObject[*appEnrollmentService.Service]()
+	if err != nil {
+		if ceremonyCloser != nil {
+			_ = ceremonyCloser.Close()
+		}
+		_ = service.Close()
+		_ = db.Close()
+		return nil, nil, nil, fmt.Errorf("resolve enrollment service from IOC: %w", err)
+	}
+	ipamService, err := ioc.GetObject[*appIPAMService.Service]()
+	if err != nil {
+		if ceremonyCloser != nil {
+			_ = ceremonyCloser.Close()
+		}
+		_ = service.Close()
+		_ = db.Close()
+		return nil, nil, nil, fmt.Errorf("resolve IPAM service from IOC: %w", err)
+	}
 	server, err := management.New(management.Config{
 		ListenAddr: listenAddr, Version: version, IdentityResolver: resolver,
 		TrustedProxies: conf.HTTP.TrustedProxies,
@@ -102,13 +126,32 @@ func Build(conf *config.Config, listenAddr, version string) (*management.Server,
 			AllowedHeaders: conf.HTTP.CORS.AllowedHeaders,
 			MaxAgeSeconds:  conf.HTTP.CORS.MaxAgeSeconds,
 		}),
-	}, func(rpc *jrpc.Server) error { return iam.Register(rpc, service) })
+	}, func(rpc *jrpc.Server) error {
+		if err := iam.Register(rpc, service); err != nil {
+			return err
+		}
+		if err := enrollmentHandler.Register(rpc, enrollmentService, service); err != nil {
+			return err
+		}
+		return ipamHandler.Register(rpc, ipamService, service)
+	})
 	if err != nil {
+		if ceremonyCloser != nil {
+			_ = ceremonyCloser.Close()
+		}
 		_ = service.Close()
 		_ = db.Close()
 		return nil, nil, nil, fmt.Errorf("compose Management JRPC server: %w", err)
 	}
-	return server, db, service.Close, nil
+	closeResources := func() error {
+		var closeErr error
+		if ceremonyCloser != nil {
+			closeErr = errors.Join(closeErr, ceremonyCloser.Close())
+		}
+		closeErr = errors.Join(closeErr, service.Close())
+		return closeErr
+	}
+	return server, db, closeResources, nil
 }
 
 func registerDependencies(conf *config.Config, db *database.Database, ceremonyStore cache.OneTimeStore) error {
@@ -144,6 +187,46 @@ func registerDependencies(conf *config.Config, db *database.Database, ceremonySt
 			WebAuthnRPID: loaded.Auth.WebAuthn.RPID, WebAuthnName: loaded.Auth.WebAuthn.DisplayName,
 			WebAuthnOrigins: loaded.Auth.WebAuthn.Origins, CeremonyStore: ceremonyStore,
 		})
+	}, ioc.Singleton)
+	ioc.RegistInterfaceFunc[appEnrollmentRepo.Store, appEnrollmentRepo.Repository](func() (*appEnrollmentRepo.Repository, error) {
+		sharedDB, err := ioc.GetObject[*database.Database]()
+		if err != nil {
+			return nil, err
+		}
+		return appEnrollmentRepo.New(sharedDB)
+	}, ioc.Singleton)
+	ioc.RegistObjectFunc[appEnrollmentService.Service](func() (*appEnrollmentService.Service, error) {
+		store, err := ioc.GetObject[appEnrollmentRepo.Store]()
+		if err != nil {
+			return nil, err
+		}
+		permissions, err := ioc.GetObject[*appIAMService.Service]()
+		if err != nil {
+			return nil, err
+		}
+		networks, err := ioc.GetObject[appIPAMRepo.Store]()
+		if err != nil {
+			return nil, err
+		}
+		return appEnrollmentService.New(store, permissions, networks)
+	}, ioc.Singleton)
+	ioc.RegistInterfaceFunc[appIPAMRepo.Store, appIPAMRepo.Repository](func() (*appIPAMRepo.Repository, error) {
+		sharedDB, err := ioc.GetObject[*database.Database]()
+		if err != nil {
+			return nil, err
+		}
+		return appIPAMRepo.New(sharedDB)
+	}, ioc.Singleton)
+	ioc.RegistObjectFunc[appIPAMService.Service](func() (*appIPAMService.Service, error) {
+		store, err := ioc.GetObject[appIPAMRepo.Store]()
+		if err != nil {
+			return nil, err
+		}
+		permissions, err := ioc.GetObject[*appIAMService.Service]()
+		if err != nil {
+			return nil, err
+		}
+		return appIPAMService.New(store, permissions)
 	}, ioc.Singleton)
 	dependencyRegistered = true
 	return nil

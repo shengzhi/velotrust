@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
+	servicecontext "velotrust/management/internal/context"
 	model "velotrust/management/internal/model/iam"
 	repository "velotrust/management/internal/repository/iam"
-	core "velotrust/management/internal/service"
 )
 
 type testStore struct {
@@ -37,88 +37,95 @@ type testStore struct {
 	grantRoleActorID       int64
 	grantRoleTargetID      int64
 	hasPermission          bool
+	resourceCatalog        []model.Resource
+	resourceCatalogCalled  bool
 }
 
-func (s *testStore) LoginBlocked(context.Context, string, string) (bool, error) {
+func (s *testStore) LoginBlocked(*servicecontext.Context, string, string) (bool, error) {
 	return s.blocked, nil
 }
 
-func (s *testStore) FindTOTPAuthenticator(context.Context, int64) (*model.UserAuthenticator, error) {
+func (s *testStore) FindTOTPAuthenticator(*servicecontext.Context, int64) (*model.UserAuthenticator, error) {
 	return s.totpAuthenticator, nil
 }
 
-func (s *testStore) ConsumeTOTP(_ context.Context, _ int64, step int64) error {
+func (s *testStore) ConsumeTOTP(_ *servicecontext.Context, _ int64, step int64) error {
 	s.totpConsumedStep = step
 	return s.totpConsumeError
 }
 
-func (s *testStore) FindUserByUsername(context.Context, string) (*model.User, error) {
+func (s *testStore) FindUserByUsername(*servicecontext.Context, string) (*model.User, error) {
 	return s.user, nil
 }
 
-func (s *testStore) FindUserByID(context.Context, int64) (*model.User, error) {
+func (s *testStore) FindUserByID(*servicecontext.Context, int64) (*model.User, error) {
 	return s.user, nil
 }
 
-func (s *testStore) CreateLoginSession(_ context.Context, session *model.UserSession, log *model.LoginLog, _ string, usernameHash, ipHash string) error {
+func (s *testStore) CreateLoginSession(_ *servicecontext.Context, session *model.UserSession, log *model.LoginLog, _ string, usernameHash, ipHash string) error {
 	s.loginSession, s.loginLog = session, log
 	s.usernameThrottleHash, s.ipThrottleHash = usernameHash, ipHash
 	return nil
 }
 
-func (s *testStore) RecordLoginFailure(_ context.Context, _ *model.LoginLog, _, _ string, _, _, _ int) error {
+func (s *testStore) RecordLoginFailure(_ *servicecontext.Context, _ *model.LoginLog, _, _ string, _, _, _ int) error {
 	s.loginFailureCount++
 	return nil
 }
 
-func (s *testStore) ResolveSession(context.Context, string) (*model.UserSession, *model.User, error) {
+func (s *testStore) ResolveSession(*servicecontext.Context, string) (*model.UserSession, *model.User, error) {
 	return s.loginSession, s.user, nil
 }
 
-func (s *testStore) TouchSession(context.Context, string, string, string) error {
+func (s *testStore) TouchSession(*servicecontext.Context, string, string, string) error {
 	s.touched = true
 	return nil
 }
 
-func (s *testStore) RevokeSession(_ context.Context, _, reason string) error {
+func (s *testStore) RevokeSession(_ *servicecontext.Context, _, reason string) error {
 	s.revokedReason = reason
 	return nil
 }
 
-func (s *testStore) GrantRole(_ context.Context, actorID, userID, _ int64, _ *model.AuditLog) error {
+func (s *testStore) GrantRole(_ *servicecontext.Context, actorID, userID, _ int64, _ *model.AuditLog) error {
 	s.grantRoleCalled = true
 	s.grantRoleActorID, s.grantRoleTargetID = actorID, userID
 	return nil
 }
 
-func (s *testStore) RevokeRole(context.Context, int64, int64, int64, *model.AuditLog) error {
+func (s *testStore) RevokeRole(*servicecontext.Context, int64, int64, int64, *model.AuditLog) error {
 	s.revokeRoleCalled = true
 	return nil
 }
 
-func (s *testStore) RevokePermission(context.Context, int64, int64, int64, *model.AuditLog) error {
+func (s *testStore) RevokePermission(*servicecontext.Context, int64, int64, int64, *model.AuditLog) error {
 	s.revokePermissionCalled = true
 	return nil
 }
 
-func (s *testStore) SetUserStatus(context.Context, int64, int64, string, string, *model.AuditLog) error {
+func (s *testStore) SetUserStatus(*servicecontext.Context, int64, int64, string, *model.AuditLog) error {
 	s.setUserStatusCalled = true
 	return nil
 }
 
-func (s *testStore) ResetUserPassword(context.Context, int64, int64, string, string, int16, string, *model.AuditLog) error {
+func (s *testStore) ResetUserPassword(*servicecontext.Context, int64, int64, string, string, int16, *model.AuditLog) error {
 	s.resetPasswordCalled = true
 	return nil
 }
 
-func (s *testStore) ChangeOwnPassword(_ context.Context, _ int64, _, _, _ string, _ int16, sessionID string, _ *model.AuditLog) error {
+func (s *testStore) ChangeOwnPassword(_ *servicecontext.Context, _ int64, _, _, _ string, _ int16, sessionID string, _ *model.AuditLog) error {
 	s.changePasswordCalled = true
 	s.changedSessionID = sessionID
 	return nil
 }
 
-func (s *testStore) HasPermission(context.Context, int64, string) (bool, error) {
+func (s *testStore) HasPermission(*servicecontext.Context, int64, string) (bool, error) {
 	return s.hasPermission, nil
+}
+
+func (s *testStore) ListResourceCatalog(*servicecontext.Context) ([]model.Resource, error) {
+	s.resourceCatalogCalled = true
+	return s.resourceCatalog, nil
 }
 
 func TestPasswordHashVerifiesAndUsesUniqueSalt(t *testing.T) {
@@ -278,7 +285,7 @@ func TestGrantRoleRejectsSelfAssignmentBeforeStoreCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := core.NewContext(context.Background(), core.Principal{ID: "7", Name: "operator"}, core.RequestMeta{})
+	ctx := servicecontext.New(context.Background(), servicecontext.Principal{ID: "7", Name: "operator"}, servicecontext.RequestMeta{})
 	if err := service.GrantRole(ctx, 7, 1); err == nil {
 		t.Fatal("self role assignment was accepted")
 	}
@@ -293,7 +300,7 @@ func TestGrantRoleRequiresPermissionAtServiceBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := core.NewContext(context.Background(), core.Principal{ID: "7", Name: "operator"}, core.RequestMeta{})
+	ctx := servicecontext.New(context.Background(), servicecontext.Principal{ID: "7", Name: "operator"}, servicecontext.RequestMeta{})
 	if err := service.GrantRole(ctx, 8, 3); err == nil {
 		t.Fatal("role assignment without iam.role.grant permission was accepted")
 	}
@@ -309,13 +316,37 @@ func TestGrantRoleRequiresPermissionAtServiceBoundary(t *testing.T) {
 	}
 }
 
+func TestResourceCatalogRequiresRoleReadPermission(t *testing.T) {
+	store := &testStore{resourceCatalog: []model.Resource{{ID: 1, ResourceCode: "iam.user"}}}
+	service, err := New(store, Options{ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := servicecontext.New(context.Background(), servicecontext.Principal{ID: "7", Name: "operator"}, servicecontext.RequestMeta{})
+	if _, err := service.ListResourceCatalog(ctx); err == nil {
+		t.Fatal("resource catalog was returned without iam.role.read")
+	}
+	if store.resourceCatalogCalled {
+		t.Fatal("unauthorized resource catalog read reached the store")
+	}
+
+	store.hasPermission = true
+	resources, err := service.ListResourceCatalog(ctx)
+	if err != nil {
+		t.Fatalf("authorized resource catalog read failed: %v", err)
+	}
+	if !store.resourceCatalogCalled || len(resources) != 1 || resources[0].ResourceCode != "iam.user" {
+		t.Fatalf("unexpected resource catalog result: called=%v resources=%+v", store.resourceCatalogCalled, resources)
+	}
+}
+
 func TestIAMMutationsRequirePermissionsAtServiceBoundary(t *testing.T) {
 	store := &testStore{}
 	service, err := New(store, Options{ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := core.NewContext(context.Background(), core.Principal{ID: "7", Name: "operator"}, core.RequestMeta{})
+	ctx := servicecontext.New(context.Background(), servicecontext.Principal{ID: "7", Name: "operator"}, servicecontext.RequestMeta{})
 	mutations := []struct {
 		name   string
 		call   func() error
@@ -341,7 +372,7 @@ func TestPasswordResetRequiresPermissionAndRejectsSelfReset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := core.NewContext(context.Background(), core.Principal{ID: "7", Name: "operator"}, core.RequestMeta{})
+	ctx := servicecontext.New(context.Background(), servicecontext.Principal{ID: "7", Name: "operator"}, servicecontext.RequestMeta{})
 	if err := service.ResetUserPassword(ctx, 8, "temporary password 123"); err == nil || store.resetPasswordCalled {
 		t.Fatal("password reset without iam.user.write permission reached the repository")
 	}
@@ -371,7 +402,7 @@ func TestOwnPasswordChangeChecksOldPasswordAndKeepsCurrentSession(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := core.NewContext(context.Background(), core.Principal{ID: "7", Name: "operator", EntityID: "session-current"}, core.RequestMeta{})
+	ctx := servicecontext.New(context.Background(), servicecontext.Principal{ID: "7", Name: "operator", EntityID: "session-current"}, servicecontext.RequestMeta{})
 	if err := service.ChangeOwnPassword(ctx, "wrong old password", "new password value 123"); err == nil || store.changePasswordCalled {
 		t.Fatal("password change accepted an incorrect current password")
 	}
