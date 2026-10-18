@@ -5,6 +5,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/netip"
 	"reflect"
 	"strings"
 	"sync"
@@ -40,16 +41,17 @@ func (rm RpcMethod) ReplyType() reflect.Type {
 }
 
 type Context struct {
-	Protocol    TransportProtocol
-	HttpRequest *http.Request
-	Writer      ResponseWriter
-	Conn        net.Conn
-	Identity    Identity
-	AccessMode  AccessMode
-	chain       handlerChain
-	codecReq    codec.CodecRequest
-	serviceMap  *serviceMap
-	index       int8
+	Protocol       TransportProtocol
+	HttpRequest    *http.Request
+	Writer         ResponseWriter
+	Conn           net.Conn
+	Identity       Identity
+	AccessMode     AccessMode
+	chain          handlerChain
+	codecReq       codec.CodecRequest
+	serviceMap     *serviceMap
+	trustedProxies []netip.Prefix
+	index          int8
 	// This mutex protects Keys map.
 	mu sync.RWMutex
 	// Keys is a key/value pair exclusively for the context of each request.
@@ -161,11 +163,11 @@ func (ctx *Context) RemoteIP() string {
 	if ctx == nil || ctx.HttpRequest == nil {
 		return ""
 	}
-	ip, _, err := net.SplitHostPort(strings.TrimSpace(ctx.HttpRequest.RemoteAddr))
-	if err != nil {
+	addr, ok := parsePeerAddress(ctx.HttpRequest.RemoteAddr)
+	if !ok {
 		return ""
 	}
-	return ip
+	return addr.String()
 }
 
 // ClientIP 尽最大努力实现获取客户端 IP 的算法。
@@ -174,22 +176,58 @@ func (ctx *Context) ClientIP() string {
 	if ctx == nil || ctx.HttpRequest == nil {
 		return ""
 	}
-	xForwardedFor := ctx.HttpRequest.Header.Get("X-Forwarded-For")
-	ip := strings.TrimSpace(strings.Split(xForwardedFor, ",")[0])
-	if ip != "" {
-		return ip
+	remote, ok := parsePeerAddress(ctx.HttpRequest.RemoteAddr)
+	if !ok {
+		return ""
 	}
-
-	ip = strings.TrimSpace(ctx.HttpRequest.Header.Get("X-Real-Ip"))
-	if ip != "" {
-		return ip
+	if !ctx.isTrustedProxy(remote) {
+		return remote.String()
 	}
-
-	if ip, _, err := net.SplitHostPort(strings.TrimSpace(ctx.HttpRequest.RemoteAddr)); err == nil {
-		return ip
+	if forwarded := strings.TrimSpace(ctx.HttpRequest.Header.Get("X-Forwarded-For")); forwarded != "" {
+		current := remote
+		hops := strings.Split(forwarded, ",")
+		for i := len(hops) - 1; i >= 0; i-- {
+			if !ctx.isTrustedProxy(current) {
+				return current.String()
+			}
+			hop, valid := parsePeerAddress(hops[i])
+			if !valid {
+				return remote.String()
+			}
+			current = hop
+		}
+		return current.String()
 	}
+	if realIP, valid := parsePeerAddress(ctx.HttpRequest.Header.Get("X-Real-Ip")); valid {
+		return realIP.String()
+	}
+	return remote.String()
+}
 
-	return ""
+func (ctx *Context) isTrustedProxy(addr netip.Addr) bool {
+	addr = addr.Unmap()
+	for _, prefix := range ctx.trustedProxies {
+		if prefix.IsValid() && prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+func parsePeerAddress(value string) (netip.Addr, bool) {
+	value = strings.TrimSpace(value)
+	if addr, err := netip.ParseAddr(value); err == nil {
+		return addr.Unmap(), true
+	}
+	if addrPort, err := netip.ParseAddrPort(value); err == nil {
+		return addrPort.Addr().Unmap(), true
+	}
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		if addr, parseErr := netip.ParseAddr(host); parseErr == nil {
+			return addr.Unmap(), true
+		}
+	}
+	return netip.Addr{}, false
 }
 
 func (ctx *Context) RequestObj() any { return ctx.requestObj }

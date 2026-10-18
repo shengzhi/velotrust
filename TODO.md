@@ -16,8 +16,12 @@
 ### 阶段一：共享数据库基础与可组合启动
 
 - [x] **Management JRPC 传输框架**：管理接口使用模板兼容的 HTTP JRPC 协议；HUB Agent 控制流继续使用 gRPC，northbound API 与 southbound control channel 分离。
-- [ ] **数据库基础设施代码**：实现统一连接池、事务边界、健康检查和关闭生命周期；首版明确目标数据库（建议 PostgreSQL），业务模块通过 Repository 接口访问数据。
-- [ ] **模块数据所有权与迁移**：建立版本化数据库迁移；Management 与 HUB 使用各自 Repository 和事务接口，明确节点、期望配置、会话及审计数据的主责方。
+- [x] **IAM 模块设计**：确定身份、会话、RBAC、JRPC 权限门、数据模型补充项及分阶段验收；详见 `docs/VeloTrust_IAM身份与访问管理模块设计.md`。
+- [x] **IAM PostgreSQL 建表与迁移**：生成 IAM 初始 schema（22 张表），包含 Passkey 凭证；外部组织和目录同步任务暂不建表。版本化 migration 已在本机 PostgreSQL 测试数据库执行。
+- [x] **数据库基础设施代码**：实现共享 XORM 连接池、事务边界、健康检查和关闭生命周期；IAM Repository 通过明确接口访问 PostgreSQL。
+- [x] **IAM 业务层与数据访问层**：接入模板 IOC 和 Repository 结构，实现本地密码登录、Argon2id、Passkey、TOTP MFA、限流、用户停用/密码重置、会话撤销、强制改密、RBAC 授权/撤销及审计 JRPC。
+- [x] **版本化数据库迁移入口**：Management 提供带事务、 advisory lock 和校验和的 PostgreSQL migration runner；已有手工建表数据库需先校验再显式 baseline。本机 PostgreSQL 测试数据库迁移已完成。
+- [ ] **模块数据所有权**：Management 与 HUB 使用各自 Repository 和事务接口，明确节点、期望配置、会话及审计数据的主责方。
 - [ ] **启动模式实现**：在 `cmd/server` 实现 `combined | management | hub` 模式及独立启停、监听地址配置；新增 `hub/` 作为独立逻辑服务（承接当前 `signal/` 占位职责）。合并模式共享数据库池、日志和指标，但保留两套服务入口与生命周期；分离模式复用相同业务包。
 - [ ] **部署与运行验收**：提供单进程合并部署及 Management/HUB 分别运行的配置和集成测试，验证两种方式操作同一数据库时的数据行为一致。
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -24,6 +25,8 @@ type Config struct {
 	Version          string
 	MaxRequestBytes  int64
 	IdentityResolver protocol.IdentityResolver
+	TrustedProxies   []string
+	HTTPMiddleware   func(http.Handler) http.Handler
 }
 
 // Server serves the template-compatible JRPC envelope at POST /jrpc.
@@ -45,7 +48,11 @@ func NewServer(cfg Config, registrars ...Registrar) (*Server, error) {
 		cfg.MaxRequestBytes = defaultMaxRequestBytes
 	}
 
-	rpcServer := protocol.NewServer(protocol.WithIdentityResolver(cfg.IdentityResolver))
+	trustedProxies, err := parseTrustedProxies(cfg.TrustedProxies)
+	if err != nil {
+		return nil, fmt.Errorf("configure trusted proxies: %w", err)
+	}
+	rpcServer := protocol.NewServer(protocol.WithIdentityResolver(cfg.IdentityResolver), protocol.WithTrustedProxies(trustedProxies))
 	rpcServer.Use(protocol.Logger(false))
 	if err := RegisterSystemService(rpcServer, cfg.Version); err != nil {
 		return nil, fmt.Errorf("register Management system service: %w", err)
@@ -60,7 +67,11 @@ func NewServer(cfg Config, registrars ...Registrar) (*Server, error) {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/jrpc", http.MaxBytesHandler(rpcServer, cfg.MaxRequestBytes))
+	var rpcHandler http.Handler = http.MaxBytesHandler(rpcServer, cfg.MaxRequestBytes)
+	if cfg.HTTPMiddleware != nil {
+		rpcHandler = cfg.HTTPMiddleware(rpcHandler)
+	}
+	mux.Handle("/jrpc", rpcHandler)
 	mux.HandleFunc("/healthz", healthHandler)
 
 	server := &Server{addr: cfg.ListenAddr}
@@ -79,6 +90,30 @@ func NewServer(cfg Config, registrars ...Registrar) (*Server, error) {
 		MaxHeaderBytes:    1 << 20,
 	}
 	return server, nil
+}
+
+func parseTrustedProxies(values []string) ([]netip.Prefix, error) {
+	proxies := make([]netip.Prefix, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if prefix, err := netip.ParsePrefix(value); err == nil {
+			proxies = append(proxies, prefix.Masked())
+			continue
+		}
+		addr, err := netip.ParseAddr(value)
+		if err != nil {
+			return nil, fmt.Errorf("invalid trusted proxy %q", value)
+		}
+		bits := 128
+		if addr.Is4() {
+			bits = 32
+		}
+		proxies = append(proxies, netip.PrefixFrom(addr, bits))
+	}
+	return proxies, nil
 }
 
 // RegisterSystemService binds a public System_Version method for clients to

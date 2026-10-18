@@ -1,7 +1,7 @@
 # VeloTrust 零信任平台数据模型设计文档（最终版）
 
-- 文档版本：V1.1
-- 文档状态：修订版（RBAC 资源操作权限模型）
+- 文档版本：V1.2
+- 文档状态：修订版（RBAC 资源操作权限与 WebAuthn Passkey 凭证模型）
 - 适用范围：VeloTrust 企业级零信任安全访问平台
 - 技术背景：Go；关系型数据库（PostgreSQL 或 MySQL）；GORM / XORM 双 ORM 标签
 - 部署模式：企业自托管、单企业部署，不设计多租户隔离字段
@@ -149,6 +149,7 @@ erDiagram
 | `email` | VARCHAR(128) | 可空；按产品规则决定是否唯一 |
 | `phone_country_code` | VARCHAR(8) | 可空；电话国家/地区区号，例如 `+86`、`+81` |
 | `phone_number` | VARCHAR(32) | 可空；不含国家区号的号码部分 |
+| `webauthn_user_handle` | 最多 64 字节的二进制值 | 可空，唯一；为 discoverable Passkey 登录生成随机不透明标识，不得由数据库用户 ID 直接派生 |
 | `password_salt` | VARCHAR(64) | 本地密码认证用；不返回客户端 |
 | `password_hash` | VARCHAR(255) | 本地密码哈希；不存明文密码 |
 | `auth_source` | VARCHAR(32) | 主要认证来源提示，如 `local`、`external`、`mixed`；不作为身份映射的唯一依据 |
@@ -373,6 +374,8 @@ erDiagram
 
 字段：`id`、`challenge_id`（唯一）、`user_id`（可空）、`session_id`（可空）、`challenge_type`、`challenge_hash`、`expires_at`、`attempt_count`、`max_attempts`、`consumed_at`（可空）、`status`、`created_at`。
 
+WebAuthn 挑战还需保存 `rp_id` 和预期 `origin`，两者必须来自服务端受信任配置，并绑定到该次挑战；WebAuthn challenge 本身只短暂返回客户端，数据库保存其摘要。挑战消费时校验 challenge、RP ID、origin、操作类型、签名及所需的用户验证标志。
+
 要求：短 TTL、按用户/IP/设备限流、失败次数限制、一次性原子消费、防重放。不要存储明文 OTP。
 
 ### 5.3 `t_iam_user_authenticator` — 用户认证器（启用 MFA 时）
@@ -385,7 +388,37 @@ erDiagram
 - 启用认证器前必须完成验证；密钥不得返回普通查询接口。
 - 恢复码如需持久化，应保存单向哈希并记录单次使用状态。
 
-### 5.4 `t_iam_login_log` — 登录与认证事件
+### 5.4 `t_iam_webauthn_credential` — WebAuthn Passkey 凭证
+
+Passkey 与 TOTP 认证器使用不同的数据模型。服务端保存验证公钥和凭证元数据；认证器私钥不上传、不由 VeloTrust 保存。
+
+| 字段 | 类型建议 | 约束/说明 |
+|---|---|---|
+| `id` | BIGINT | PK |
+| `user_id` | BIGINT | NOT NULL，关联 `t_iam_user.id` |
+| `rp_id` | VARCHAR(255) | NOT NULL；凭证注册时的 Relying Party ID |
+| `credential_id` | 二进制，最长 1023 字节 | NOT NULL；认证器生成的凭证 ID |
+| `public_key_cose` | 二进制 | NOT NULL；COSE 编码的公钥 |
+| `signature_count` | BIGINT | NOT NULL DEFAULT 0；认证器签名计数器，取值范围为无符号 32 位整数 |
+| `aaguid` | 16 字节二进制 | 可空；认证器型号标识，按隐私策略保留 |
+| `transports` | JSON/JSONB | 认证器传输类型列表 |
+| `backup_eligible` | BOOLEAN | 是否为可备份/同步型凭证（WebAuthn BE 标志） |
+| `backup_state` | BOOLEAN | 最近一次验证时的备份状态（WebAuthn BS 标志） |
+| `credential_name` | VARCHAR(128) | NOT NULL DEFAULT ''；用户可识别的设备名称 |
+| `status` | VARCHAR(24) | `active`、`disabled`、`revoked` |
+| `created_at` | TIMESTAMP | NOT NULL |
+| `last_used_at` | TIMESTAMP | 可空 |
+| `revoked_at` | TIMESTAMP | 可空 |
+| `revocation_reason` | VARCHAR(128) | 可空 |
+
+约束与运行要求：
+- 唯一约束 `(rp_id, credential_id)`；按 `(user_id, status)`、`(rp_id, status)` 建查询索引。
+- 同一用户可以登记多个 Passkey；discoverable 登录通过用户表中的随机 `webauthn_user_handle` 找到内部用户。
+- 登录时必须校验一次性 challenge、精确 origin allowlist、RP ID hash、公钥签名及配置要求的用户验证标志。管理员策略应要求 WebAuthn `userVerification=required`。
+- 签名计数器用于克隆凭证风险检测；对始终返回 0 的认证器或同步型 Passkey，不应仅因计数器不递增就一律拒绝。`backup_eligible` / `backup_state` 不能证明凭证是设备绑定密钥。
+- 凭证撤销应保留历史记录，不物理删除；Passkey 注册、撤销和登录事件必须审计。WebAuthn RP ID 和 origin 必须来自可信部署配置，不能从未经验证的 Host 头推导。
+
+### 5.5 `t_iam_login_log` — 登录与认证事件
 
 该表为追加式事件记录，不继承完整 `BaseModel`。
 
@@ -394,7 +427,7 @@ erDiagram
 | `event_id` | VARCHAR(64) / UUID | 主键或唯一事件 ID |
 | `user_id` | BIGINT | 可空；未知用户登录失败时允许为空 |
 | `user_name` | VARCHAR(128) | 用户名快照 |
-| `login_type` | VARCHAR(32) | `local`、`oidc`、`saml`、`directory` 等 |
+| `login_type` | VARCHAR(32) | `local`、`passkey`、`oidc`、`saml`、`directory` 等 |
 | `event_type` | VARCHAR(32) | `login`、`logout`、`mfa`、`token_refresh`、`account_locked`、`session_revoked` 等 |
 | `result` | VARCHAR(16) | `success` / `failure` |
 | `reason_code` | VARCHAR(128) | 稳定原因码，不记录秘密值 |
@@ -408,7 +441,7 @@ erDiagram
 
 索引建议：`(occurred_at)`、`(user_id, occurred_at)`、`(result, occurred_at)`、`request_id`。禁止记录密码、OTP、访问令牌、刷新令牌和私钥。
 
-### 5.5 `t_iam_identity_provider` — 外部身份提供方
+### 5.6 `t_iam_identity_provider` — 外部身份提供方
 
 保存 OIDC、SAML 或厂商专用集成配置。飞书、钉钉、企业微信等应通过各自适配器实现，不应假定所有平台都直接支持相同的标准协议。
 
@@ -437,7 +470,7 @@ erDiagram
 
 回调地址必须采用精确白名单；OIDC 应验证签名、issuer、audience、expiry、nonce，并在适用时使用 state 与 PKCE。外部身份声明不可直接当作可信的内部权限。
 
-### 5.6 `t_iam_external_identity` — 外部身份映射
+### 5.7 `t_iam_external_identity` — 外部身份映射
 
 | 字段 | 类型建议 | 说明 |
 |---|---|---|
@@ -454,7 +487,7 @@ erDiagram
 
 唯一约束 `(provider_id, external_user_id)`；按 `user_id` 建索引。除非产品明确允许多外部账号映射同一内部账号，否则需要通过业务规则和管理流程控制映射关系。
 
-### 5.7 `t_iam_external_org` 与 `t_iam_external_identity_org`（按需启用）
+### 5.8 `t_iam_external_org` 与 `t_iam_external_identity_org`（按需启用）
 
 用于同步外部组织目录，属于可选模型；若只需要第三方登录而不需要同步群组/组织，可以不建。
 
@@ -463,13 +496,13 @@ erDiagram
 
 外部组织变化默认不应直接自动授予高权限角色。权限映射需由单独的明确规则控制并可审计。
 
-### 5.8 `t_iam_integration_sync_task` — 外部目录同步任务
+### 5.9 `t_iam_integration_sync_task` — 外部目录同步任务
 
 字段：`id`、`provider_id`、`task_type`、`status`、`cursor_value`、`started_at`、`finished_at`、`next_retry_at`、`retry_count`、`last_error_code`、`last_error_message`（脱敏）、`result_summary_json`、`created_at`、`updated_at`。
 
 要求：幂等、可重试、可续跑、可定期对账；外部账号停用或离职时，根据明确策略禁用内部账号、撤销会话并重新评估授权。
 
-### 5.9 `t_iam_integration_event` — 外部回调/事件去重（推荐）
+### 5.10 `t_iam_integration_event` — 外部回调/事件去重（推荐）
 
 字段：`id`、`provider_id`、`external_event_id`、`event_type`、`received_at`、`processed_at`、`status`、`payload_hash`、`error_code`。唯一约束 `(provider_id, external_event_id)`。如需保存原始载荷，必须进行敏感字段过滤、加密与保留期控制；默认不保存不必要的完整载荷。
 
@@ -735,8 +768,9 @@ erDiagram
 | 管理资源 | `t_iam_resource` | 必须 | RBAC 可授权资源目录，与受保护资源分离 |
 | API/RPC 权限映射 | `t_iam_rpc_method` | 推荐（使用动态映射管理时必须） | 技术接口到资源操作权限的映射；静态代码映射时可不建表 |
 | 认证会话 | `t_iam_user_session` | 必须 | 会话生命周期和撤销 |
-| 认证挑战 | `t_iam_auth_challenge` | 必须（启用 OTP/MFA/敏感二次验证时） | 防重放的一次性挑战 |
+| 认证挑战 | `t_iam_auth_challenge` | 启用 Passkey、OTP/MFA 或敏感二次验证时必须 | 防重放的一次性挑战 |
 | MFA | `t_iam_user_authenticator` | 按 MFA 能力启用 | TOTP 等认证器 |
+| Passkey | `t_iam_webauthn_credential` | 首期登录能力 | WebAuthn credential ID、公钥、计数器及备份状态；私钥保留在认证器 |
 | 登录事件 | `t_iam_login_log` | 必须 | 登录与认证追踪 |
 | 第三方身份 | `t_iam_identity_provider`、`t_iam_external_identity` | 启用第三方登录时必须 | 外部身份配置和映射 |
 | 组织同步 | `t_iam_external_org`、`t_iam_external_identity_org` | 可选 | 外部组织同步 |
@@ -758,6 +792,8 @@ erDiagram
 | 审计 | `t_iam_audit_log` | 必须 | 管理操作审计 |
 | 安全事件 | `t_ztna_security_event` | 建议 | 安全运营闭环 |
 | 地址管理 | `t_ztna_address_pool`、`t_ztna_address_lease` | 地址池集中管理时 | 地址分配与冲突控制 |
+
+当前 PostgreSQL IAM 初始 schema 已创建 22 张表，包含 Passkey 凭证与挑战字段；暂不创建外部组织表（`t_iam_external_org`、`t_iam_external_identity_org`）和目录同步任务表（`t_iam_integration_sync_task`）。本表清单仍描述后续按需启用的完整模型。
 
 ---
 
@@ -814,6 +850,7 @@ erDiagram
 | 表 | 唯一约束 |
 |---|---|
 | `t_iam_user` | `username` |
+| `t_iam_user` | `webauthn_user_handle`（非空时唯一） |
 | `t_iam_group` | `group_code` |
 | `t_iam_role` | `role_code` |
 | `t_iam_permission` | `permission_code`；`(resource_id, action_code)` |
@@ -826,6 +863,7 @@ erDiagram
 | `t_iam_role_menu` | `(role_id, menu_id)` |
 | `t_iam_identity_provider` | `provider_code` |
 | `t_iam_external_identity` | `(provider_id, external_user_id)` |
+| `t_iam_webauthn_credential` | `(rp_id, credential_id)` |
 | `t_ztna_device` | `device_uuid` |
 | `t_ztna_access_policy` | `policy_code` |
 | `t_ztna_access_policy_revision` | `(policy_id, revision_no)` |
@@ -841,6 +879,7 @@ erDiagram
 - 用户：`user_status`、`email`（按查询模式选择）。
 - RBAC：`t_iam_permission(resource_id, action_code)`、`t_iam_role_permission(role_id, permission_id)`、`t_iam_rpc_method(permission_id)`；接口路由字段按实际匹配方式建索引。
 - 会话：`(user_id, status)`、`expires_at`、`session_id`。
+- Passkey：`(user_id, status)`、`(rp_id, status)`、`(rp_id, credential_id)`。
 - 设备：`(owner_user_id, status)`、`(trust_status, status)`、`last_seen_at`。
 - 受保护资源：`(network_id, status)`、`(resource_type, status)`。
 - 策略：`(status, priority)`、`(current_revision_id)`。
@@ -863,7 +902,7 @@ erDiagram
 
 ## 14. 数据安全、保留与运维要求
 
-1. **密码**：使用经过审查的密码哈希算法与参数；不保存明文密码，不将密码写入日志。
+1. **密码与 Passkey**：密码使用经过审查的哈希算法与参数，不保存明文；Passkey 私钥留在认证器，服务端仅保存公钥和必要元数据。
 2. **令牌**：会话表仅保存令牌摘要或不可复用标识；日志中不得输出完整访问令牌、刷新令牌或 Cookie。
 3. **密钥**：TOTP 秘密、第三方 Client Secret 等可恢复秘密使用信封加密或等效方案，并支持密钥版本和轮换；数据库备份不能单独解密这些秘密。
 4. **私钥**：WireGuard 或设备私钥尽量在设备本地生成并保管；控制面只保存公钥和必要的生命周期元数据。
@@ -913,8 +952,8 @@ func (User) TableName() string {
 ## 16. 建议实施顺序与验收标准
 
 ### 阶段一：基础身份与管理权限
-- 完成用户、用户资料、群组、用户群组关系、角色、用户角色、资源、资源操作权限、角色权限、菜单、角色菜单，以及 API/RPC 到权限的映射机制。
-- 验收：唯一约束生效；同一资源操作不重复定义；一个权限可映射多个接口；角色只授权资源操作权限而非逐条授权接口；接口请求会按映射权限执行服务端鉴权；未映射的受保护接口默认拒绝；禁用用户无法建立新会话；菜单隐藏不能绕过后端权限检查；管理员与普通用户共用统一用户模型。
+- 完成用户、用户资料、群组、用户群组关系、角色、用户角色、资源、资源操作权限、角色权限、菜单、角色菜单、Passkey 凭证和 API/RPC 到权限的映射机制。
+- 验收：唯一约束生效；同一资源操作不重复定义；一个权限可映射多个接口；角色只授权资源操作权限而非逐条授权接口；接口请求会按映射权限执行服务端鉴权；未映射的受保护接口默认拒绝；禁用用户无法建立新会话；WebAuthn challenge、origin、RP ID 与签名校验正确；菜单隐藏不能绕过后端权限检查；管理员与普通用户共用统一用户模型。
 
 ### 阶段二：认证安全与第三方身份
 - 完成会话、认证挑战、登录事件、审计日志；按需接入 MFA 与身份提供方/外部身份映射。

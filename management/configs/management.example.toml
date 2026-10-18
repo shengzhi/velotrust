@@ -1,0 +1,43 @@
+[app]
+name = "VeloTrust Management"
+version = "dev"
+log_level = "info"
+log_format = "json"
+
+[http]
+port = 8080
+listen_addr = "127.0.0.1:8080"
+trusted_proxies = []
+
+[http.cors]
+allowed_origins = ["https://console.example.com"]
+allowed_methods = ["POST", "OPTIONS"]
+allowed_headers = ["Content-Type", "Authorization", "Accept-Language", "X-Requested-With"]
+max_age_seconds = 600
+
+[database]
+driver = "postgres"
+dsn = "${DATABASE_DSN}"
+show_sql = false
+max_open_connections = 50
+max_idle_connections = 10
+connection_max_lifetime_seconds = 1800
+
+[auth]
+throttle_hmac_key = "${VELOTRUST_THROTTLE_HMAC_KEY}"
+totp_encryption_key = "${VELOTRUST_TOTP_ENCRYPTION_KEY}"
+totp_key_version = "v1"
+
+[auth.session]
+idle_ttl_minutes = 30
+absolute_ttl_minutes = 720
+
+[auth.webauthn]
+rp_id = "console.example.com"
+display_name = "VeloTrust"
+origins = ["https://console.example.com"]
+
+[cache.redis]
+addr = ""
+password = ""
+db = 0

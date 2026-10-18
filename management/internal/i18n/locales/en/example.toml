@@ -1,0 +1,4 @@
+[errors]
+Forbidden = "Access forbidden"
+BadRequest = "Bad request"
+NotFound = "Not found"

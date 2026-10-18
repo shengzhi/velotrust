@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"reflect"
@@ -107,6 +108,7 @@ type Server struct {
 	errorLocalizer   ErrorLocalizer
 	recoverHandler   RecoveryHandler
 	defaultAccess    AccessMode
+	trustedProxies   []netip.Prefix
 }
 
 // RegisterCodec adds a new codec to the server.
@@ -196,14 +198,15 @@ func (s *Server) Use(h ...HandlerFunc) { s.handlers = append(s.handlers, h...) }
 // ServeHTTP
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := &Context{
-		Protocol:    HTTP,
-		HttpRequest: r,
-		Writer:      &responseWriter{ResponseWriter: w, size: noWritten},
-		serviceMap:  s.services,
-		index:       -1,
-		chain:       s.handlers,
-		errorMapper: s.errorMapper,
-		ilog:        s.ilog,
+		Protocol:       HTTP,
+		HttpRequest:    r,
+		Writer:         &responseWriter{ResponseWriter: w, size: noWritten},
+		serviceMap:     s.services,
+		trustedProxies: s.trustedProxies,
+		index:          -1,
+		chain:          s.handlers,
+		errorMapper:    s.errorMapper,
+		ilog:           s.ilog,
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {

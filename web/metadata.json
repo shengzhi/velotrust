@@ -1,0 +1,6 @@
+{
+  "name": "VeloTrust ZTNA 控制台",
+  "description": "VeloTrust 企业级多云集中式 ZTNA 平台，集成 WireGuard Overlay 自动化 IPAM、跨云重叠 VPC 1:1 NAT 映射、进程级应用网络防火墙、智能 Split DNS、第三方 IdP 动态映射与网关断网逃生兜底策略。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

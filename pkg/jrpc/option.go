@@ -1,5 +1,7 @@
 package jrpc
 
+import "net/netip"
+
 type Option func(*Server)
 
 func WithLog(l ILog) Option {
@@ -11,6 +13,14 @@ func WithLog(l ILog) Option {
 func WithIdentityResolver(resolver IdentityResolver) Option {
 	return func(s *Server) {
 		s.identityResolver = resolver
+	}
+}
+
+// WithTrustedProxies allows forwarded client IP headers only from these
+// explicitly trusted proxy ranges. Direct requests always use RemoteAddr.
+func WithTrustedProxies(proxies []netip.Prefix) Option {
+	return func(s *Server) {
+		s.trustedProxies = append([]netip.Prefix(nil), proxies...)
 	}
 }
 

@@ -1,0 +1,4 @@
+[errors]
+Forbidden = "禁止访问"
+BadRequest = "错误的请求"
+NotFound = "未找到"

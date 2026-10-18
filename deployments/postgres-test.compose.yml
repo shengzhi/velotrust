@@ -1,0 +1,23 @@
+name: velotrust-test-db
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: veltrust-postgres
+    environment:
+      POSTGRES_DB: ${VELOTRUST_TEST_DB_NAME:-velotrust}
+      POSTGRES_USER: ${VELOTRUST_TEST_DB_USER:-velotrust}
+      POSTGRES_PASSWORD: ${VELOTRUST_TEST_DB_PASSWORD:?Set VELOTRUST_TEST_DB_PASSWORD in deployments/.env}
+    ports:
+      - "0.0.0.0:${VELOTRUST_TEST_DB_PORT:-5432}:5432"
+    volumes:
+      - velotrust-test-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+volumes:
+  velotrust-test-postgres-data:

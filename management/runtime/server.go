@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"net/http"
 
 	transportjrpc "velotrust/management/internal/transport/jrpc"
 	protocol "velotrust/pkg/jrpc"
@@ -16,6 +17,8 @@ type Config struct {
 	Version          string
 	MaxRequestBytes  int64
 	IdentityResolver protocol.IdentityResolver
+	TrustedProxies   []string
+	HTTPMiddleware   func(http.Handler) http.Handler
 }
 
 // Server owns the Management HTTP/JRPC lifecycle and can be started separately
@@ -31,6 +34,8 @@ func New(cfg Config, registrars ...Registrar) (*Server, error) {
 		Version:          cfg.Version,
 		MaxRequestBytes:  cfg.MaxRequestBytes,
 		IdentityResolver: cfg.IdentityResolver,
+		TrustedProxies:   cfg.TrustedProxies,
+		HTTPMiddleware:   cfg.HTTPMiddleware,
 	}, registrars...)
 	if err != nil {
 		return nil, err
