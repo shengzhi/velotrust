@@ -10,6 +10,7 @@ type Config struct {
 }
 
 type AuthConfig struct {
+	JWTSigningKey     string         `mapstructure:"jwt_signing_key"`
 	ThrottleHMACKey   string         `mapstructure:"throttle_hmac_key"`
 	TOTPEncryptionKey string         `mapstructure:"totp_encryption_key"`
 	TOTPKeyVersion    string         `mapstructure:"totp_key_version"`

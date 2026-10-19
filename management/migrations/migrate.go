@@ -92,7 +92,7 @@ func Apply(ctx context.Context, db *database.Database, baselineExistingIAM bool)
 				}
 			}
 			if !baseline {
-				if _, err := s.Exec(string(contents)); err != nil {
+				if _, err := s.Exec(migrationSQL(contents)); err != nil {
 					return fmt.Errorf("execute migration %s: %w", name, err)
 				}
 			}
@@ -114,4 +114,30 @@ func Apply(ctx context.Context, db *database.Database, baselineExistingIAM bool)
 		}
 	}
 	return applied, nil
+}
+
+// migrationSQL removes transaction wrappers left in older migration files.
+// Apply already runs each migration and its history record in one transaction;
+// executing an inner COMMIT would end that transaction before the runner can
+// record the migration.
+func migrationSQL(contents []byte) string {
+	lines := strings.Split(string(contents), "\n")
+	firstSQL, lastSQL := -1, -1
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "--") {
+			continue
+		}
+		if firstSQL == -1 {
+			firstSQL = i
+		}
+		lastSQL = i
+	}
+	if firstSQL >= 0 && strings.EqualFold(strings.TrimSpace(lines[firstSQL]), "BEGIN;") {
+		lines[firstSQL] = ""
+	}
+	if lastSQL >= 0 && strings.EqualFold(strings.TrimSpace(lines[lastSQL]), "COMMIT;") {
+		lines[lastSQL] = ""
+	}
+	return strings.Join(lines, "\n")
 }

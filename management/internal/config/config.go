@@ -142,6 +142,7 @@ func unmarshalConfig() (*Config, error) {
 		return nil, err
 	}
 	conf.Database.DSN = os.ExpandEnv(conf.Database.DSN)
+	conf.Auth.JWTSigningKey = os.ExpandEnv(conf.Auth.JWTSigningKey)
 	conf.Auth.ThrottleHMACKey = os.ExpandEnv(conf.Auth.ThrottleHMACKey)
 	conf.Auth.TOTPEncryptionKey = os.ExpandEnv(conf.Auth.TOTPEncryptionKey)
 	conf.Cache.Redis.Password = os.ExpandEnv(conf.Cache.Redis.Password)

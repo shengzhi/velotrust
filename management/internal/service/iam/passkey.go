@@ -235,21 +235,23 @@ func (s *Service) FinishPasskeyLogin(ctx context.Context, challengeID, origin st
 	if err := s.store.UpdateWebAuthnCredentialUse(serviceCtx, stored); err != nil {
 		return nil, invalidLogin()
 	}
-	rawToken, tokenHash, err := newToken()
-	if err != nil {
-		return nil, err
-	}
 	sessionID, err := randomHex(32)
 	if err != nil {
 		return nil, err
 	}
 	now := time.Now().UTC()
-	session := &model.UserSession{SessionID: sessionID, UserID: candidate.user.ID, TokenHash: tokenHash, AuthLevel: "passkey", IssuedAt: now, ExpiresAt: now.Add(s.opts.SessionAbsoluteTTL), LastSeenAt: &now, SourceIP: optional(sourceIP), UserAgent: optional(userAgent), Status: "active"}
+	expiresAt := now.Add(s.opts.SessionAbsoluteTTL).Truncate(time.Second)
+	rawToken, err := issueAccessToken(s.opts.JWTSigningKey, candidate.user.ID, sessionID, now, expiresAt)
+	if err != nil {
+		return nil, fmt.Errorf("create IAM JWT access token: %w", err)
+	}
+	tokenHash := hashToken(rawToken)
+	session := &model.UserSession{SessionID: sessionID, UserID: candidate.user.ID, TokenHash: tokenHash, AuthLevel: "passkey", IssuedAt: now, ExpiresAt: expiresAt, LastSeenAt: &now, SourceIP: optional(sourceIP), UserAgent: optional(userAgent), Status: "active"}
 	loginLog := s.loginLog(candidate.user, "passkey", "success", "", sourceIP, userAgent, requestID, sessionID)
 	if err := s.store.CreateLoginSession(serviceCtx, session, loginLog, sourceIP, "", ""); err != nil {
 		return nil, fmt.Errorf("persist Passkey login: %w", err)
 	}
-	return &SessionGrant{AccessToken: rawToken, TokenType: "Bearer", ExpiresAt: now.Add(s.opts.SessionIdleTTL), User: view(candidate.user)}, nil
+	return &SessionGrant{AccessToken: rawToken, TokenType: "Bearer", ExpiresAt: expiresAt, User: view(candidate.user)}, nil
 }
 
 func (s *Service) RevokePasskey(ctx *servicecontext.Context, credentialID int64) error {

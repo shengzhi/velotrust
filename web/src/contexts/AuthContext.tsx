@@ -131,11 +131,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const login = async (username: string, password: string, totpCode = '') => {
+    // Public login calls must not inherit a stale bearer token left in this tab.
+    // The RPC identity resolver validates Authorization headers before dispatch,
+    // even for public methods, so an expired token can otherwise block login.
+    clearSession();
+    setUser(null);
+    setMenus([]);
     const grant = await iamApi.login(username, password, totpCode);
     await acceptGrant(grant);
   };
 
   const loginWithPasskey = async () => {
+    clearSession();
+    setUser(null);
+    setMenus([]);
     const { ceremony } = await iamApi.beginPasskeyLogin();
     if (!ceremony) throw new Error('Management 未返回通行密钥登录挑战。');
     const response = await getPasskey(ceremony.options);

@@ -12,7 +12,7 @@ import (
 type registrationStore struct{ repository.Store }
 
 func TestAllIAMJRPCMethodsHaveDeclaredAccessPolicies(t *testing.T) {
-	service, err := appIAM.New(registrationStore{}, appIAM.Options{ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
+	service, err := appIAM.New(registrationStore{}, appIAM.Options{JWTSigningKey: []byte(strings.Repeat("j", 32)), ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
 	if err != nil {
 		t.Fatal(err)
 	}

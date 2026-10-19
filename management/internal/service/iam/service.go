@@ -35,7 +35,6 @@ const (
 	argonParallelism                 = 2
 	argonKeyLength                   = 32
 	passwordSaltLength               = 16
-	sessionTokenLength               = 32
 	loginThrottleFailures            = 5
 	loginThrottleWindowMinutes       = 15
 	loginThrottleBlockMinutes        = 15
@@ -47,6 +46,7 @@ var passwordKDFSlots = make(chan struct{}, argonConcurrentHashes)
 type Options struct {
 	SessionIdleTTL     time.Duration
 	SessionAbsoluteTTL time.Duration
+	JWTSigningKey      []byte
 	ThrottleHMACKey    []byte
 	TOTPEncryptionKey  []byte
 	TOTPKeyVersion     string
@@ -132,9 +132,13 @@ func New(store repository.Store, opts Options) (*Service, error) {
 	if opts.SessionIdleTTL > opts.SessionAbsoluteTTL {
 		return nil, errors.New("IAM idle session TTL cannot exceed absolute TTL")
 	}
+	if len(opts.JWTSigningKey) < 32 || strings.Contains(string(opts.JWTSigningKey), "${") {
+		return nil, errors.New("IAM JWT signing key must be configured with at least 32 bytes")
+	}
 	if len(opts.ThrottleHMACKey) < 32 {
 		return nil, errors.New("IAM throttle HMAC key must contain at least 32 bytes")
 	}
+	opts.JWTSigningKey = append([]byte(nil), opts.JWTSigningKey...)
 	opts.ThrottleHMACKey = append([]byte(nil), opts.ThrottleHMACKey...)
 	opts.TOTPEncryptionKey = append([]byte(nil), opts.TOTPEncryptionKey...)
 	svc := &Service{store: store, opts: opts, ceremonies: opts.CeremonyStore}
@@ -221,16 +225,17 @@ func (s *Service) LoginWithTOTP(ctx context.Context, username, password, totpCod
 		return nil, invalidLogin()
 	}
 
-	rawToken, tokenHash, err := newToken()
-	if err != nil {
-		return nil, fmt.Errorf("create IAM session token: %w", err)
-	}
 	sessionID, err := randomHex(32)
 	if err != nil {
 		return nil, fmt.Errorf("create IAM session ID: %w", err)
 	}
 	now := time.Now().UTC()
-	expiresAt := now.Add(s.opts.SessionAbsoluteTTL)
+	expiresAt := now.Add(s.opts.SessionAbsoluteTTL).Truncate(time.Second)
+	rawToken, err := issueAccessToken(s.opts.JWTSigningKey, user.ID, sessionID, now, expiresAt)
+	if err != nil {
+		return nil, fmt.Errorf("create IAM JWT access token: %w", err)
+	}
+	tokenHash := hashToken(rawToken)
 	userSession := &model.UserSession{
 		SessionID: sessionID, UserID: user.ID, TokenHash: tokenHash, AuthLevel: "password",
 		IssuedAt: now, ExpiresAt: expiresAt, LastSeenAt: &now, SourceIP: optional(sourceIP),
@@ -245,13 +250,21 @@ func (s *Service) LoginWithTOTP(ctx context.Context, username, password, totpCod
 	if err := s.store.CreateLoginSession(serviceCtx, userSession, loginLog, sourceIP, usernameHash, ipHash); err != nil {
 		return nil, fmt.Errorf("persist IAM login: %w", err)
 	}
-	return &SessionGrant{AccessToken: rawToken, TokenType: "Bearer", ExpiresAt: now.Add(s.opts.SessionIdleTTL), User: view(user)}, nil
+	return &SessionGrant{AccessToken: rawToken, TokenType: "Bearer", ExpiresAt: expiresAt, User: view(user)}, nil
 }
 
 func (s *Service) ResolveBearer(ctx context.Context, token string) (*model.UserSession, *model.User, error) {
 	serviceCtx := servicecontext.FromContext(ctx)
-	if len(token) < 40 || len(token) > 128 {
-		return nil, nil, appErrors.NewAuthError("IAM_UNAUTHENTICATED", appErrors.AuthUnauthenticated)
+	claims, err := parseAccessToken(s.opts.JWTSigningKey, token)
+	if err != nil {
+		return nil, nil, fmt.Errorf("validate IAM JWT: %w", err)
+	}
+	userID, err := parseAccessTokenSubject(claims.Subject)
+	if err != nil || claims.ID == "" {
+		if err != nil {
+			return nil, nil, fmt.Errorf("validate IAM JWT subject: %w", err)
+		}
+		return nil, nil, errors.New("validate IAM JWT: session ID claim is missing")
 	}
 	tokenHash := hashToken(token)
 	session, user, err := s.store.ResolveSession(serviceCtx, tokenHash)
@@ -259,8 +272,23 @@ func (s *Service) ResolveBearer(ctx context.Context, token string) (*model.UserS
 		return nil, nil, fmt.Errorf("resolve IAM bearer session: %w", err)
 	}
 	now := time.Now().UTC()
-	if session == nil || user == nil || user.UserStatus != "active" || session.IssuedAt.After(now) || !session.ExpiresAt.After(now) {
-		return nil, nil, appErrors.NewAuthError("IAM_UNAUTHENTICATED", appErrors.AuthUnauthenticated)
+	if session == nil {
+		return nil, nil, errors.New("IAM JWT has no active backing session")
+	}
+	if user == nil {
+		return nil, nil, errors.New("IAM session references a missing user")
+	}
+	if user.ID != userID || session.UserID != userID || session.SessionID != claims.ID {
+		return nil, nil, errors.New("IAM JWT claims do not match the stored session")
+	}
+	if user.UserStatus != "active" {
+		return nil, nil, errors.New("IAM session user is not active")
+	}
+	if session.IssuedAt.After(now) {
+		return nil, nil, errors.New("IAM session issue time is in the future")
+	}
+	if !session.ExpiresAt.After(now) {
+		return nil, nil, errors.New("IAM backing session has expired")
 	}
 	actorContext := servicecontext.New(serviceCtx, servicecontext.Principal{ID: fmt.Sprintf("%d", user.ID), Name: user.Username, EntityID: session.SessionID, Type: "user"}, servicecontext.RequestMeta{})
 	lastSeen := session.IssuedAt
@@ -269,7 +297,7 @@ func (s *Service) ResolveBearer(ctx context.Context, token string) (*model.UserS
 	}
 	if now.Sub(lastSeen) > s.opts.SessionIdleTTL {
 		_ = s.store.RevokeSession(actorContext.WithoutCancel(), session.SessionID, "idle_timeout")
-		return nil, nil, appErrors.NewAuthError("IAM_UNAUTHENTICATED", appErrors.AuthTokenExpired)
+		return nil, nil, fmt.Errorf("IAM session exceeded idle TTL: %w", appErrors.NewAuthError("IAM_UNAUTHENTICATED", appErrors.AuthTokenExpired))
 	}
 	if err := s.store.TouchSession(actorContext, session.SessionID, tokenHash, ""); err != nil {
 		return nil, nil, fmt.Errorf("update IAM session activity: %w", err)
@@ -869,15 +897,6 @@ func derivePassword(password string, salt []byte) []byte {
 	passwordKDFSlots <- struct{}{}
 	defer func() { <-passwordKDFSlots }()
 	return argon2.IDKey([]byte(password), salt, argonIterations, argonMemory, argonParallelism, argonKeyLength)
-}
-
-func newToken() (string, string, error) {
-	value := make([]byte, sessionTokenLength)
-	if _, err := rand.Read(value); err != nil {
-		return "", "", err
-	}
-	token := base64.RawURLEncoding.EncodeToString(value)
-	return token, hashToken(token), nil
 }
 
 func hashToken(token string) string {

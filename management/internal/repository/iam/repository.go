@@ -190,7 +190,7 @@ func (r *Repository) RecordLoginFailure(ctx *servicecontext.Context, log *iam.Lo
 				return fmt.Errorf("lock IAM login throttle key: %w", err)
 			}
 			var throttle iam.AuthThrottle
-			found, err := s.Where("dimension=? AND bucket_key_hash=? AND window_started_at=?", item.dimension, item.hash, windowStart).ForUpdate().Get(&throttle)
+			found, err := selectOneForUpdate(s, iam.TableAuthThrottle, &throttle, "dimension=? AND bucket_key_hash=? AND window_started_at=?", item.dimension, item.hash, windowStart)
 			if err != nil {
 				return fmt.Errorf("load IAM login throttle: %w", err)
 			}
@@ -259,7 +259,7 @@ func (r *Repository) TouchSession(ctx *servicecontext.Context, sessionID, tokenH
 	now := time.Now().UTC()
 	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
 		var session iam.UserSession
-		found, err := tx.Where("session_id=? AND token_hash=? AND status='active' AND expires_at>?", sessionID, tokenHash, now).ForUpdate().Get(&session)
+		found, err := selectOneForUpdate(tx.Session, iam.TableUserSession, &session, "session_id=? AND token_hash=? AND status='active' AND expires_at>?", sessionID, tokenHash, now)
 		if err != nil {
 			return fmt.Errorf("load IAM session for touch: %w", err)
 		}
@@ -282,7 +282,7 @@ func (r *Repository) RevokeSession(ctx *servicecontext.Context, sessionID, reaso
 	now := time.Now().UTC()
 	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
 		var session iam.UserSession
-		found, err := tx.Where("session_id=? AND status='active'", sessionID).ForUpdate().Get(&session)
+		found, err := selectOneForUpdate(tx.Session, iam.TableUserSession, &session, "session_id=? AND status='active'", sessionID)
 		if err != nil {
 			return fmt.Errorf("load IAM session for revocation: %w", err)
 		}
@@ -304,7 +304,7 @@ func (r *Repository) RevokeUserSessions(ctx *servicecontext.Context, userID int6
 	now := time.Now().UTC()
 	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
 		var sessions []iam.UserSession
-		if err := tx.Where("user_id=? AND status='active'", userID).ForUpdate().Find(&sessions); err != nil {
+		if err := selectManyForUpdate(tx.Session, iam.TableUserSession, &sessions, "user_id=? AND status='active'", userID); err != nil {
 			return fmt.Errorf("load IAM user sessions for revocation: %w", err)
 		}
 		for i := range sessions {
@@ -518,7 +518,7 @@ func (r *Repository) SetRoleMenus(ctx *servicecontext.Context, actorID, roleID i
 			return nil
 		}
 		var previous []iam.RoleMenu
-		if err := s.Where("role_id=?", roleID).ForUpdate().Find(&previous); err != nil {
+		if err := selectManyForUpdate(s, iam.TableRoleMenu, &previous, "role_id=?", roleID); err != nil {
 			return fmt.Errorf("load previous IAM role menus: %w", err)
 		}
 		for i := range previous {
@@ -857,7 +857,7 @@ func (r *Repository) RevokeRole(ctx *servicecontext.Context, actorID, userID, ro
 			}
 		}
 		var assignment iam.UserRole
-		found, err = s.Where("user_id=? AND role_id=?", userID, roleID).ForUpdate().Get(&assignment)
+		found, err = selectOneForUpdate(s, iam.TableUserRole, &assignment, "user_id=? AND role_id=?", userID, roleID)
 		if err != nil {
 			return fmt.Errorf("load IAM role assignment for revocation: %w", err)
 		}
@@ -990,7 +990,7 @@ func (r *Repository) RevokePermission(ctx *servicecontext.Context, actorID, role
 			return errors.New("permissions on system roles cannot be revoked")
 		}
 		var assignment iam.RolePermission
-		found, err = s.Where("role_id=? AND permission_id=?", roleID, permissionID).ForUpdate().Get(&assignment)
+		found, err = selectOneForUpdate(s, iam.TableRolePermission, &assignment, "role_id=? AND permission_id=?", roleID, permissionID)
 		if err != nil {
 			return fmt.Errorf("load IAM permission assignment for revocation: %w", err)
 		}
@@ -1030,7 +1030,7 @@ func (r *Repository) SetUserStatus(ctx *servicecontext.Context, actorID, userID 
 			return errors.New("active user write permission is required")
 		}
 		var target iam.User
-		found, err := s.Where("id=?", userID).ForUpdate().Get(&target)
+		found, err := selectOneForUpdate(s, iam.TableUser, &target, "id=?", userID)
 		if err != nil {
 			return err
 		}
@@ -1089,7 +1089,7 @@ func (r *Repository) ResetUserPassword(ctx *servicecontext.Context, actorID, use
 			return errors.New("active user write permission is required")
 		}
 		var target iam.User
-		found, err := s.Where("id=?", userID).ForUpdate().Get(&target)
+		found, err := selectOneForUpdate(s, iam.TableUser, &target, "id=?", userID)
 		if err != nil {
 			return err
 		}
@@ -1187,7 +1187,7 @@ func (r *Repository) SavePendingTOTP(ctx *servicecontext.Context, row *iam.UserA
 			return errors.New("active IAM user is required")
 		}
 		var current iam.UserAuthenticator
-		found, err := s.Where("user_id=? AND authenticator_type='totp'", row.UserID).ForUpdate().Get(&current)
+		found, err := selectOneForUpdate(s, iam.TableUserAuthenticator, &current, "user_id=? AND authenticator_type='totp'", row.UserID)
 		if err != nil {
 			return fmt.Errorf("load existing IAM TOTP authenticator: %w", err)
 		}
@@ -1239,7 +1239,7 @@ func (r *Repository) ActivateTOTP(ctx *servicecontext.Context, userID, step int6
 			return errors.New("active IAM user is required")
 		}
 		var authenticator iam.UserAuthenticator
-		found, err := s.Where("user_id=? AND authenticator_type='totp' AND status='pending'", userID).ForUpdate().Get(&authenticator)
+		found, err := selectOneForUpdate(s, iam.TableUserAuthenticator, &authenticator, "user_id=? AND authenticator_type='totp' AND status='pending'", userID)
 		if err != nil {
 			return fmt.Errorf("load pending IAM TOTP authenticator: %w", err)
 		}
@@ -1267,7 +1267,7 @@ func (r *Repository) ConsumeTOTP(ctx *servicecontext.Context, userID, step int64
 	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
 		now := time.Now().UTC()
 		var authenticator iam.UserAuthenticator
-		found, err := tx.Where("user_id=? AND authenticator_type='totp' AND status='active' AND last_used_step<?", userID, step).ForUpdate().Get(&authenticator)
+		found, err := selectOneForUpdate(tx.Session, iam.TableUserAuthenticator, &authenticator, "user_id=? AND authenticator_type='totp' AND status='active' AND last_used_step<?", userID, step)
 		if err != nil {
 			return fmt.Errorf("load IAM TOTP authenticator for code consumption: %w", err)
 		}
@@ -1299,7 +1299,7 @@ func (r *Repository) DisableTOTP(ctx *servicecontext.Context, userID, step int64
 			return errors.New("active IAM user is required")
 		}
 		var authenticator iam.UserAuthenticator
-		found, err := s.Where("user_id=? AND authenticator_type='totp' AND status='active' AND last_used_step<?", userID, step).ForUpdate().Get(&authenticator)
+		found, err := selectOneForUpdate(s, iam.TableUserAuthenticator, &authenticator, "user_id=? AND authenticator_type='totp' AND status='active' AND last_used_step<?", userID, step)
 		if err != nil {
 			return fmt.Errorf("disable IAM TOTP authenticator: %w", err)
 		}
@@ -1492,7 +1492,7 @@ func (r *Repository) ConsumeAuthChallenge(ctx *servicecontext.Context, challenge
 	err := r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
 		now := time.Now().UTC()
 		challenge = new(iam.AuthChallenge)
-		found, err := tx.Where("challenge_id=? AND challenge_hash=? AND status='pending' AND expires_at>? AND attempt_count<max_attempts", challengeID, challengeHash, now).ForUpdate().Get(challenge)
+		found, err := selectOneForUpdate(tx.Session, iam.TableAuthChallenge, challenge, "challenge_id=? AND challenge_hash=? AND status='pending' AND expires_at>? AND attempt_count<max_attempts", challengeID, challengeHash, now)
 		if err != nil {
 			return fmt.Errorf("load WebAuthn challenge: %w", err)
 		}
@@ -1549,7 +1549,7 @@ func (r *Repository) UpdateWebAuthnCredentialUse(ctx *servicecontext.Context, cr
 	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
 		now := time.Now().UTC()
 		var current iam.WebAuthnCredential
-		found, err := tx.Where("id=? AND status='active' AND (signature_count=0 OR signature_count<?)", credential.ID, credential.SignatureCount).ForUpdate().Get(&current)
+		found, err := selectOneForUpdate(tx.Session, iam.TableWebAuthnCredential, &current, "id=? AND status='active' AND (signature_count=0 OR signature_count<?)", credential.ID, credential.SignatureCount)
 		if err != nil {
 			return fmt.Errorf("load WebAuthn credential usage: %w", err)
 		}
@@ -1573,7 +1573,7 @@ func (r *Repository) RevokeWebAuthnCredential(ctx *servicecontext.Context, userI
 		s := tx.Session
 		now := time.Now().UTC()
 		var credential iam.WebAuthnCredential
-		found, err := s.Where("user_id=? AND id=? AND status='active'", userID, credentialID).ForUpdate().Get(&credential)
+		found, err := selectOneForUpdate(s, iam.TableWebAuthnCredential, &credential, "user_id=? AND id=? AND status='active'", userID, credentialID)
 		if err != nil {
 			return fmt.Errorf("revoke WebAuthn credential: %w", err)
 		}
@@ -1627,7 +1627,7 @@ func revokeUserSessions(ctx *servicecontext.Context, tx *database.DBTransaction,
 		args = append(args, exceptSessionID[0])
 	}
 	var sessions []iam.UserSession
-	if err := s.Where(query, args...).ForUpdate().Find(&sessions); err != nil {
+	if err := selectManyForUpdate(s, iam.TableUserSession, &sessions, query, args...); err != nil {
 		return fmt.Errorf("load active IAM sessions for revocation: %w", err)
 	}
 	now := time.Now().UTC()
@@ -1643,6 +1643,19 @@ func revokeUserSessions(ctx *servicecontext.Context, tx *database.DBTransaction,
 		}
 	}
 	return nil
+}
+
+// XORM's ForUpdate builder emits a MySQL-only clause. Management uses
+// PostgreSQL, so issue equivalent PostgreSQL row-lock queries directly while
+// keeping all writes on the shared Save path.
+func selectOneForUpdate(s *xorm.Session, table string, bean any, condition string, args ...any) (bool, error) {
+	query := "SELECT * FROM " + table + " WHERE " + condition + " FOR UPDATE"
+	return s.SQL(query, args...).Get(bean)
+}
+
+func selectManyForUpdate(s *xorm.Session, table string, beans any, condition string, args ...any) error {
+	query := "SELECT * FROM " + table + " WHERE " + condition + " FOR UPDATE"
+	return s.SQL(query, args...).Find(beans)
 }
 
 func nullableStringPtr(value string) *string {

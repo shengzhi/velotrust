@@ -182,6 +182,7 @@ func registerDependencies(conf *config.Config, db *database.Database, ceremonySt
 		absoluteTTL := time.Duration(loaded.Auth.Session.AbsoluteTTLMinutes) * time.Minute
 		return appIAMService.New(store, appIAMService.Options{
 			SessionIdleTTL: idleTTL, SessionAbsoluteTTL: absoluteTTL,
+			JWTSigningKey:     []byte(loaded.Auth.JWTSigningKey),
 			ThrottleHMACKey:   []byte(loaded.Auth.ThrottleHMACKey),
 			TOTPEncryptionKey: []byte(loaded.Auth.TOTPEncryptionKey), TOTPKeyVersion: loaded.Auth.TOTPKeyVersion,
 			WebAuthnRPID: loaded.Auth.WebAuthn.RPID, WebAuthnName: loaded.Auth.WebAuthn.DisplayName,

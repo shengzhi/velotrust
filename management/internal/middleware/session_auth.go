@@ -11,22 +11,25 @@ import (
 	"velotrust/pkg/jrpc"
 )
 
-// SessionIdentityResolver resolves opaque bearer tokens against the IAM
-// database on every request. It intentionally has no JWT or cache fallback.
+// SessionIdentityResolver resolves signed JWT bearer tokens and checks their
+// backing IAM session so logout, revocation, and idle expiry take effect at once.
 func SessionIdentityResolver(sessions *appIAM.Service) jrpc.IdentityResolver {
 	return func(ctx *jrpc.Context) (jrpc.Identity, error) {
-		if sessions == nil || ctx == nil || ctx.HttpRequest == nil {
-			return nil, nil
+		if sessions == nil {
+			return nil, errors.New("IAM session service is unavailable")
+		}
+		if ctx == nil || ctx.HttpRequest == nil {
+			return nil, errors.New("IAM identity resolver requires an HTTP request")
 		}
 		header := strings.TrimSpace(ctx.HttpRequest.Header.Get("Authorization"))
 		if header == "" {
 			return nil, nil
 		}
-		kind, token, ok := strings.Cut(header, " ")
-		if !ok || !strings.EqualFold(kind, "Bearer") || strings.TrimSpace(token) == "" {
+		parts := strings.Fields(header)
+		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
 			return nil, errors.New("invalid bearer authorization header")
 		}
-		session, user, err := sessions.ResolveBearer(ctx.HttpRequest.Context(), strings.TrimSpace(token))
+		session, user, err := sessions.ResolveBearer(ctx.HttpRequest.Context(), parts[1])
 		if err != nil {
 			return nil, err
 		}

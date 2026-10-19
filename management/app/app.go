@@ -48,6 +48,7 @@ func BootstrapAdmin(ctx context.Context, conf *Config, username, displayName, pa
 	service, err := appIAMService.New(store, appIAMService.Options{
 		SessionIdleTTL:     time.Duration(conf.Auth.Session.IdleTTLMinutes) * time.Minute,
 		SessionAbsoluteTTL: time.Duration(conf.Auth.Session.AbsoluteTTLMinutes) * time.Minute,
+		JWTSigningKey:      []byte(conf.Auth.JWTSigningKey),
 		ThrottleHMACKey:    []byte(conf.Auth.ThrottleHMACKey),
 		TOTPEncryptionKey:  []byte(conf.Auth.TOTPEncryptionKey),
 		TOTPKeyVersion:     conf.Auth.TOTPKeyVersion,

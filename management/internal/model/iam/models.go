@@ -51,8 +51,6 @@ type User struct {
 	LastLoginAt         *time.Time `xorm:"'last_login_at'" json:"last_login_at,omitempty"`
 	LastLoginIP         *string    `xorm:"'last_login_ip'" json:"-"`
 	Remark              *string    `xorm:"'remark'" json:"remark,omitempty"`
-	CreatedBy           string     `xorm:"'created_by'" json:"-"`
-	UpdatedBy           string     `xorm:"'updated_by'" json:"-"`
 }
 
 func (User) TableName() string { return TableUser }
@@ -67,8 +65,6 @@ type UserProfile struct {
 	Locale             *string `xorm:"'locale'"`
 	Timezone           *string `xorm:"'timezone'"`
 	ExtraJSON          []byte  `xorm:"'extra_json'"`
-	CreatedBy          string  `xorm:"'created_by'"`
-	UpdatedBy          string  `xorm:"'updated_by'"`
 }
 
 func (UserProfile) TableName() string { return TableUserProfile }
@@ -82,20 +78,16 @@ type Group struct {
 	Description        *string `xorm:"'description'" json:"description,omitempty"`
 	Status             string  `xorm:"'status'" json:"status"`
 	SortOrder          int     `xorm:"'sort_order'" json:"sort_order"`
-	CreatedBy          string  `xorm:"'created_by'" json:"-"`
-	UpdatedBy          string  `xorm:"'updated_by'" json:"-"`
 }
 
 func (Group) TableName() string { return TableGroup }
 
 type UserGroup struct {
 	database.BaseModel `xorm:"extends"`
-	ID                 int64  `xorm:"pk autoincr 'id'"`
-	UserID             int64  `xorm:"'user_id'"`
-	GroupID            int64  `xorm:"'group_id'"`
-	IsPrimary          bool   `xorm:"'is_primary'"`
-	CreatedBy          string `xorm:"'created_by'"`
-	UpdatedBy          string `xorm:"'updated_by'"`
+	ID                 int64 `xorm:"pk autoincr 'id'"`
+	UserID             int64 `xorm:"'user_id'"`
+	GroupID            int64 `xorm:"'group_id'"`
+	IsPrimary          bool  `xorm:"'is_primary'"`
 }
 
 func (UserGroup) TableName() string { return TableUserGroup }
@@ -108,19 +100,15 @@ type Role struct {
 	Description        *string `xorm:"'description'" json:"description,omitempty"`
 	IsSystem           bool    `xorm:"'is_system'" json:"is_system"`
 	Status             string  `xorm:"'status'" json:"status"`
-	CreatedBy          string  `xorm:"'created_by'" json:"-"`
-	UpdatedBy          string  `xorm:"'updated_by'" json:"-"`
 }
 
 func (Role) TableName() string { return TableRole }
 
 type UserRole struct {
 	database.BaseModel `xorm:"extends"`
-	ID                 int64  `xorm:"pk autoincr 'id'"`
-	UserID             int64  `xorm:"'user_id'"`
-	RoleID             int64  `xorm:"'role_id'"`
-	CreatedBy          string `xorm:"'created_by'"`
-	UpdatedBy          string `xorm:"'updated_by'"`
+	ID                 int64 `xorm:"pk autoincr 'id'"`
+	UserID             int64 `xorm:"'user_id'"`
+	RoleID             int64 `xorm:"'role_id'"`
 }
 
 func (UserRole) TableName() string { return TableUserRole }
@@ -133,8 +121,6 @@ type Resource struct {
 	ResourceType       string  `xorm:"'resource_type'" json:"resource_type"`
 	Description        *string `xorm:"'description'" json:"description,omitempty"`
 	Status             string  `xorm:"'status'" json:"status"`
-	CreatedBy          string  `xorm:"'created_by'" json:"-"`
-	UpdatedBy          string  `xorm:"'updated_by'" json:"-"`
 }
 
 func (Resource) TableName() string { return TableResource }
@@ -151,30 +137,24 @@ type Permission struct {
 	ActionCode         string  `xorm:"'action_code'" json:"action_code"`
 	Description        *string `xorm:"'description'" json:"description,omitempty"`
 	Status             string  `xorm:"'status'" json:"status"`
-	CreatedBy          string  `xorm:"'created_by'" json:"-"`
-	UpdatedBy          string  `xorm:"'updated_by'" json:"-"`
 }
 
 func (Permission) TableName() string { return TablePermission }
 
 type RolePermission struct {
 	database.BaseModel `xorm:"extends"`
-	ID                 int64  `xorm:"pk autoincr 'id'"`
-	RoleID             int64  `xorm:"'role_id'"`
-	PermissionID       int64  `xorm:"'permission_id'"`
-	CreatedBy          string `xorm:"'created_by'"`
-	UpdatedBy          string `xorm:"'updated_by'"`
+	ID                 int64 `xorm:"pk autoincr 'id'"`
+	RoleID             int64 `xorm:"'role_id'"`
+	PermissionID       int64 `xorm:"'permission_id'"`
 }
 
 func (RolePermission) TableName() string { return TableRolePermission }
 
 type RoleMenu struct {
 	database.BaseModel `xorm:"extends"`
-	ID                 int64  `xorm:"pk autoincr 'id'"`
-	RoleID             int64  `xorm:"'role_id'"`
-	MenuID             int64  `xorm:"'menu_id'"`
-	CreatedBy          string `xorm:"'created_by'"`
-	UpdatedBy          string `xorm:"'updated_by'"`
+	ID                 int64 `xorm:"pk autoincr 'id'"`
+	RoleID             int64 `xorm:"'role_id'"`
+	MenuID             int64 `xorm:"'menu_id'"`
 }
 
 func (RoleMenu) TableName() string { return TableRoleMenu }
@@ -194,8 +174,6 @@ type Menu struct {
 	MenuType           string  `xorm:"'menu_type'" json:"menu_type"`
 	Visible            bool    `xorm:"'visible'" json:"visible"`
 	Status             string  `xorm:"'status'" json:"status"`
-	CreatedBy          string  `xorm:"'created_by'" json:"-"`
-	UpdatedBy          string  `xorm:"'updated_by'" json:"-"`
 }
 
 func (Menu) TableName() string { return TableMenu }
@@ -212,8 +190,6 @@ type RPCMethod struct {
 	PermissionID       int64   `xorm:"'permission_id'"`
 	Description        *string `xorm:"'description'"`
 	Status             string  `xorm:"'status'"`
-	CreatedBy          string  `xorm:"'created_by'"`
-	UpdatedBy          string  `xorm:"'updated_by'"`
 }
 
 func (RPCMethod) TableName() string { return TableRPCMethod }
@@ -235,8 +211,6 @@ type UserSession struct {
 	UserAgent          *string    `xorm:"'user_agent'"`
 	DeviceID           *int64     `xorm:"'device_id'"`
 	Status             string     `xorm:"'status'"`
-	CreatedBy          string     `xorm:"'created_by'"`
-	UpdatedBy          string     `xorm:"'updated_by'"`
 }
 
 func (UserSession) TableName() string { return TableUserSession }
@@ -256,8 +230,6 @@ type AuthChallenge struct {
 	MaxAttempts        int        `xorm:"'max_attempts'"`
 	ConsumedAt         *time.Time `xorm:"'consumed_at'"`
 	Status             string     `xorm:"'status'"`
-	CreatedBy          string     `xorm:"'created_by'"`
-	UpdatedBy          string     `xorm:"'updated_by'"`
 }
 
 func (AuthChallenge) TableName() string { return TableAuthChallenge }
@@ -273,8 +245,6 @@ type UserAuthenticator struct {
 	VerifiedAt           *time.Time `xorm:"'verified_at'"`
 	LastUsedAt           *time.Time `xorm:"'last_used_at'"`
 	LastUsedStep         int64      `xorm:"'last_used_step'"`
-	CreatedBy            string     `xorm:"'created_by'"`
-	UpdatedBy            string     `xorm:"'updated_by'"`
 }
 
 func (UserAuthenticator) TableName() string { return TableUserAuthenticator }
@@ -296,8 +266,6 @@ type WebAuthnCredential struct {
 	LastUsedAt         *time.Time `xorm:"'last_used_at'"`
 	RevokedAt          *time.Time `xorm:"'revoked_at'"`
 	RevocationReason   *string    `xorm:"'revocation_reason'"`
-	CreatedBy          string     `xorm:"'created_by'"`
-	UpdatedBy          string     `xorm:"'updated_by'"`
 }
 
 func (WebAuthnCredential) TableName() string { return TableWebAuthnCredential }
@@ -318,8 +286,6 @@ type LoginLog struct {
 	MFAUsed            bool      `xorm:"'mfa_used'"`
 	RequestID          *string   `xorm:"'request_id'"`
 	OccurredAt         time.Time `xorm:"'occurred_at'"`
-	CreatedBy          string    `xorm:"'created_by'"`
-	UpdatedBy          string    `xorm:"'updated_by'"`
 }
 
 func (LoginLog) TableName() string { return TableLoginLog }
@@ -339,8 +305,6 @@ type AuditLog struct {
 	RequestID          *string   `xorm:"'request_id'"`
 	ChangesJSON        []byte    `xorm:"'changes_json'"`
 	OccurredAt         time.Time `xorm:"'occurred_at'"`
-	CreatedBy          string    `xorm:"'created_by'"`
-	UpdatedBy          string    `xorm:"'updated_by'"`
 }
 
 func (AuditLog) TableName() string { return TableAuditLog }
@@ -353,8 +317,6 @@ type AuthThrottle struct {
 	WindowStartedAt    time.Time  `xorm:"'window_started_at'"`
 	FailureCount       int        `xorm:"'failure_count'"`
 	BlockedUntil       *time.Time `xorm:"'blocked_until'"`
-	CreatedBy          string     `xorm:"'created_by'"`
-	UpdatedBy          string     `xorm:"'updated_by'"`
 }
 
 func (AuthThrottle) TableName() string { return TableAuthThrottle }
@@ -378,8 +340,6 @@ type IdentityProvider struct {
 	ConfigJSON             []byte  `xorm:"'config_json'"`
 	ProvisioningMode       string  `xorm:"'provisioning_mode'"`
 	Status                 string  `xorm:"'status'"`
-	CreatedBy              string  `xorm:"'created_by'"`
-	UpdatedBy              string  `xorm:"'updated_by'"`
 }
 
 func (IdentityProvider) TableName() string { return TableIdentityProvider }
@@ -395,8 +355,6 @@ type ExternalIdentity struct {
 	ExternalStatus     *string    `xorm:"'external_status'"`
 	LastSyncedAt       *time.Time `xorm:"'last_synced_at'"`
 	AttributesJSON     []byte     `xorm:"'attributes_json'"`
-	CreatedBy          string     `xorm:"'created_by'"`
-	UpdatedBy          string     `xorm:"'updated_by'"`
 }
 
 func (ExternalIdentity) TableName() string { return TableExternalIdentity }
@@ -412,8 +370,6 @@ type IntegrationEvent struct {
 	Status             string     `xorm:"'status'"`
 	PayloadHash        string     `xorm:"'payload_hash'"`
 	ErrorCode          *string    `xorm:"'error_code'"`
-	CreatedBy          string     `xorm:"'created_by'"`
-	UpdatedBy          string     `xorm:"'updated_by'"`
 }
 
 func (IntegrationEvent) TableName() string { return TableIntegrationEvent }

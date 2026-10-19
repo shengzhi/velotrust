@@ -24,6 +24,7 @@ max_idle_connections = 10
 connection_max_lifetime_seconds = 1800
 
 [auth]
+jwt_signing_key = "${VELOTRUST_JWT_SIGNING_KEY}"
 throttle_hmac_key = "${VELOTRUST_THROTTLE_HMAC_KEY}"
 totp_encryption_key = "${VELOTRUST_TOTP_ENCRYPTION_KEY}"
 totp_key_version = "v1"

@@ -41,6 +41,8 @@ type testStore struct {
 	resourceCatalogCalled  bool
 }
 
+func testJWTSigningKey() []byte { return []byte(strings.Repeat("j", 32)) }
+
 func (s *testStore) LoginBlocked(*servicecontext.Context, string, string) (bool, error) {
 	return s.blocked, nil
 }
@@ -157,20 +159,24 @@ func TestPasswordHashVerifiesAndUsesUniqueSalt(t *testing.T) {
 	}
 }
 
-func TestOpaqueSessionTokenStoresOnlyDigest(t *testing.T) {
-	token, digest, err := newToken()
+func TestJWTSessionTokenStoresOnlyDigest(t *testing.T) {
+	key := testJWTSigningKey()
+	issuedAt := time.Now().UTC().Truncate(time.Second)
+	expiresAt := issuedAt.Add(time.Hour)
+	token, err := issueAccessToken(key, 7, "session-id", issuedAt, expiresAt)
 	if err != nil {
 		t.Fatal(err)
 	}
+	digest := hashToken(token)
 	if token == digest || len(digest) != 64 || strings.Contains(token, digest) {
 		t.Fatalf("token/digest format is unsafe: token=%q digest=%q", token, digest)
 	}
-	decoded, err := base64.RawURLEncoding.DecodeString(token)
-	if err != nil || len(decoded) != sessionTokenLength {
-		t.Fatalf("unexpected opaque token encoding: %d, %v", len(decoded), err)
+	claims, err := parseAccessToken(key, token)
+	if err != nil || claims.Subject != "7" || claims.ID != "session-id" || !claims.ExpiresAt.Time.Equal(expiresAt) {
+		t.Fatalf("JWT claims were not validated: claims=%+v err=%v", claims, err)
 	}
-	if hashToken(token) != digest {
-		t.Fatal("returned token digest does not match token")
+	if _, err := parseAccessToken([]byte(strings.Repeat("x", 32)), token); err == nil {
+		t.Fatal("JWT signed with a different key was accepted")
 	}
 }
 
@@ -181,7 +187,7 @@ func TestLoginPersistsOpaqueSessionAndThrottleResetTogether(t *testing.T) {
 	}
 	version := PasswordHashVersion
 	store := &testStore{user: &model.User{ID: 7, Username: "operator", DisplayName: "Operator", UserStatus: "active", PasswordSalt: &salt, PasswordHash: &passwordHash, PasswordHashVersion: &version}}
-	service, err := New(store, Options{ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
+	service, err := New(store, Options{JWTSigningKey: testJWTSigningKey(), ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +219,7 @@ func TestLoginRecordsFailureWithoutCreatingSession(t *testing.T) {
 	}
 	version := PasswordHashVersion
 	store := &testStore{user: &model.User{ID: 7, Username: "operator", UserStatus: "active", PasswordSalt: &salt, PasswordHash: &passwordHash, PasswordHashVersion: &version}}
-	service, err := New(store, Options{ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
+	service, err := New(store, Options{JWTSigningKey: testJWTSigningKey(), ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +246,7 @@ func TestLoginRequiresAndConsumesTOTPWhenAuthenticatorIsActive(t *testing.T) {
 		user:              &model.User{ID: 7, Username: "operator", UserStatus: "active", PasswordSalt: &salt, PasswordHash: &passwordHash, PasswordHashVersion: &version},
 		totpAuthenticator: &model.UserAuthenticator{UserID: 7, SecretCiphertext: ciphertext, EncryptionKeyVersion: "v1", Status: "active"},
 	}
-	service, err := New(store, Options{ThrottleHMACKey: []byte(strings.Repeat("k", 32)), TOTPEncryptionKey: []byte(strings.Repeat("e", 32))})
+	service, err := New(store, Options{JWTSigningKey: testJWTSigningKey(), ThrottleHMACKey: []byte(strings.Repeat("k", 32)), TOTPEncryptionKey: []byte(strings.Repeat("e", 32))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,15 +271,19 @@ func TestLoginRequiresAndConsumesTOTPWhenAuthenticatorIsActive(t *testing.T) {
 
 func TestResolveBearerRevokesIdleSession(t *testing.T) {
 	now := time.Now().UTC()
-	store := &testStore{
-		user:         &model.User{ID: 7, Username: "operator", UserStatus: "active"},
-		loginSession: &model.UserSession{SessionID: "session-id", UserID: 7, TokenHash: hashToken(strings.Repeat("a", 43)), IssuedAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(time.Hour), Status: "active"},
-	}
-	service, err := New(store, Options{SessionIdleTTL: time.Minute, SessionAbsoluteTTL: 3 * time.Hour, ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
+	token, err := issueAccessToken(testJWTSigningKey(), 7, "session-id", now.Add(-2*time.Hour), now.Add(3*time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = service.ResolveBearer(context.Background(), strings.Repeat("a", 43))
+	store := &testStore{
+		user:         &model.User{ID: 7, Username: "operator", UserStatus: "active"},
+		loginSession: &model.UserSession{SessionID: "session-id", UserID: 7, TokenHash: hashToken(token), IssuedAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(time.Hour), Status: "active"},
+	}
+	service, err := New(store, Options{SessionIdleTTL: time.Minute, SessionAbsoluteTTL: 3 * time.Hour, JWTSigningKey: testJWTSigningKey(), ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = service.ResolveBearer(context.Background(), token)
 	if err == nil || store.revokedReason != "idle_timeout" || store.touched {
 		t.Fatalf("idle session was not rejected and revoked: err=%v store=%+v", err, store)
 	}
@@ -281,7 +291,7 @@ func TestResolveBearerRevokesIdleSession(t *testing.T) {
 
 func TestGrantRoleRejectsSelfAssignmentBeforeStoreCall(t *testing.T) {
 	store := &testStore{}
-	service, err := New(store, Options{ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
+	service, err := New(store, Options{JWTSigningKey: testJWTSigningKey(), ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +306,7 @@ func TestGrantRoleRejectsSelfAssignmentBeforeStoreCall(t *testing.T) {
 
 func TestGrantRoleRequiresPermissionAtServiceBoundary(t *testing.T) {
 	store := &testStore{}
-	service, err := New(store, Options{ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
+	service, err := New(store, Options{JWTSigningKey: testJWTSigningKey(), ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +328,7 @@ func TestGrantRoleRequiresPermissionAtServiceBoundary(t *testing.T) {
 
 func TestResourceCatalogRequiresRoleReadPermission(t *testing.T) {
 	store := &testStore{resourceCatalog: []model.Resource{{ID: 1, ResourceCode: "iam.user"}}}
-	service, err := New(store, Options{ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
+	service, err := New(store, Options{JWTSigningKey: testJWTSigningKey(), ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,7 +352,7 @@ func TestResourceCatalogRequiresRoleReadPermission(t *testing.T) {
 
 func TestIAMMutationsRequirePermissionsAtServiceBoundary(t *testing.T) {
 	store := &testStore{}
-	service, err := New(store, Options{ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
+	service, err := New(store, Options{JWTSigningKey: testJWTSigningKey(), ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +378,7 @@ func TestIAMMutationsRequirePermissionsAtServiceBoundary(t *testing.T) {
 
 func TestPasswordResetRequiresPermissionAndRejectsSelfReset(t *testing.T) {
 	store := &testStore{}
-	service, err := New(store, Options{ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
+	service, err := New(store, Options{JWTSigningKey: testJWTSigningKey(), ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,7 +408,7 @@ func TestOwnPasswordChangeChecksOldPasswordAndKeepsCurrentSession(t *testing.T) 
 	}
 	version := PasswordHashVersion
 	store := &testStore{user: &model.User{ID: 7, Username: "operator", UserStatus: "active", PasswordSalt: &salt, PasswordHash: &hash, PasswordHashVersion: &version}}
-	service, err := New(store, Options{ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
+	service, err := New(store, Options{JWTSigningKey: testJWTSigningKey(), ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
 	if err != nil {
 		t.Fatal(err)
 	}

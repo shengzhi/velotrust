@@ -33,7 +33,7 @@ Management 使用 `pkg/jrpc` 提供的 HTTP JRPC 协议；HUB 的 Agent 长连�
 - `configs/`：非敏感配置模板。
 - `../pkg/jrpc/`：参考 Go 模板中的 `pkg/jrpc` 并适配到 monorepo 的协议运行时。
 
-Management 使用模板中的 `app/config/handler/repository/service` 等目录组织代码，并通过 `pkg/ioc` 注入依赖；`shared/repository/database` 封装 XORM 连接池、健康检查和事务生命周期。IAM 是首个接入该框架的业务模块，负责本地账号、Argon2id 密码、Passkey、可撤销 Bearer 会话、登录限流和静态 RBAC。
+Management 使用模板中的 `app/config/handler/repository/service` 等目录组织代码，并通过 `pkg/ioc` 注入依赖；`shared/repository/database` 封装 XORM 连接池、健康检查和事务生命周期。IAM 是首个接入该框架的业务模块，负责本地账号、Argon2id 密码、Passkey、HS256 JWT Bearer 令牌、可撤销服务端会话、登录限流和静态 RBAC。JWT 包含签发者、受众、用户 ID、会话 ID 和绝对过期时间；服务端仍核验对应会话，以便立即生效注销、账号停用和空闲超时。
 
 IAM 的 JRPC 方法使用 `IAM_Method` 命名。登录、Passkey 登录是公开方法；其他方法先解析数据库中的活动会话，再检查代码中的权限映射。未知或未声明的 IAM 方法默认拒绝。角色授权在事务内检查操作者有效权限，并禁止自我授予角色。
 
@@ -67,15 +67,16 @@ IAM、IPAM、Gateway 注册、ZTNA 和定时任务的持久化模型统一嵌入
 
 ## 首次运行
 
-1. 设置数据库连接、随机限流 HMAC 密钥和 TOTP 加密密钥：
+1. 设置数据库连接、随机 JWT 签名密钥、限流 HMAC 密钥和 TOTP 加密密钥：
 
    ```sh
    export DATABASE_DSN='postgres://velotrust:secret@127.0.0.1:5432/velotrust?sslmode=disable'
+   export VELOTRUST_JWT_SIGNING_KEY="$(openssl rand -hex 32)"
    export VELOTRUST_THROTTLE_HMAC_KEY="$(openssl rand -hex 32)"
    export VELOTRUST_TOTP_ENCRYPTION_KEY="$(openssl rand -hex 32)"
    ```
 
-   TOTP 加密密钥需在重启和升级期间保持不变；丢失或更换后，已存储的 TOTP 密钥将无法解密。
+   三个密钥都需通过受保护的密钥管理方式保存。JWT 签名密钥在重启、升级和所有 Management 副本之间必须保持一致；丢失或更换会使现存 JWT 失效。TOTP 加密密钥丢失或更换后，已存储的 TOTP 密钥将无法解密。
 
 2. 使用 PostgreSQL 连接环境变量或权限为 `0600` 的 `.pgpass` 创建空数据库并执行版本化迁移：
 

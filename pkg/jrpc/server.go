@@ -247,15 +247,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx.chain = append(ctx.chain, s.rpcHandler)
 
 	ctx.AccessMode = s.methodAccessMode(method)
-	if s.identityResolver != nil {
+	// Public methods must remain callable when a client sends an expired or
+	// otherwise invalid bearer token. Resolve identity only for methods whose
+	// access policy requires authentication; public handlers do not consume it.
+	if s.identityResolver != nil && ctx.AccessMode == AccessAuthenticated {
 		iden, err := s.identityResolver(ctx)
 		if err != nil {
+			if ctx.ilog != nil {
+				ctx.ilog.Debug("rpc identity resolution failed", "request_id", ctx.RequestID(), "method", ctx.ServiceName(), "error", err)
+			}
 			ctx.encodeError(jsonrpc.ErrUnauthorized())
 			return
 		}
 		ctx.Identity = iden
 	}
 	if ctx.AccessMode == AccessAuthenticated && ctx.Identity == nil {
+		if ctx.ilog != nil {
+			ctx.ilog.Debug("authenticated rpc request has no identity", "request_id", ctx.RequestID(), "method", ctx.ServiceName())
+		}
 		ctx.encodeError(jsonrpc.ErrUnauthorized())
 		return
 	}

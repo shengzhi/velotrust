@@ -237,7 +237,7 @@ func (r *Repository) CreateCredential(ctx *servicecontext.Context, actorID, gate
 
 func insertCredential(ctx *servicecontext.Context, tx *database.DBTransaction, s *xorm.Session, gatewayID int64, credential *model.Credential) error {
 	var expired []model.Credential
-	if err := s.Where("gateway_row_id=? AND status='pending' AND expires_at<=CURRENT_TIMESTAMP", gatewayID).ForUpdate().Find(&expired); err != nil {
+	if err := selectManyForUpdate(s, model.TableCredential, &expired, "gateway_row_id=? AND status='pending' AND expires_at<=CURRENT_TIMESTAMP", gatewayID); err != nil {
 		return fmt.Errorf("load expired gateway registration credentials: %w", err)
 	}
 	for i := range expired {
@@ -280,7 +280,7 @@ func (r *Repository) RevokeCredential(ctx *servicecontext.Context, actorID, cred
 			return err
 		}
 		var credential model.Credential
-		found, err := s.Where("id=? AND status IN ('pending','expired') AND used_count=0", credentialID).ForUpdate().Get(&credential)
+		found, err := selectOneForUpdate(s, model.TableCredential, &credential, "id=? AND status IN ('pending','expired') AND used_count=0", credentialID)
 		if err != nil {
 			return fmt.Errorf("load gateway registration credential for revocation: %w", err)
 		}
@@ -425,6 +425,18 @@ func writeAudit(ctx *servicecontext.Context, tx *database.DBTransaction, event *
 	audit.CreateNew(ctx.UserName())
 	_, err := tx.Save(audit)
 	return err
+}
+
+// XORM's ForUpdate builder emits a MySQL-only clause. The enrollment
+// repository requires PostgreSQL, so use PostgreSQL row-lock syntax directly.
+func selectOneForUpdate(s *xorm.Session, table string, bean any, condition string, args ...any) (bool, error) {
+	query := "SELECT * FROM " + table + " WHERE " + condition + " FOR UPDATE"
+	return s.SQL(query, args...).Get(bean)
+}
+
+func selectManyForUpdate(s *xorm.Session, table string, beans any, condition string, args ...any) error {
+	query := "SELECT * FROM " + table + " WHERE " + condition + " FOR UPDATE"
+	return s.SQL(query, args...).Find(beans)
 }
 
 func nullableStringPtr(value string) *string {
