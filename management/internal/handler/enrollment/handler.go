@@ -14,11 +14,9 @@ import (
 type Handler struct{ service *appEnrollment.Service }
 
 var methodPolicies = map[string]middleware.IAMMethodPolicy{
-	"ListGateways":               {Authenticated: true, Permission: "gateway.registration.read"},
 	"ListCredentials":            {Authenticated: true, Permission: "gateway.registration.read"},
 	"ListSelectableSiteNetworks": {Authenticated: true, Permission: "gateway.registration.read"},
 	"CreateGateway":              {Authenticated: true, Permission: "gateway.registration.write"},
-	"IssueCredential":            {Authenticated: true, Permission: "gateway.registration.write"},
 	"RevokeCredential":           {Authenticated: true, Permission: "gateway.registration.write"},
 	"ExtendCredential":           {Authenticated: true, Permission: "gateway.registration.write"},
 }
@@ -48,18 +46,6 @@ func Register(server *jrpc.Server, service *appEnrollment.Service, checker middl
 		return fmt.Errorf("ENROLLMENT JRPC methods registered=%d access declarations=%d", len(registered), len(methodPolicies))
 	}
 	return nil
-}
-
-type ListGatewaysReply struct {
-	Items []model.Gateway `json:"items"`
-}
-
-func (h *Handler) ListGateways(ctx *jrpc.Context, _ *struct{}) (*ListGatewaysReply, error) {
-	items, err := h.service.ListGateways(middleware.ServiceContext(ctx))
-	if err != nil {
-		return nil, err
-	}
-	return &ListGatewaysReply{Items: items}, nil
 }
 
 type ListCredentialsReply struct {
@@ -104,21 +90,6 @@ func (h *Handler) CreateGateway(ctx *jrpc.Context, args *CreateGatewayArgs) (*mo
 		GatewayName: args.GatewayName, GatewayType: args.GatewayType, NetworkName: args.NetworkName,
 		AllowedNetworkIDs: args.AllowedNetworkIDs, RequireApproval: args.RequireApproval,
 		ExpiresInHours: args.ExpiresInHours, Notes: args.Notes,
-	})
-}
-
-type IssueCredentialArgs struct {
-	GatewayRowID   int64  `json:"gateway_row_id" validate:"required,gt=0"`
-	ExpiresInHours int    `json:"expires_in_hours" validate:"required,min=1,max=168"`
-	Notes          string `json:"notes" validate:"omitempty,max=512"`
-}
-
-func (h *Handler) IssueCredential(ctx *jrpc.Context, args *IssueCredentialArgs) (*model.CredentialGrant, error) {
-	if args == nil {
-		return nil, errors.New("gateway registration credential arguments are required")
-	}
-	return h.service.IssueCredential(middleware.ServiceContext(ctx), appEnrollment.IssueCredentialInput{
-		GatewayRowID: args.GatewayRowID, ExpiresInHours: args.ExpiresInHours, Notes: args.Notes,
 	})
 }
 

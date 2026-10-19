@@ -50,24 +50,11 @@ type CreateGatewayInput struct {
 	Notes             string
 }
 
-type IssueCredentialInput struct {
-	GatewayRowID   int64
-	ExpiresInHours int
-	Notes          string
-}
-
 func New(store enrollment.Store, permissions PermissionChecker, networks NetworkCatalog) (*Service, error) {
 	if store == nil || permissions == nil || networks == nil {
-		return nil, errors.New("enrollment store, physical-site network catalog, and IAM permission checker are required")
+		return nil, errors.New("enrollment store, network-site network catalog, and IAM permission checker are required")
 	}
 	return &Service{store: store, permissions: permissions, networks: networks}, nil
-}
-
-func (s *Service) ListGateways(ctx *servicecontext.Context) ([]model.Gateway, error) {
-	if _, err := s.authorize(ctx, readPermission); err != nil {
-		return nil, err
-	}
-	return s.store.ListGateways(ctx)
 }
 
 func (s *Service) ListCredentials(ctx *servicecontext.Context) ([]model.Credential, error) {
@@ -81,7 +68,17 @@ func (s *Service) ListSelectableSiteNetworks(ctx *servicecontext.Context) ([]mod
 	if _, err := s.authorize(ctx, readPermission); err != nil {
 		return nil, err
 	}
-	return s.networks.ListSelectableSiteNetworks(ctx)
+	networks, err := s.networks.ListSelectableSiteNetworks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	available := make([]modelIPAM.Network, 0, len(networks))
+	for _, network := range networks {
+		if network.GatewayNodeID == nil {
+			available = append(available, network)
+		}
+	}
+	return available, nil
 }
 
 func (s *Service) CreateGateway(ctx *servicecontext.Context, input CreateGatewayInput) (*model.CredentialGrant, error) {
@@ -112,7 +109,7 @@ func (s *Service) CreateGateway(ctx *servicecontext.Context, input CreateGateway
 		return nil, err
 	}
 	if len(input.AllowedNetworkIDs) == 0 || len(input.AllowedNetworkIDs) > 32 {
-		return nil, invalid("allowed_network_ids", "select between 1 and 32 active physical-site networks")
+		return nil, invalid("allowed_network_ids", "select between 1 and 32 active network-site networks")
 	}
 	selectedNetworks, err := s.networks.ResolveActiveSiteNetworks(ctx, input.AllowedNetworkIDs)
 	if err != nil {
@@ -122,6 +119,9 @@ func (s *Service) CreateGateway(ctx *servicecontext.Context, input CreateGateway
 	selectedIDs := make([]int64, 0, len(selectedNetworks))
 	seenCIDRs := make(map[string]struct{}, len(selectedNetworks))
 	for _, network := range selectedNetworks {
+		if network.GatewayNodeID != nil {
+			return nil, invalid("allowed_network_ids", "selected network site is already assigned to a gateway; unbind it in Sites first")
+		}
 		canonical := strings.TrimSpace(network.CIDR)
 		if canonical == "" {
 			return nil, invalid("allowed_network_ids", "selected IPAM network has no CIDR")
@@ -133,11 +133,6 @@ func (s *Service) CreateGateway(ctx *servicecontext.Context, input CreateGateway
 		subnets = append(subnets, canonical)
 		selectedIDs = append(selectedIDs, network.ID)
 	}
-	subnetsJSON, err := json.Marshal(subnets)
-	if err != nil {
-		return nil, fmt.Errorf("encode allowed gateway subnets: %w", err)
-	}
-
 	now := time.Now().UTC()
 	gatewayID, err := randomHex(16)
 	if err != nil {
@@ -145,9 +140,10 @@ func (s *Service) CreateGateway(ctx *servicecontext.Context, input CreateGateway
 	}
 	gateway := &model.Gateway{
 		GatewayID: "gw_" + gatewayID, GatewayName: input.GatewayName, GatewayType: input.GatewayType,
-		NetworkName: input.NetworkName, AllowedSubnets: subnets, AllowedSubnetsRaw: subnetsJSON,
-		AllowedNetworkIDs: selectedIDs,
-		RequireApproval:   input.RequireApproval, Status: model.GatewayPending,
+		NetworkName: input.NetworkName, GatewayNetworkName: input.NetworkName,
+		AllowedSubnets: subnets, AllowedNetworkIDs: selectedIDs,
+		RequireApproval: input.RequireApproval, Status: model.GatewayPending,
+		NodeType: "gateway", NodeStatus: "pending",
 	}
 	token, hash, err := newCredential()
 	if err != nil {
@@ -165,42 +161,6 @@ func (s *Service) CreateGateway(ctx *servicecontext.Context, input CreateGateway
 		"require_approval":    gateway.RequireApproval, "expires_in_hours": input.ExpiresInHours,
 	})
 	if err := s.store.CreateGatewayAndCredential(ctx, actorID, gateway, credential, audit); err != nil {
-		return nil, err
-	}
-	return &model.CredentialGrant{Credential: credentialView(gateway, credential), Token: token}, nil
-}
-
-func (s *Service) IssueCredential(ctx *servicecontext.Context, input IssueCredentialInput) (*model.CredentialGrant, error) {
-	actorID, err := s.authorize(ctx, writePermission)
-	if err != nil {
-		return nil, err
-	}
-	if input.GatewayRowID <= 0 {
-		return nil, invalid("gateway_id", "must be a valid pre-created gateway")
-	}
-	if err := validateExpiry(input.ExpiresInHours); err != nil {
-		return nil, err
-	}
-	input.Notes = strings.TrimSpace(input.Notes)
-	if len(input.Notes) > 512 {
-		return nil, invalid("notes", "must be at most 512 characters")
-	}
-	now := time.Now().UTC()
-	token, hash, err := newCredential()
-	if err != nil {
-		return nil, fmt.Errorf("generate gateway registration credential: %w", err)
-	}
-	credential := newCredentialModel(hash, now.Add(time.Duration(input.ExpiresInHours)*time.Hour), input.Notes)
-	audit, err := newAudit(ctx, actorID, "gateway.registration.issue", "gateway_registration_credential", "one-time credential issued")
-	if err != nil {
-		return nil, err
-	}
-	audit.ChangesJSON, _ = json.Marshal(map[string]any{"expires_in_hours": input.ExpiresInHours})
-	if err := s.store.CreateCredential(ctx, actorID, input.GatewayRowID, credential, audit); err != nil {
-		return nil, err
-	}
-	gateway, err := s.store.GetGateway(ctx, input.GatewayRowID)
-	if err != nil {
 		return nil, err
 	}
 	return &model.CredentialGrant{Credential: credentialView(gateway, credential), Token: token}, nil
@@ -311,7 +271,7 @@ func newCredentialModel(hash string, expires time.Time, notes string) *model.Cre
 
 func credentialView(gateway *model.Gateway, credential *model.Credential) model.Credential {
 	view := *credential
-	view.GatewayRowID = gateway.ID
+	view.NodeID = gateway.ID
 	view.GatewayID = gateway.GatewayID
 	view.GatewayName = gateway.GatewayName
 	view.GatewayType = gateway.GatewayType

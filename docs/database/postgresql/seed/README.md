@@ -39,6 +39,11 @@ apply it manually from the repository root:
 psql "$DATABASE_DSN" -v ON_ERROR_STOP=1 -f docs/database/postgresql/seed/006_resource_permissions.sql
 ```
 
+The versioned migration `management/migrations/postgresql/014_network_site_labels.sql`
+renames the existing site menu, resource, and permission display names to
+“网络站点” without changing their codes. Its review copy is
+`007_network_site_labels.sql` in this directory.
+
 Migration `management/migrations/postgresql/008_ipam_network_catalog.sql`
 creates the persistent enterprise network catalog, gateway-to-network
 associations, and the IPAM network read/write permissions. These networks

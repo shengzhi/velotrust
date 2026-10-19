@@ -28,7 +28,7 @@
 - **身份统一**：管理员和普通员工共用 `t_iam_user`，通过角色、权限和策略区分职责。
 - **管理授权与网络授权分离**：管理后台 RBAC 只控制管理操作；能否访问网络资源由 ZTNA 策略独立判定。
 - **菜单与业务资源分离**：菜单用于导航和页面呈现，管理资源用于描述可管理对象，受保护资源用于描述真实网络访问目标。
-- **控制面期望状态与节点实际状态分离**：数据库中的目标配置不等于节点已经应用的配置，必须持久化任务状态、节点回执和实际版本。
+- **控制面期望状态与节点实际状态分离**：数据库中的当前配置不等于节点已经应用的配置，必须持久化任务状态、节点回执和实际配置摘要。
 - **可审计、可撤销**：登录、会话撤销、策略变更、设备吊销、配置发布等关键事件必须可追踪。
 - **敏感信息最小化**：密码、OTP、令牌、私钥和第三方密钥不得以明文写入日志；需要恢复使用的秘密应加密存储。
 - **幂等与可恢复**：异步任务具有唯一任务标识、明确状态和可重试语义。
@@ -551,6 +551,8 @@ Passkey 与 TOTP 认证器使用不同的数据模型。服务端保存验证公
 
 ## 7. 网络、节点与受保护资源模型
 
+网络站点直接使用 `t_ztna_network` 中 `network_type='site'` 的记录，不单独建表，也不拆成站点与站点网段两条记录。`network_code`、`network_name` 和 `cidr` 分别作为站点编码、名称和本地网段；`gateway_node_id`、`status`、`is_del` 及公共字段也保存在同一行。站点 ID 与网络 ID 相同，Gateway 注册和 NAT 映射继续引用这个网络 ID。有网关关联时不得删除、停用或修改 CIDR；删除通过 `is_del` 逻辑删除。NAT 继续使用 `t_ztna_nat_mapping`，由站点服务授权和管理。
+
 ### 7.1 `t_ztna_network` — 企业网络/网络区域
 
 | 字段 | 类型建议 | 说明 |
@@ -560,21 +562,26 @@ Passkey 与 TOTP 认证器使用不同的数据模型。服务端保存验证公
 | `network_code` | VARCHAR(64) | NOT NULL，唯一 |
 | `network_type` | VARCHAR(32) | `vpc`、`subnet`、`site`、`segment` 等 |
 | `cidr` | CIDR | NOT NULL，标准化网段 |
+| `gateway_node_id` | BIGINT | 可空；站点所属网关，引用 t_ztna_node.id |
 | `region` | VARCHAR(128) | 可空 |
 | `environment` | VARCHAR(32) | `prod`、`test`、`dev` 等 |
 | `description` | VARCHAR(512) | 可空 |
 | `status` | VARCHAR(24) | `active` / `disabled` |
+| `is_del` | BOOLEAN | 逻辑删除标记 |
 | 公共字段 | — | 标准公共字段 |
 
 Overlay 地址池不得与业务网段重叠；不同企业业务网段允许重叠，以支持多站点同址规划，但访问前需配置虚拟影子网段并由 Gateway 数据面落实 NAT。网络被纳管不意味着其中所有资源都对用户开放。
 
 ### 7.2 `t_ztna_node` — 控制面管理的网络节点
 
-用于表达客户端代理、访问网关、中继节点或受控连接器等运行实体。
+用于表达客户端代理、访问网关、中继节点或受控连接器等运行实体。网关属于
+`node_type='gateway'` 的节点，不再另建一份网关身份表。Gateway 专用的注册
+字段（`gateway_type`、`gateway_network_name`、`require_approval`、
+`registered_at`）只在网关节点上使用；允许网段从 `t_ztna_network` 中 `gateway_node_id` 指向本节点的记录读取。
 
-字段建议：`id`、`node_name`、`node_code`（唯一）、`node_type`、`node_status`、`agent_version`、`control_endpoint`、`public_endpoint`、`private_endpoint`、`public_key`、`network_id`（可空）、`last_heartbeat_at`、`last_config_version`、`actual_config_version`、`capabilities_json`、`health_status`、公共字段。
+字段建议：`id`、`node_name`、`node_code`（唯一）、`node_type`、`node_status`、`agent_version`、`control_endpoint`、`public_endpoint`、`private_endpoint`、`public_key`、`last_heartbeat_at`、`last_config_hash`、`actual_config_hash`、`capabilities_json`、`health_status`、公共字段。
 
-注意：`last_config_version` 可表示已下发/已知版本，`actual_config_version` 必须以节点应用回执或可靠状态上报为依据，不能仅在发送配置时更新。
+`last_config_hash` 表示最近下发配置的内容摘要，`actual_config_hash` 必须以节点应用回执或可靠状态上报为依据。控制面比较摘要判断是否收敛，不维护配置版本序列。
 
 ### 7.3 `t_ztna_protected_resource` — 受保护资源
 
@@ -602,13 +609,9 @@ Overlay 地址池不得与业务网段重叠；不同企业业务网段允许重
 
 端点字段应根据 `resource_type` 做条件校验；对网段资源校验 CIDR，对端口资源校验 `1–65535` 且起点不大于终点。资源发现、资源纳管、策略授权和实际网络可达性是不同状态。
 
-### 7.4 `t_ztna_node_network` — 节点与网络关系（按需启用）
+### 7.4 网络与网关归属
 
-当节点可能连接多个网络时使用。字段：`id`、`node_id`、`network_id`、`role`、`created_at`。唯一约束 `(node_id, network_id)`。若节点严格只属于一个网络，可直接保留 `network_id` 在节点表而不建关系表。
-
-### 7.5 `t_ztna_node_endpoint` — 节点端点（按需启用）
-
-当一个节点需要维护多个可达端点、地址类型或优先级时使用。字段：`id`、`node_id`、`endpoint_type`、`address`、`port`、`priority`、`last_verified_at`、`status`、`created_at`。不要把客户端报告的未经验证地址直接作为可信的外部端点。
+每个网络最多属于一个网关，直接使用 `t_ztna_network.gateway_node_id` 外键引用 `t_ztna_node.id`。一个网关可管理多个站点，通过反向查询网络表获得其允许网段，不重复保存 CIDR 快照。注册凭证签发时，只能选取启用、未删除且尚未绑定网关的站点；绑定和签发在同一事务中完成。迁移 016 将原关系转为单一归属后删除 `t_ztna_node_network`；出现多网关、归属或路由快照冲突时中止迁移，要求显式核对。
 
 ---
 
@@ -616,7 +619,7 @@ Overlay 地址池不得与业务网段重叠；不同企业业务网段允许重
 
 ### 8.1 `t_ztna_access_policy` — 访问策略主表
 
-策略主表保存稳定标识、管理元数据和当前生效版本指针；详细规则应通过不可变修订版本管理。
+策略主表保存稳定标识、管理元数据和当前规则。更新直接覆盖数据库当前行，不另存策略修订历史。
 
 | 字段 | 类型建议 | 说明 |
 |---|---|---|
@@ -626,37 +629,32 @@ Overlay 地址池不得与业务网段重叠；不同企业业务网段允许重
 | `description` | VARCHAR(512) | 可空 |
 | `priority` | INT | 数值越小/越大优先需在产品规范中固定 |
 | `status` | VARCHAR(24) | `draft`、`active`、`disabled` |
-| `current_revision_id` | BIGINT | 当前生效修订，可空 |
+| `rules_json` | JSONB | 当前授权规则，数组或对象；策略当前状态的唯一权威内容 |
+| `compiled_hash` | VARCHAR(128) | 可空；规则规范化/编译内容摘要，不是版本号 |
 | `created_by` / `updated_by` | VARCHAR(64) | 公共字段 |
 | 公共字段 | — | 标准公共字段 |
 
 策略优先级、冲突处理、默认拒绝和规则合并方式必须形成统一规范，不能由不同服务各自解释。
 
-### 8.2 `t_ztna_access_policy_revision` — 策略不可变版本
-
-字段：`id`、`policy_id`、`revision_no`、`rules_json`、`compiled_hash`、`change_summary`、`status`、`published_at`、`published_by`、`created_at`、`created_by`。
-
-唯一约束 `(policy_id, revision_no)`。发布后的修订版本不可原地覆盖；策略更新应创建新版本，并保存发布人、发布时间和内容摘要。
-
-### 8.3 `t_ztna_policy_subject` — 策略主体关系
+### 8.2 `t_ztna_policy_subject` — 策略主体关系
 
 用于把策略关联到用户、群组、角色或设备集合。字段：`id`、`policy_id`、`subject_type`（`user`、`group`、`device` 等）、`subject_id`、`created_at`。唯一约束 `(policy_id, subject_type, subject_id)`。
 
-若策略主体需要精确绑定到不可变修订版本，可将 `policy_id` 替换/补充为 `policy_revision_id`；选定一种模型后应全项目统一。
+主体关系属于当前策略状态，更新规则和关系时在同一事务中保存；不关联历史策略版本。
 
-### 8.4 `t_ztna_policy_resource` — 策略目标资源关系
+### 8.3 `t_ztna_policy_resource` — 策略目标资源关系
 
-字段：`id`、`policy_id`、`protected_resource_id`、`created_at`。唯一约束 `(policy_id, protected_resource_id)`。如目标集合完全保存在版本化规则 JSON 中，本关系表可作为查询索引或不启用；不要同时维护两份互相矛盾的权威数据。
+字段：`id`、`policy_id`、`protected_resource_id`、`created_at`。唯一约束 `(policy_id, protected_resource_id)`。规则 JSON 与主体/目标关系需要明确唯一写入路径，并在同一事务内保持一致。
 
-### 8.5 `t_ztna_authorization_decision` — 关键授权决策记录（可选）
+### 8.4 `t_ztna_authorization_decision` — 关键授权决策记录（可选）
 
 不建议对每个数据包写一条数据库记录。该表用于记录登录后关键资源访问、临时授权、策略拒绝或安全调查需要保留的决策事件。
 
-字段：`id`、`decision_id`（唯一）、`user_id`、`device_id`、`protected_resource_id`、`policy_id`、`policy_revision_id`、`decision`（`allow` / `deny` / `step_up`）、`reason_code`、`auth_level`、`device_trust_status`、`source_ip`、`request_id`、`decided_at`。
+字段：`id`、`decision_id`（唯一）、`user_id`、`device_id`、`protected_resource_id`、`policy_id`、`decision`（`allow` / `deny` / `step_up`）、`reason_code`、`auth_level`、`device_trust_status`、`source_ip`、`request_id`、`decided_at`。记录策略 ID 和决策原因，不记录策略修订号或规则历史快照。
 
 应按风险和审计要求控制记录范围与保留期；高频数据面统计使用指标系统而非逐包写库。
 
-### 8.6 `t_ztna_authorization_grant` — 临时/审批授权（按需启用）
+### 8.5 `t_ztna_authorization_grant` — 临时/审批授权（按需启用）
 
 仅当产品提供临时访问、工单审批或限时授权时启用。字段：`id`、`grant_id`、`user_id`、`device_id`（可空）、`protected_resource_id`、`requested_by`、`approved_by`、`reason`、`status`、`valid_from`、`expires_at`、`revoked_at`、`created_at`。授权必须有明确到期时间、撤销状态和审计记录。
 
@@ -674,11 +672,11 @@ Overlay 地址池不得与业务网段重叠；不同企业业务网段允许重
 
 约束建议：`public_key` 按适用范围唯一；隧道地址在同一地址域内唯一；`allowed_ips` 的冲突需要在配置生成时校验，不能仅依赖数据库唯一索引。
 
-### 9.3 `t_ztna_config_revision` — 期望配置版本
+### 9.3 `t_ztna_config` — 当前期望配置
 
-字段：`id`、`target_type`、`target_id`、`config_version`、`config_hash`、`config_json` 或 `config_blob_ref`、`created_at`、`created_by`、`reason`。
+字段：`id`、`target_type`、`target_id`、`config_hash`、`config_json` 或 `config_blob_ref`、公共字段、`reason`。唯一约束 `(target_type, target_id)`，每个目标仅保存一条可更新的当前配置。
 
-唯一约束 `(target_type, target_id, config_version)`。配置中若包含秘密材料，应避免直接保存未加密明文；能由安全引用或节点本地生成的私钥不应进入配置快照。
+`config_hash` 是当前内容的摘要，用于校验、幂等应用和与 Agent 实际状态比对，不是递增版本号。配置中若包含秘密材料，应避免直接保存未加密明文；能由安全引用或节点本地生成的私钥不应进入配置。
 
 ### 9.4 `t_ztna_node_config_task` — 配置分发任务
 
@@ -687,7 +685,7 @@ Overlay 地址池不得与业务网段重叠；不同企业业务网段允许重
 | `id` | BIGINT | PK |
 | `task_id` | VARCHAR(64) | NOT NULL，唯一幂等标识 |
 | `node_id` | BIGINT | NOT NULL |
-| `target_config_version` | BIGINT | 目标配置版本 |
+| `target_config_hash` | VARCHAR(128) | 目标配置摘要，用于幂等和识别过期任务 |
 | `task_type` | VARCHAR(32) | `apply_config`、`revoke`、`rotate_key` 等 |
 | `status` | VARCHAR(24) | `pending`、`queued`、`sent`、`received`、`applying`、`applied`、`verified`、`failed`、`cancelled` |
 | `retry_count` | INT | NOT NULL DEFAULT 0 |
@@ -699,7 +697,7 @@ Overlay 地址池不得与业务网段重叠；不同企业业务网段允许重
 | `finished_at` | TIMESTAMP | 可空 |
 | `created_by` | VARCHAR(64) | NOT NULL DEFAULT '' |
 
-状态语义必须明确：`sent` 仅代表发送；`received` 代表节点确认收到；`applied` 代表节点报告已应用；`verified` 代表通过额外校验确认生效。重复任务必须幂等，超时可重试，失败需要保留原因。
+状态语义必须明确：`sent` 仅代表发送；`received` 代表节点确认收到；`applied` 代表节点报告已应用；`verified` 代表通过额外校验确认生效。应用前要比较任务摘要与数据库当前摘要，过期任务应取消并按当前配置重新创建。重复任务必须幂等，超时可重试，失败需要保留原因。
 
 ### 9.5 `t_ztna_node_config_task_event` — 配置任务事件（推荐）
 
@@ -707,7 +705,7 @@ Overlay 地址池不得与业务网段重叠；不同企业业务网段允许重
 
 ### 9.6 `t_ztna_node_status_report` — 节点状态快照（按需启用）
 
-字段：`id`、`node_id`、`reported_at`、`agent_version`、`actual_config_version`、`wireguard_status`、`health_status`、`connected_peer_count`、`metrics_json`。如果只需要最新状态，可将快照字段放在 `t_ztna_node`；如果需要历史趋势，应按时间分区/归档，避免无限增长。
+字段：`id`、`node_id`、`reported_at`、`agent_version`、`actual_config_hash`、`wireguard_status`、`health_status`、`connected_peer_count`、`metrics_json`。状态报告可以作为运行观测历史，但不保存历史配置版本或配置内容。
 
 ### 9.7 `t_ztna_relay` — 中继节点（启用中继功能时）
 
@@ -785,14 +783,13 @@ Overlay 地址池不得与业务网段重叠；不同企业业务网段允许重
 | 集成任务 | `t_iam_integration_sync_task`、`t_iam_integration_event` | 推荐 | 可恢复同步与回调去重 |
 | 设备 | `t_ztna_device`、`t_ztna_device_credential` | 必须 | 设备与凭证 |
 | 设备合规 | `t_ztna_device_posture_check` | 建议 | 合规检查记录 |
-| 网络资源 | `t_ztna_network`、`t_ztna_node`、`t_ztna_protected_resource` | 必须 | 网络、节点、访问目标 |
-| 节点扩展 | `t_ztna_node_network`、`t_ztna_node_endpoint` | 按模型复杂度启用 | 多网络/多端点 |
-| 访问策略 | `t_ztna_access_policy`、`t_ztna_access_policy_revision` | 必须 | 策略及不可变版本 |
+| 网络资源 | `t_ztna_network`、`t_ztna_node`、`t_ztna_protected_resource` | 必须 | 网络站点与企业网络、节点、访问目标 |
+| 访问策略 | `t_ztna_access_policy` | 必须 | 当前策略规则及状态 |
 | 策略关系 | `t_ztna_policy_subject`、`t_ztna_policy_resource` | 视规则模型决定 | 主体和目标关系索引 |
 | 授权记录 | `t_ztna_authorization_decision` | 建议/可选 | 关键授权决策审计 |
 | 临时授权 | `t_ztna_authorization_grant` | 按需启用 | 审批与限时授权 |
 | 隧道 | `t_ztna_tunnel`、`t_ztna_tunnel_peer` | 必须（采用 WireGuard 时） | 逻辑隧道与 Peer |
-| 配置版本 | `t_ztna_config_revision` | 必须 | 期望配置快照 |
+| 当前配置 | `t_ztna_config` | 必须 | 每个目标唯一的期望配置 |
 | 配置任务 | `t_ztna_node_config_task` | 必须 | 可靠配置下发 |
 | 任务事件 | `t_ztna_node_config_task_event` | 推荐 | 状态变化追踪 |
 | 节点状态历史 | `t_ztna_node_status_report` | 按监控需求启用 | 历史状态快照 |
@@ -803,7 +800,7 @@ Overlay 地址池不得与业务网段重叠；不同企业业务网段允许重
 | 地址管理 | `t_ztna_overlay_network` | 已实现 | 显式初始化的 Overlay 全局私有地址范围 |
 | 地址管理 | `t_ztna_nat_mapping` | 已实现（数据面同步待实现） | 企业网段 NAT 映射配置台账 |
 
-当前 PostgreSQL IAM 初始 schema 已创建 22 张表，包含 Passkey 凭证与挑战字段；暂不创建外部组织表（`t_iam_external_org`、`t_iam_external_identity_org`）和目录同步任务表（`t_iam_integration_sync_task`）。IPAM 网络目录、地址池、租约、NAT 台账及 Overlay 全局范围由后续版本化 migration 008/009/010 创建；ZTNA 设备、节点、受保护资源、策略、隧道、配置下发及安全事件业务表由 migration 011 创建。migration 011 只提供持久化结构，其中标记为建议或按需启用的实体尚不代表业务功能已实现。
+当前 PostgreSQL IAM 初始 schema 已创建 22 张表，包含 Passkey 凭证与挑战字段；暂不创建外部组织表（`t_iam_external_org`、`t_iam_external_identity_org`）和目录同步任务表（`t_iam_integration_sync_task`）。IPAM 网络目录、地址池、租约、NAT 台账及 Overlay 全局范围由后续版本化 migration 008/009/010 创建；ZTNA 设备、节点、受保护资源、策略、隧道、配置下发及安全事件业务表由 migration 011 创建；网络站点管理字段和权限由 migration 013 增补到 `t_ztna_network`，不新增网络站点表。migration 018 将策略规则迁入策略主表并将配置修订折叠成每目标一条当前配置；活动的 apply_config 任务改为指向该目标的当前配置摘要，找不到唯一当前快照时迁移中止，要求先处理任务。后续更新覆盖数据库当前行，不保存策略或配置业务修订历史。migration 011 只提供初始持久化结构，其中标记为建议或按需启用的实体尚不代表业务功能已实现。
 
 ---
 
@@ -827,15 +824,15 @@ Overlay 地址池不得与业务网段重叠；不同企业业务网段允许重
 - 同步任务采用幂等写入、游标续跑、有限重试和周期性全量/增量对账。
 - 外部账号停用或离职事件应根据配置触发内部用户禁用、会话撤销和访问权限重评估；同步异常不得静默地保留无限期旧权限。
 
-### 12.3 策略发布与配置下发
+### 12.3 当前策略与配置下发
 
 推荐在一个数据库事务中完成：
-1. 保存策略新修订版本；
-2. 更新策略当前生效版本指针；
+1. 更新数据库中的当前策略规则、主体和资源关系；
+2. 保存目标的当前期望配置及 config_hash；
 3. 创建需要分发的配置任务或事务性 Outbox 记录；
 4. 写入审计事件。
 
-节点收到配置后必须验证版本、签名/来源和参数；应用成功后上报实际版本。后台对账比较期望版本与实际版本，必要时重试或告警。
+节点收到配置后必须验证来源、内容摘要和参数；应用成功后上报 actual_config_hash。后台将其与数据库当前 config_hash 比较，必要时重试或告警。策略和配置不保留递增业务版本；基础 `version_no` 仍用于防止并发写入覆盖。
 
 ### 12.4 软删除与外键策略
 
@@ -876,7 +873,7 @@ Overlay 地址池不得与业务网段重叠；不同企业业务网段允许重
 | `t_iam_webauthn_credential` | `(rp_id, credential_id)` |
 | `t_ztna_device` | `device_uuid` |
 | `t_ztna_access_policy` | `policy_code` |
-| `t_ztna_access_policy_revision` | `(policy_id, revision_no)` |
+| `t_ztna_config` | `(target_type, target_id)` |
 | `t_ztna_node` | `node_code` |
 | `t_ztna_protected_resource` | `resource_code` |
 | `t_ztna_tunnel` | `tunnel_code` |
@@ -892,7 +889,7 @@ Overlay 地址池不得与业务网段重叠；不同企业业务网段允许重
 - Passkey：`(user_id, status)`、`(rp_id, status)`、`(rp_id, credential_id)`。
 - 设备：`(owner_user_id, status)`、`(trust_status, status)`、`last_seen_at`。
 - 受保护资源：`(network_id, status)`、`(resource_type, status)`。
-- 策略：`(status, priority)`、`(current_revision_id)`。
+- 策略：`(status, priority)`。
 - 节点：`(node_status, health_status)`、`last_heartbeat_at`。
 - 配置任务：`(status, next_retry_at)`、`(node_id, created_at)`。
 - 审计与登录事件：`(occurred_at)`、`(user_id, occurred_at)`、`request_id`。
@@ -918,9 +915,9 @@ Overlay 地址池不得与业务网段重叠；不同企业业务网段允许重
 4. **私钥**：WireGuard 或设备私钥尽量在设备本地生成并保管；控制面只保存公钥和必要的生命周期元数据。
 5. **审计**：审计事件追加写入，限制查询与导出权限；高安全场景可将审计同步到独立存储。
 6. **个人信息**：设备姿态、用户属性和外部目录字段按最小必要原则采集，设置明确保留期。
-7. **备份恢复**：业务库、配置版本、密钥管理材料和审计数据应制定不同的备份与恢复策略，并定期演练。
+7. **备份恢复**：业务库当前状态、密钥管理材料和审计数据应制定不同的备份与恢复策略，并定期演练；策略和期望配置的旧内容不在数据库中保留。
 8. **数据导出**：导出接口需要管理权限、范围控制、脱敏、审计和必要的二次确认。
-9. **状态对账**：定期校验孤儿关系、重复映射、过期会话、长期未完成任务、策略版本和节点实际版本偏差。
+9. **状态对账**：定期校验孤儿关系、重复映射、过期会话、长期未完成任务、当前策略/配置状态和节点实际配置摘要偏差。
 
 ---
 
@@ -955,7 +952,7 @@ func (User) TableName() string {
 - 状态值使用常量定义，禁止在业务代码中散落未约束的字符串。
 - 数据库字段可使用 `VARCHAR` 保存枚举，利于后续扩展；对安全敏感的状态变更必须经过状态机校验。
 - 端口、CIDR、版本号、有效期、外部标识等在服务层校验，并用数据库约束作为最后防线。
-- 对 `JSON/TEXT` 配置字段定义 Go 结构体与版本字段；不能将任意不校验的客户端 JSON 直接下发节点执行。
+- 对 `JSON/TEXT` 配置字段定义 Go 结构体与 schema_version；该字段只标识数据结构，不维护业务配置历史。不能将未校验的客户端 JSON 直接下发节点执行。
 
 ---
 
@@ -974,8 +971,8 @@ func (User) TableName() string {
 - 验收：设备吊销能触发配置更新；CIDR/地址冲突能被发现；资源纳管不会自动授予访问权限。
 
 ### 阶段四：策略与配置下发
-- 完成策略主表、不可变修订、主体/资源关系、隧道 Peer、配置版本和配置任务。
-- 验收：策略版本可追溯；任务重试幂等；系统能区分已发送、已接收、已应用和已验证；节点离线时任务可恢复并告警。
+- 完成当前策略主表、主体/资源关系、隧道 Peer、当前期望配置和配置任务。
+- 验收：策略当前状态及管理操作可审计；任务重试幂等；系统能区分已发送、已接收、已应用和已验证；节点离线时任务可恢复并告警。
 
 ### 阶段五：安全运营与可靠性
 - 完成安全事件、状态对账、历史归档与备份恢复机制。
@@ -992,7 +989,7 @@ VeloTrust 的数据模型以统一内部用户为身份核心，以管理 RBAC �
 1. **管理权限不等于网络访问权**：后台管理员同样需要通过 ZTNA 策略才能访问受保护资源。
 2. **菜单不等于接口权限**：菜单仅控制导航展示，后端业务接口必须独立鉴权。
 3. **角色授权资源操作，不直接授权接口**：权限由资源和操作构成，API/RPC 方法映射到相应权限；一个权限可覆盖多个接口。
-4. **配置下发不等于配置生效**：必须保存任务过程、节点回执和实际配置版本，并通过对账保证最终收敛。
+4. **配置下发不等于配置生效**：必须保存任务过程、节点回执和实际配置摘要，并通过摘要对账保证最终收敛。
 5. **外部身份不等于内部授权**：第三方登录只建立可信身份映射，不应自动授予管理员角色或未经审批的网络访问权。
 
 本文件是数据模型设计基线。进入开发前，应根据最终选定的 PostgreSQL 或 MySQL 版本生成并审核迁移脚本，完成 GORM/XORM 双 ORM 映射测试、唯一约束测试、并发更新测试、会话撤销测试、节点配置重试测试及审计留存测试。

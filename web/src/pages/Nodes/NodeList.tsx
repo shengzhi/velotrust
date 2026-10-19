@@ -265,7 +265,7 @@ export const NodeList: React.FC = () => {
                 </TableHead>
                 <TableHead>类型</TableHead>
                 <TableHead>虚拟 IP</TableHead>
-                <TableHead>所属物理站点</TableHead>
+                <TableHead>所属网络站点</TableHead>
                 <TableHead>状态</TableHead>
                 <TableHead>
                   <button

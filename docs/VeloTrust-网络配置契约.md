@@ -1,6 +1,6 @@
 # VeloTrust 客户端与 Gateway 网络配置契约
 
-本文定义当前静态配置版本中 Windows Client CLI 与 Linux Gateway Agent 的 WireGuard、地址、Endpoint、AllowedIPs、路由和 MTU 语义。配置仍由管理员本地维护；客户端注册、控制面签名配置下发和策略版本协商尚未实现。
+本文定义 Windows Client CLI 与 Linux Gateway Agent 静态配置的 schema，以及 WireGuard、地址、Endpoint、AllowedIPs、路由和 MTU 语义。配置仍由管理员本地维护；客户端注册和控制面签名配置下发尚未实现。接入控制面后，策略与期望配置均以数据库当前记录为准，不维护业务版本历史；摘要只用于完整性和收敛校验。
 
 ## 字段语义
 

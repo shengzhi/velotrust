@@ -588,7 +588,7 @@ export const Devices: React.FC = () => {
               <StatusBadge status={viewDevice.status} />
             </div>
             <div className="flex justify-between py-1.5 border-b border-slate-100">
-              <span className="text-slate-500">注册归属物理站点</span>
+              <span className="text-slate-500">注册归属网络站点</span>
               <span className="text-slate-700">{viewDevice.siteName}</span>
             </div>
             <div className="flex justify-between py-1.5 border-b border-slate-100">

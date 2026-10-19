@@ -29,7 +29,7 @@ message Hello {
   string node_id = 1;
   NodeKind node_kind = 2;
   string wireguard_public_key = 3;
-  string applied_config_revision = 4;
+  string applied_config_hash = 4;
 }
 
 message Heartbeat {
@@ -37,14 +37,14 @@ message Heartbeat {
 }
 
 message ConfigApplied {
-  string revision = 1;
+  string config_hash = 1;
   bool success = 2;
   string error_code = 3;
 }
 
 message RuntimeStatus {
   uint32 connected_peer_count = 1;
-  string applied_config_revision = 2;
+  string applied_config_hash = 2;
 }
 
 message HubMessage {
@@ -62,8 +62,10 @@ message Welcome {
 }
 
 message ConfigSnapshot {
-  string revision = 1;
-  bytes sha256 = 2;
+  // Identifies the content in the database's current desired configuration.
+  string config_hash = 1;
+  reserved 2;
+  reserved "sha256";
   bytes payload = 3;
 }
 

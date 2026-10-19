@@ -22,7 +22,6 @@ type Store interface {
 	ListLeases(*servicecontext.Context) ([]model.Lease, error)
 	AllocateAddress(*servicecontext.Context, int64, *model.Lease, *model.AuditEvent) error
 	ReleaseLease(*servicecontext.Context, int64, int64, *model.AuditEvent) error
-	ListNATMappings(*servicecontext.Context) ([]model.NATMapping, error)
-	SaveNATMapping(*servicecontext.Context, int64, *model.NATMapping, *model.AuditEvent) error
+	SaveSiteNATMapping(*servicecontext.Context, int64, *model.NATMapping, *model.AuditEvent) error
 	CheckPrefix(*servicecontext.Context, string) (model.Conflict, error)
 }

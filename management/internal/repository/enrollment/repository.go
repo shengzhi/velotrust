@@ -10,6 +10,7 @@ import (
 	servicecontext "velotrust/management/internal/context"
 	model "velotrust/management/internal/model/enrollment"
 	iamModel "velotrust/management/internal/model/iam"
+	ipamModel "velotrust/management/internal/model/ipam"
 	"velotrust/shared/repository/database"
 	"xorm.io/xorm"
 )
@@ -35,45 +36,12 @@ func New(db *database.Database) (*Repository, error) {
 	return &Repository{db: db}, nil
 }
 
-func (r *Repository) ListGateways(ctx *servicecontext.Context) ([]model.Gateway, error) {
-	var gateways []model.Gateway
-	s := r.db.Engine().NewSession().Context(ctx)
-	defer s.Close()
-	query := "SELECT g.* FROM " + model.TableGateway + " g ORDER BY g.created_at DESC, g.id DESC"
-	if err := s.SQL(query).Find(&gateways); err != nil {
-		return nil, fmt.Errorf("list gateway enrollment targets: %w", err)
-	}
-	for index := range gateways {
-		if err := json.Unmarshal(gateways[index].AllowedSubnetsRaw, &gateways[index].AllowedSubnets); err != nil {
-			return nil, fmt.Errorf("decode gateway allowed subnets: %w", err)
-		}
-	}
-	return gateways, nil
-}
-
-func (r *Repository) GetGateway(ctx *servicecontext.Context, id int64) (*model.Gateway, error) {
-	var gateway model.Gateway
-	s := r.db.Engine().NewSession().Context(ctx)
-	defer s.Close()
-	found, err := s.ID(id).Get(&gateway)
-	if err != nil {
-		return nil, fmt.Errorf("get gateway enrollment target: %w", err)
-	}
-	if !found {
-		return nil, errors.New("gateway enrollment target was not found")
-	}
-	if err := json.Unmarshal(gateway.AllowedSubnetsRaw, &gateway.AllowedSubnets); err != nil {
-		return nil, fmt.Errorf("decode gateway allowed subnets: %w", err)
-	}
-	return &gateway, nil
-}
-
 func (r *Repository) ListCredentials(ctx *servicecontext.Context) ([]model.Credential, error) {
 	s := r.db.Engine().NewSession().Context(ctx)
 	defer s.Close()
 	type credentialRow struct {
 		ID                int64      `xorm:"'id'"`
-		GatewayRowID      int64      `xorm:"'gateway_row_id'"`
+		NodeID            int64      `xorm:"'node_id'"`
 		GatewayID         string     `xorm:"'gateway_id'"`
 		GatewayName       string     `xorm:"'gateway_name'"`
 		GatewayType       string     `xorm:"'gateway_type'"`
@@ -85,22 +53,27 @@ func (r *Repository) ListCredentials(ctx *servicecontext.Context) ([]model.Crede
 		UsedCount         int        `xorm:"'used_count'"`
 		ExpiresAt         time.Time  `xorm:"'expires_at'"`
 		Notes             *string    `xorm:"'notes'"`
-		CreatedBy         int64      `xorm:"'created_by'"`
+		CreatedBy         string     `xorm:"'created_by'"`
 		CreatedByName     string     `xorm:"'created_by_name'"`
 		CreatedAt         time.Time  `xorm:"'created_at'"`
 		UpdatedAt         time.Time  `xorm:"'updated_at'"`
-		UpdatedBy         int64      `xorm:"'updated_by'"`
+		UpdatedBy         string     `xorm:"'updated_by'"`
 		VersionNo         int64      `xorm:"'version_no'"`
 		UsedAt            *time.Time `xorm:"'used_at'"`
 		UsedIP            *string    `xorm:"'used_ip'"`
 		RevokedAt         *time.Time `xorm:"'revoked_at'"`
 		RevocationReason  *string    `xorm:"'revocation_reason'"`
 	}
-	query := "SELECT c.id, c.gateway_row_id, g.gateway_id, g.gateway_name, g.gateway_type, g.network_name, g.allowed_subnets, g.require_approval, " +
+	query := "SELECT c.id, c.node_id, g.node_code AS gateway_id, g.node_name AS gateway_name, g.gateway_type, g.gateway_network_name AS network_name, " +
+		"COALESCE(routes.allowed_subnets, '[]'::jsonb) AS allowed_subnets, g.require_approval, " +
 		"CASE WHEN c.status='pending' AND c.expires_at<=CURRENT_TIMESTAMP THEN 'expired' ELSE c.status END AS status, " +
-		"c.max_uses, c.used_count, c.expires_at, c.notes, c.created_by, u.display_name AS created_by_name, c.created_at, c.updated_at, c.updated_by, c.version_no, c.used_at, " +
+		"c.max_uses, c.used_count, c.expires_at, c.notes, c.created_by, COALESCE(u.display_name,c.created_by) AS created_by_name, c.created_at, c.updated_at, c.updated_by, c.version_no, c.used_at, " +
 		"c.used_ip::text AS used_ip, c.revoked_at, c.revocation_reason FROM " + model.TableCredential + " c " +
-		"JOIN " + model.TableGateway + " g ON g.id=c.gateway_row_id JOIN " + iamUserTable + " u ON u.id=c.created_by " +
+		"JOIN " + model.TableGateway + " g ON g.id=c.node_id AND g.node_type='gateway' " +
+		"LEFT JOIN " + iamUserTable + " u ON u.username=c.created_by " +
+		"LEFT JOIN LATERAL (SELECT jsonb_agg(net.cidr::text ORDER BY net.network_name,net.id) AS allowed_subnets " +
+		"FROM t_ztna_network net WHERE net.gateway_node_id=g.id " +
+		"AND net.status='active' AND net.is_del=FALSE) routes ON TRUE " +
 		"ORDER BY c.created_at DESC, c.id DESC"
 	var rows []credentialRow
 	if err := s.SQL(query).Find(&rows); err != nil {
@@ -113,14 +86,14 @@ func (r *Repository) ListCredentials(ctx *servicecontext.Context) ([]model.Crede
 			return nil, fmt.Errorf("decode credential gateway subnets: %w", err)
 		}
 		credential := model.Credential{
-			ID: row.ID, GatewayRowID: row.GatewayRowID, GatewayID: row.GatewayID, GatewayName: row.GatewayName,
+			ID: row.ID, NodeID: row.NodeID, GatewayID: row.GatewayID, GatewayName: row.GatewayName,
 			GatewayType: row.GatewayType, NetworkName: row.NetworkName, AllowedSubnets: subnets,
 			RequireApproval: row.RequireApproval, Status: row.Status, MaxUses: row.MaxUses, UsedCount: row.UsedCount,
-			ExpiresAt: row.ExpiresAt, Notes: row.Notes, CreatedBy: row.CreatedBy, CreatedByName: row.CreatedByName,
+			ExpiresAt: row.ExpiresAt, Notes: row.Notes, CreatedByName: row.CreatedByName,
 			UsedAt: row.UsedAt, UsedIP: row.UsedIP, RevokedAt: row.RevokedAt, RevocationReason: row.RevocationReason,
-			UpdatedBy: row.UpdatedBy,
 		}
 		credential.VersionNo, credential.CreatedAt, credential.UpdatedAt = row.VersionNo, row.CreatedAt, row.UpdatedAt
+		credential.CreatedBy, credential.UpdatedBy = row.CreatedBy, row.UpdatedBy
 		credentials[index] = credential
 	}
 	return credentials, nil
@@ -139,18 +112,34 @@ func (r *Repository) CreateGatewayAndCredential(ctx *servicecontext.Context, act
 		if err != nil {
 			return err
 		}
+		if gateway.NodeType == "" {
+			gateway.NodeType = "gateway"
+		}
+		if gateway.NodeStatus == "" {
+			gateway.NodeStatus = "pending"
+		}
+		if gateway.GatewayNetworkName == "" {
+			gateway.GatewayNetworkName = gateway.NetworkName
+		}
 		gateway.CreateNew(ctx.UserName())
 		if _, err := tx.Save(gateway); err != nil {
 			return fmt.Errorf("create pre-registered gateway: %w", err)
 		}
-		for _, network := range networks {
-			link := &model.GatewayNetwork{GatewayRowID: gateway.ID, NetworkID: network.ID, NetworkName: network.Name, AllowedCIDR: network.CIDR}
-			link.CreateNew(ctx.UserName())
-			if _, err := tx.Save(link); err != nil {
-				return fmt.Errorf("link gateway to selected IPAM network %d: %w", network.ID, err)
+		for i := range networks {
+			network := &networks[i]
+			network.GatewayNodeID = &gateway.ID
+			network.Update(ctx.UserName())
+			network.Cols("gateway_node_id")
+			network.AddSaveCondition("gateway_node_id IS NULL")
+			affected, err := tx.Save(network)
+			if err != nil {
+				return fmt.Errorf("bind gateway to network site %d: %w", network.ID, err)
+			}
+			if affected != 1 {
+				return fmt.Errorf("network site %d was changed or assigned to another gateway; refresh and retry", network.ID)
 			}
 		}
-		credential.GatewayRowID = gateway.ID
+		credential.NodeID = gateway.ID
 		if err := insertCredential(ctx, tx, s, gateway.ID, credential); err != nil {
 			return err
 		}
@@ -165,24 +154,18 @@ func (r *Repository) CreateGatewayAndCredential(ctx *servicecontext.Context, act
 	})
 }
 
-type selectedNetworkRow struct {
-	ID   int64  `xorm:"'id'"`
-	Name string `xorm:"'network_name'"`
-	CIDR string `xorm:"'cidr'"`
-}
-
-func lockSelectedNetworks(s *xorm.Session, ids []int64, expectedCIDRs []string) ([]selectedNetworkRow, error) {
+func lockSelectedNetworks(s *xorm.Session, ids []int64, expectedCIDRs []string) ([]ipamModel.Network, error) {
 	if len(ids) == 0 || len(ids) != len(expectedCIDRs) {
 		return nil, errors.New("selected IPAM networks and gateway routes are inconsistent")
 	}
-	var selected []selectedNetworkRow
+	var selected []ipamModel.Network
 	pls := make([]string, len(ids))
 	args := make([]interface{}, len(ids))
 	for i, id := range ids {
 		pls[i] = "?"
 		args[i] = id
 	}
-	query := "SELECT id, network_name, cidr::text AS cidr FROM t_ztna_network WHERE status='active' AND id IN (" + strings.Join(pls, ",") + ") ORDER BY id FOR SHARE"
+	query := "SELECT id, network_name, cidr::text AS cidr, gateway_node_id, created_by, created_at, updated_by, updated_at, version_no FROM t_ztna_network WHERE network_type='site' AND status='active' AND is_del=FALSE AND id IN (" + strings.Join(pls, ",") + ") ORDER BY id FOR UPDATE"
 	if err := s.SQL(query, args...).Find(&selected); err != nil {
 		return nil, fmt.Errorf("lock selected IPAM networks: %w", err)
 	}
@@ -197,6 +180,9 @@ func lockSelectedNetworks(s *xorm.Session, ids []int64, expectedCIDRs []string) 
 		expected[id] = expectedCIDRs[i]
 	}
 	for _, network := range selected {
+		if network.GatewayNodeID != nil {
+			return nil, fmt.Errorf("network site %d (%s) is already assigned to a gateway; unbind it in Sites before registering another gateway", network.ID, network.NetworkName)
+		}
 		if expected[network.ID] == "" || expected[network.ID] != network.CIDR {
 			return nil, errors.New("selected IPAM network changed during gateway creation; retry with current network data")
 		}
@@ -204,40 +190,9 @@ func lockSelectedNetworks(s *xorm.Session, ids []int64, expectedCIDRs []string) 
 	return selected, nil
 }
 
-func (r *Repository) CreateCredential(ctx *servicecontext.Context, actorID, gatewayID int64, credential *model.Credential, audit *model.AuditEvent) error {
-	if actorID <= 0 || gatewayID <= 0 || credential == nil {
-		return errors.New("actor, gateway, and credential are required")
-	}
-	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
-		s := tx.Session
-		if err := requirePermission(s, actorID, "gateway.registration.write"); err != nil {
-			return err
-		}
-		var gateway model.Gateway
-		found, err := s.SQL("SELECT * FROM "+model.TableGateway+" WHERE id=? FOR UPDATE", gatewayID).Get(&gateway)
-		if err != nil {
-			return fmt.Errorf("lock gateway for credential issuance: %w", err)
-		}
-		if !found || gateway.Status != model.GatewayPending {
-			return errors.New("an unregistered gateway is required")
-		}
-		if err := insertCredential(ctx, tx, s, gatewayID, credential); err != nil {
-			return err
-		}
-		if audit != nil {
-			audit.TargetID = fmt.Sprintf("%d", credential.ID)
-			audit.TargetName = gateway.GatewayName + " (" + gateway.GatewayID + ")"
-			if err := writeAudit(ctx, tx, audit); err != nil {
-				return fmt.Errorf("write gateway enrollment audit: %w", err)
-			}
-		}
-		return nil
-	})
-}
-
-func insertCredential(ctx *servicecontext.Context, tx *database.DBTransaction, s *xorm.Session, gatewayID int64, credential *model.Credential) error {
+func insertCredential(ctx *servicecontext.Context, tx *database.DBTransaction, s *xorm.Session, nodeID int64, credential *model.Credential) error {
 	var expired []model.Credential
-	if err := selectManyForUpdate(s, model.TableCredential, &expired, "gateway_row_id=? AND status='pending' AND expires_at<=CURRENT_TIMESTAMP", gatewayID); err != nil {
+	if err := selectManyForUpdate(s, model.TableCredential, &expired, "node_id=? AND status='pending' AND expires_at<=CURRENT_TIMESTAMP", nodeID); err != nil {
 		return fmt.Errorf("load expired gateway registration credentials: %w", err)
 	}
 	for i := range expired {
@@ -253,13 +208,13 @@ func insertCredential(ctx *servicecontext.Context, tx *database.DBTransaction, s
 	var active struct {
 		Count int64 `xorm:"'count'"`
 	}
-	if _, err := s.SQL("SELECT COUNT(*) AS count FROM "+model.TableCredential+" WHERE gateway_row_id=? AND status='pending' AND expires_at>CURRENT_TIMESTAMP", gatewayID).Get(&active); err != nil {
+	if _, err := s.SQL("SELECT COUNT(*) AS count FROM "+model.TableCredential+" WHERE node_id=? AND status='pending' AND expires_at>CURRENT_TIMESTAMP", nodeID).Get(&active); err != nil {
 		return fmt.Errorf("check active gateway registration credential: %w", err)
 	}
 	if active.Count > 0 {
 		return errors.New("gateway already has an active registration credential")
 	}
-	credential.GatewayRowID = gatewayID
+	credential.NodeID = nodeID
 	credential.Status = model.StatusPending
 	credential.MaxUses = 1
 	credential.UsedCount = 0
@@ -318,7 +273,7 @@ func (r *Repository) ExtendCredential(ctx *servicecontext.Context, actorID, cred
 			return err
 		}
 		var credential model.Credential
-		found, err := s.SQL("SELECT c.* FROM "+model.TableCredential+" c JOIN "+model.TableGateway+" g ON g.id=c.gateway_row_id WHERE c.id=? AND c.status IN ('pending','expired') AND c.used_count=0 AND g.status='pending_enrollment' FOR UPDATE OF c", credentialID).Get(&credential)
+		found, err := s.SQL("SELECT c.* FROM "+model.TableCredential+" c JOIN "+model.TableGateway+" g ON g.id=c.node_id WHERE c.id=? AND c.status IN ('pending','expired') AND c.used_count=0 AND g.node_type='gateway' AND g.node_status='pending' FOR UPDATE OF c", credentialID).Get(&credential)
 		if err != nil {
 			return fmt.Errorf("load gateway registration credential for extension: %w", err)
 		}
@@ -328,7 +283,7 @@ func (r *Repository) ExtendCredential(ctx *servicecontext.Context, actorID, cred
 		var active struct {
 			Count int64 `xorm:"'count'"`
 		}
-		if _, err := s.SQL("SELECT COUNT(*) AS count FROM "+model.TableCredential+" WHERE gateway_row_id=? AND id<>? AND status='pending' AND expires_at>CURRENT_TIMESTAMP", credential.GatewayRowID, credentialID).Get(&active); err != nil {
+		if _, err := s.SQL("SELECT COUNT(*) AS count FROM "+model.TableCredential+" WHERE node_id=? AND id<>? AND status='pending' AND expires_at>CURRENT_TIMESTAMP", credential.NodeID, credentialID).Get(&active); err != nil {
 			return fmt.Errorf("check active gateway registration credential: %w", err)
 		}
 		if active.Count > 0 {
@@ -364,7 +319,7 @@ func setCredentialAuditTarget(s *xorm.Session, audit *model.AuditEvent, credenti
 		GatewayID   string `xorm:"'gateway_id'"`
 		GatewayName string `xorm:"'gateway_name'"`
 	}
-	query := "SELECT g.gateway_id, g.gateway_name FROM " + model.TableCredential + " c JOIN " + model.TableGateway + " g ON g.id=c.gateway_row_id WHERE c.id=?"
+	query := "SELECT g.node_code AS gateway_id, g.node_name AS gateway_name FROM " + model.TableCredential + " c JOIN " + model.TableGateway + " g ON g.id=c.node_id WHERE c.id=?"
 	found, err := s.SQL(query, credentialID).Get(&target)
 	if err != nil {
 		return fmt.Errorf("load gateway for credential audit: %w", err)
@@ -409,6 +364,9 @@ func writeAudit(ctx *servicecontext.Context, tx *database.DBTransaction, event *
 		event.OccurredAt = time.Now().UTC()
 	}
 	actorName := event.ActorName
+	if actorName == "" && ctx != nil {
+		actorName = ctx.UserName()
+	}
 	if actorName == "" {
 		actorName = fmt.Sprintf("%d", event.ActorID)
 	}

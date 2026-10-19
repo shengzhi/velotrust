@@ -27,8 +27,6 @@ var methodPolicies = map[string]middleware.IAMMethodPolicy{
 	"AllocateAddress":        {Authenticated: true, Permission: "ipam.network.write"},
 	"ReleaseLease":           {Authenticated: true, Permission: "ipam.network.write"},
 	"CheckPrefix":            {Authenticated: true, Permission: "ipam.network.read"},
-	"ListNATMappings":        {Authenticated: true, Permission: "ipam.network.read"},
-	"SaveNATMapping":         {Authenticated: true, Permission: "ipam.network.write"},
 }
 
 func Register(server *jrpc.Server, service *appIPAM.Service, checker middleware.PermissionChecker) error {
@@ -214,41 +212,10 @@ func (h *Handler) CheckPrefix(ctx *jrpc.Context, args *CheckPrefixArgs) (*model.
 	return &result, nil
 }
 
-type ListNATMappingsReply struct {
-	Items []model.NATMapping `json:"items"`
-}
-
-func (h *Handler) ListNATMappings(ctx *jrpc.Context, _ *struct{}) (*ListNATMappingsReply, error) {
-	items, err := h.service.ListNATMappings(middleware.ServiceContext(ctx))
-	if err != nil {
-		return nil, err
-	}
-	return &ListNATMappingsReply{Items: items}, nil
-}
-
-type SaveNATMappingArgs struct {
-	ID              int64   `json:"id" validate:"omitempty,gt=0"`
-	ExpectedVersion int64   `json:"expected_version" validate:"omitempty,gt=0"`
-	NetworkID       int64   `json:"network_id" validate:"required,gt=0"`
-	NATType         string  `json:"nat_type" validate:"required,oneof=1:1_Bidirectional SNAT_Masquerade DNAT_VirtualIP"`
-	VirtualCIDR     *string `json:"virtual_cidr" validate:"omitempty,max=64"`
-	Enabled         bool    `json:"enabled"`
-	Description     *string `json:"description" validate:"omitempty,max=512"`
-}
-
-func (h *Handler) SaveNATMapping(ctx *jrpc.Context, args *SaveNATMappingArgs) (*model.NATMapping, error) {
-	if args == nil {
-		return nil, errors.New("NAT mapping arguments are required")
-	}
-	mapping := model.NATMapping{ID: args.ID, NetworkID: args.NetworkID, NATType: args.NATType, VirtualCIDR: args.VirtualCIDR, Enabled: args.Enabled, Description: args.Description}
-	mapping.VersionNo = args.ExpectedVersion
-	return h.service.SaveNATMapping(middleware.ServiceContext(ctx), mapping)
-}
-
 type CreateNetworkArgs struct {
 	NetworkName string `json:"network_name" validate:"required,max=128"`
 	NetworkCode string `json:"network_code" validate:"required,min=2,max=64"`
-	NetworkType string `json:"network_type" validate:"required,oneof=vpc subnet site segment"`
+	NetworkType string `json:"network_type" validate:"required,oneof=vpc subnet segment"`
 	CIDR        string `json:"cidr" validate:"required,max=64"`
 	Region      string `json:"region" validate:"omitempty,max=128"`
 	Environment string `json:"environment" validate:"omitempty,max=32"`

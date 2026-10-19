@@ -42,7 +42,7 @@ velotrust/
 
 ## 领域与执行边界
 
-- `management/internal/policy` 负责策略匹配、授权决策和版本管理；`client/internal/firewall` 与 `gateway/internal/firewall` 将已下发策略转换为本机或网关规则。
+- `management/internal/policy` 负责策略匹配和授权决策，并以数据库当前记录作为策略权威状态；`client/internal/firewall` 与 `gateway/internal/firewall` 将已下发策略转换为本机或网关规则。
 - `management/internal/tunnel` 负责期望隧道配置、Peer 管理和配置生成；`client/internal/tunnel` 与 `gateway/internal/tunnel` 负责在数据面应用配置。
 - `pkg/wgctrl` 封装 WireGuard 控制能力。平台接口与系统调用分别经 `pkg/platform`、`client/system` 和 `gateway/internal/platform/linux` 适配。
 - `shared/proto` 仅放跨进程通信契约；认证协议、API 类型和通用模型分别归 `shared/auth`、`shared/api`、`shared/model`。持久化实体留在 `management` 内部。

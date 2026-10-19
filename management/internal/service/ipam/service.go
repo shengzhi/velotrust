@@ -79,9 +79,9 @@ func (s *Service) CreateNetwork(ctx *servicecontext.Context, input CreateNetwork
 		return nil, invalid("network_code", "must be 2 to 64 lowercase letters, digits, dots, underscores, or hyphens")
 	}
 	switch input.NetworkType {
-	case "vpc", "subnet", "site", "segment":
+	case "vpc", "subnet", "segment":
 	default:
-		return nil, invalid("network_type", "must be vpc, subnet, site, or segment")
+		return nil, invalid("network_type", "must be vpc, subnet, or segment; network-site prefixes are managed in Sites")
 	}
 	if len(input.Region) > 128 || len(input.Environment) > 32 || len(input.Description) > 512 {
 		return nil, invalid("network_metadata", "region, environment, or description is too long")
@@ -130,7 +130,7 @@ func (s *Service) ListSelectableNetworks(ctx *servicecontext.Context) ([]model.N
 	return s.store.ListNetworks(ctx, true)
 }
 
-// ListSelectableSiteNetworks returns active physical-site CIDRs for gateway
+// ListSelectableSiteNetworks returns active network-site CIDRs for gateway
 // registration. These are routed LAN prefixes, not Overlay address pools.
 func (s *Service) ListSelectableSiteNetworks(ctx *servicecontext.Context) ([]model.Network, error) {
 	if _, err := s.authorize(ctx, readPermission); err != nil {
@@ -393,15 +393,12 @@ func (s *Service) CheckPrefix(ctx *servicecontext.Context, cidr string) (model.C
 	return s.store.CheckPrefix(ctx, cidr)
 }
 
-func (s *Service) ListNATMappings(ctx *servicecontext.Context) ([]model.NATMapping, error) {
-	if _, err := s.authorize(ctx, readPermission); err != nil {
-		return nil, err
-	}
-	return s.store.ListNATMappings(ctx)
+func (s *Service) SaveSiteNATMapping(ctx *servicecontext.Context, mapping model.NATMapping) (*model.NATMapping, error) {
+	return s.saveNATMapping(ctx, mapping)
 }
 
-func (s *Service) SaveNATMapping(ctx *servicecontext.Context, mapping model.NATMapping) (*model.NATMapping, error) {
-	actorID, err := s.authorize(ctx, writePermission)
+func (s *Service) saveNATMapping(ctx *servicecontext.Context, mapping model.NATMapping) (*model.NATMapping, error) {
+	actorID, err := s.authorize(ctx, "ztna.site.write")
 	if err != nil {
 		return nil, err
 	}
@@ -459,11 +456,11 @@ func (s *Service) SaveNATMapping(ctx *servicecontext.Context, mapping model.NATM
 	}
 	mapping.Description = stringPointer(description)
 	changes, _ := json.Marshal(map[string]interface{}{"network_id": mapping.NetworkID, "nat_type": mapping.NATType, "virtual_cidr": mapping.VirtualCIDR, "enabled": mapping.Enabled})
-	audit, err := newAudit(actorID, "ipam.nat_mapping.save", mapping.NetworkName, changes)
+	audit, err := newAudit(actorID, "ztna.site.nat_mapping.save", mapping.NetworkName, changes)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.store.SaveNATMapping(ctx, actorID, &mapping, audit); err != nil {
+	if err := s.store.SaveSiteNATMapping(ctx, actorID, &mapping, audit); err != nil {
 		return nil, err
 	}
 	return &mapping, nil

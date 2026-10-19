@@ -3,11 +3,12 @@ package enrollment
 import (
 	"time"
 
+	ztnaModel "velotrust/management/internal/model/ztna"
 	"velotrust/shared/repository/database"
 )
 
 const (
-	TableGateway    = "t_gateway_node"
+	TableGateway    = ztnaModel.TableNode
 	TableCredential = "t_gateway_registration_token"
 	StatusPending   = "pending"
 	StatusUsed      = "used"
@@ -29,19 +30,19 @@ const (
 type Gateway struct {
 	database.BaseModel `xorm:"extends"`
 	ID                 int64      `xorm:"pk autoincr 'id'" json:"id"`
-	GatewayID          string     `xorm:"'gateway_id'" json:"gateway_id"`
-	GatewayName        string     `xorm:"'gateway_name'" json:"gateway_name"`
+	GatewayID          string     `xorm:"'node_code'" json:"gateway_id"`
+	GatewayName        string     `xorm:"'node_name'" json:"gateway_name"`
 	GatewayType        string     `xorm:"'gateway_type'" json:"gateway_type"`
-	NetworkName        string     `xorm:"'network_name'" json:"network_name"`
+	NetworkName        string     `xorm:"-" json:"network_name"`
+	GatewayNetworkName string     `xorm:"'gateway_network_name'" json:"-"`
 	AllowedSubnets     []string   `xorm:"-" json:"allowed_subnets"`
-	AllowedSubnetsRaw  []byte     `xorm:"'allowed_subnets'" json:"-"`
 	AllowedNetworkIDs  []int64    `xorm:"-" json:"-"`
 	RequireApproval    bool       `xorm:"'require_approval'" json:"require_approval"`
-	Status             string     `xorm:"'status'" json:"status"`
+	Status             string     `xorm:"-" json:"status"`
+	NodeType           string     `xorm:"'node_type'" json:"-"`
+	NodeStatus         string     `xorm:"'node_status'" json:"-"`
 	RegisteredAt       *time.Time `xorm:"'registered_at'" json:"registered_at,omitempty"`
-	CreatedBy          int64      `xorm:"'created_by'" json:"-"`
 	CreatedByName      string     `xorm:"-" json:"created_by_name,omitempty"`
-	UpdatedBy          int64      `xorm:"'updated_by'" json:"-"`
 }
 
 func (Gateway) TableName() string { return TableGateway }
@@ -51,13 +52,12 @@ func (Gateway) TableName() string { return TableGateway }
 type Credential struct {
 	database.BaseModel `xorm:"extends"`
 	ID                 int64      `xorm:"pk autoincr 'id'" json:"id"`
-	GatewayRowID       int64      `xorm:"'gateway_row_id'" json:"-"`
+	NodeID             int64      `xorm:"'node_id'" json:"-"`
 	GatewayID          string     `xorm:"-" json:"gateway_id"`
 	GatewayName        string     `xorm:"-" json:"gateway_name"`
 	GatewayType        string     `xorm:"-" json:"gateway_type"`
 	NetworkName        string     `xorm:"-" json:"network_name"`
 	AllowedSubnets     []string   `xorm:"-" json:"allowed_subnets"`
-	AllowedSubnetsRaw  []byte     `xorm:"-" json:"-"`
 	RequireApproval    bool       `xorm:"-" json:"require_approval"`
 	TokenHash          string     `xorm:"'token_hash'" json:"-"`
 	Status             string     `xorm:"'status'" json:"status"`
@@ -65,29 +65,14 @@ type Credential struct {
 	UsedCount          int        `xorm:"'used_count'" json:"used_count"`
 	ExpiresAt          time.Time  `xorm:"'expires_at'" json:"expires_at"`
 	Notes              *string    `xorm:"'notes'" json:"notes,omitempty"`
-	CreatedBy          int64      `xorm:"'created_by'" json:"-"`
 	CreatedByName      string     `xorm:"-" json:"created_by_name"`
 	UsedAt             *time.Time `xorm:"'used_at'" json:"used_at,omitempty"`
 	UsedIP             *string    `xorm:"'used_ip'" json:"used_ip,omitempty"`
 	RevokedAt          *time.Time `xorm:"'revoked_at'" json:"revoked_at,omitempty"`
 	RevocationReason   *string    `xorm:"'revocation_reason'" json:"revocation_reason,omitempty"`
-	UpdatedBy          int64      `xorm:"'updated_by'" json:"-"`
 }
 
 func (Credential) TableName() string { return TableCredential }
-
-type GatewayNetwork struct {
-	database.BaseModel `xorm:"extends"`
-	ID                 int64  `xorm:"pk autoincr 'id'"`
-	GatewayRowID       int64  `xorm:"'gateway_row_id'"`
-	NetworkID          int64  `xorm:"'network_id'"`
-	NetworkName        string `xorm:"'network_name'"`
-	AllowedCIDR        string `xorm:"'allowed_cidr'"`
-	CreatedBy          int64  `xorm:"'created_by'"`
-	UpdatedBy          int64  `xorm:"'updated_by'"`
-}
-
-func (GatewayNetwork) TableName() string { return "t_gateway_node_network" }
 
 type CredentialGrant struct {
 	Credential Credential `json:"credential"`
@@ -115,5 +100,4 @@ type AuditEvent struct {
 var (
 	_ database.IModel = (*Gateway)(nil)
 	_ database.IModel = (*Credential)(nil)
-	_ database.IModel = (*GatewayNetwork)(nil)
 )

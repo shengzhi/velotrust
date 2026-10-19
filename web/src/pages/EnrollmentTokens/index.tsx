@@ -10,7 +10,6 @@ import {
   RotateCw,
   Search,
   ShieldCheck,
-  Server,
   X,
 } from 'lucide-react';
 import { Button } from '../../components/ui/button';
@@ -20,14 +19,11 @@ import { Input } from '../../components/ui/input';
 import { useToast } from '../../components/ui/toast';
 import {
   CredentialGrant,
-  GatewayEnrollmentTarget,
   RegistrationCredential,
   RegistrationCredentialStatus,
   SelectableSiteNetwork,
   enrollmentApi,
 } from '../../services/enrollment';
-
-type IssueMode = 'new' | 'existing';
 
 const statusLabels: Record<RegistrationCredentialStatus, string> = {
   pending: '待使用',
@@ -64,7 +60,6 @@ function formatDate(value?: string | null): string {
 
 export const EnrollmentTokens: React.FC = () => {
   const { success, error } = useToast();
-  const [gateways, setGateways] = useState<GatewayEnrollmentTarget[]>([]);
   const [credentials, setCredentials] = useState<RegistrationCredential[]>([]);
   const [selectableSiteNetworks, setSelectableSiteNetworks] = useState<SelectableSiteNetwork[]>([]);
   const [loading, setLoading] = useState(true);
@@ -73,8 +68,6 @@ export const EnrollmentTokens: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState('all');
 
   const [issueOpen, setIssueOpen] = useState(false);
-  const [issueMode, setIssueMode] = useState<IssueMode>('new');
-  const [selectedGatewayID, setSelectedGatewayID] = useState('');
   const [gatewayName, setGatewayName] = useState('');
   const [gatewayType, setGatewayType] = useState('site_gateway');
   const [networkName, setNetworkName] = useState('');
@@ -94,12 +87,10 @@ export const EnrollmentTokens: React.FC = () => {
   const reload = async (refresh = false) => {
     if (refresh) setRefreshing(true);
     try {
-      const [gatewayRows, credentialRows, networkRows] = await Promise.all([
-        enrollmentApi.listGateways(),
+      const [credentialRows, networkRows] = await Promise.all([
         enrollmentApi.listCredentials(),
         enrollmentApi.listSelectableSiteNetworks(),
       ]);
-      setGateways(gatewayRows);
       setCredentials(credentialRows);
       setSelectableSiteNetworks(networkRows);
     } catch (cause) {
@@ -113,15 +104,6 @@ export const EnrollmentTokens: React.FC = () => {
   useEffect(() => {
     void reload();
   }, []);
-
-  const availableGateways = useMemo(() => {
-    const activeGatewayIDs = new Set(
-      credentials.filter((item) => item.status === 'pending').map((item) => item.gateway_id),
-    );
-    return gateways.filter(
-      (gateway) => gateway.status === 'pending_enrollment' && !activeGatewayIDs.has(gateway.gateway_id),
-    );
-  }, [credentials, gateways]);
 
   const filteredCredentials = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
@@ -143,12 +125,9 @@ export const EnrollmentTokens: React.FC = () => {
     pending: credentials.filter((item) => item.status === 'pending').length,
     used: credentials.filter((item) => item.status === 'used').length,
     inactive: credentials.filter((item) => item.status === 'expired' || item.status === 'revoked').length,
-    availableGateways: availableGateways.length,
-  }), [availableGateways.length, credentials]);
+  }), [credentials]);
 
   const openIssue = () => {
-    setIssueMode('new');
-    setSelectedGatewayID('');
     setGatewayName('');
     setGatewayType('site_gateway');
     setNetworkName('');
@@ -161,27 +140,21 @@ export const EnrollmentTokens: React.FC = () => {
 
   const handleIssue = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (issueMode === 'new' && selectedNetworkIDs.length === 0) {
+    if (selectedNetworkIDs.length === 0) {
       error('请至少选择一个 IPAM 业务网段');
-      return;
-    }
-    if (issueMode === 'existing' && !selectedGatewayID) {
-      error('请选择一个尚未注册的网关');
       return;
     }
     setIssuing(true);
     try {
-      const result = issueMode === 'new'
-        ? await enrollmentApi.createGateway({
-            gateway_name: gatewayName.trim(),
-            gateway_type: gatewayType.trim(),
-            network_name: networkName.trim(),
-            allowed_network_ids: selectedNetworkIDs,
-            require_approval: requireApproval,
-            expires_in_hours: Number(expiresInHours),
-            notes: notes.trim(),
-          })
-        : await enrollmentApi.issueCredential(Number(selectedGatewayID), Number(expiresInHours), notes.trim());
+      const result = await enrollmentApi.createGateway({
+        gateway_name: gatewayName.trim(),
+        gateway_type: gatewayType.trim(),
+        network_name: networkName.trim(),
+        allowed_network_ids: selectedNetworkIDs,
+        require_approval: requireApproval,
+        expires_in_hours: Number(expiresInHours),
+        notes: notes.trim(),
+      });
       setIssueOpen(false);
       setGrant(result);
       setCopied(false);
@@ -242,13 +215,13 @@ export const EnrollmentTokens: React.FC = () => {
         <div>
           <div className="flex items-center gap-2 text-sm text-slate-500"><KeyRound className="h-4 w-4" /> 网关管理</div>
           <h1 className="mt-2 text-2xl font-semibold tracking-tight text-slate-900">注册凭证</h1>
-          <p className="mt-1 max-w-3xl text-sm text-slate-500">预建网关身份、签发一次性入网凭证，并管理有效期和撤销状态。</p>
+          <p className="mt-1 max-w-3xl text-sm text-slate-500">创建网关身份、签发一次性入网凭证，并管理有效期和撤销状态。</p>
         </div>
         <div className="flex gap-2">
           <Button variant="outline" onClick={() => void reload(true)} isLoading={refreshing}>
             <RefreshCw className="h-4 w-4" /> 刷新
           </Button>
-          <Button onClick={openIssue}><Plus className="h-4 w-4" /> 签发凭证</Button>
+          <Button onClick={openIssue}><Plus className="h-4 w-4" /> 创建网关并签发</Button>
         </div>
       </div>
 
@@ -257,13 +230,12 @@ export const EnrollmentTokens: React.FC = () => {
         <p>当前页面管理凭证签发、延期和撤销。Gateway Agent 使用凭证完成注册、凭证消费和人工审批的服务端链路尚未接入；签发凭证不会自动使网关入网。</p>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {[
           { label: '注册凭证总数', value: stats.total, icon: KeyRound, tone: 'text-blue-600 bg-blue-50' },
           { label: '待使用', value: stats.pending, icon: Clock3, tone: 'text-indigo-600 bg-indigo-50' },
           { label: '已使用', value: stats.used, icon: ShieldCheck, tone: 'text-emerald-600 bg-emerald-50' },
           { label: '过期或撤销', value: stats.inactive, icon: X, tone: 'text-slate-600 bg-slate-100' },
-          { label: '可签发的预建网关', value: stats.availableGateways, icon: Server, tone: 'text-violet-600 bg-violet-50' },
         ].map(({ label, value, icon: Icon, tone }) => (
           <Card key={label} className="flex items-center gap-3 p-4">
             <div className={`flex h-10 w-10 items-center justify-center rounded-lg ${tone}`}><Icon className="h-5 w-5" /></div>
@@ -329,28 +301,22 @@ export const EnrollmentTokens: React.FC = () => {
           </div>
         )}
         <div className="flex items-center justify-between border-t border-slate-100 px-4 py-3 text-xs text-slate-500">
-          <span>共 {filteredCredentials.length} 条</span><span>一次仅能为一个预建网关保留一张有效凭证</span>
+          <span>共 {filteredCredentials.length} 条</span><span>凭证明文仅在签发时展示一次</span>
         </div>
       </Card>
 
-      <Dialog isOpen={issueOpen} onClose={() => !issuing && setIssueOpen(false)} title="签发网关注册凭证" description="明文只会在签发完成后展示一次。" maxWidth="2xl">
+      <Dialog isOpen={issueOpen} onClose={() => !issuing && setIssueOpen(false)} title="创建网关并签发注册凭证" description="明文只会在签发完成后展示一次。" maxWidth="2xl">
         <form className="space-y-5" onSubmit={(event) => void handleIssue(event)}>
-          <div className="grid grid-cols-2 gap-2 rounded-lg bg-slate-100 p-1">
-            <button type="button" onClick={() => setIssueMode('new')} className={`rounded-md px-3 py-2 text-sm ${issueMode === 'new' ? 'bg-white font-medium text-slate-900 shadow-sm' : 'text-slate-500'}`}>新建网关并签发</button>
-            <button type="button" onClick={() => setIssueMode('existing')} className={`rounded-md px-3 py-2 text-sm ${issueMode === 'existing' ? 'bg-white font-medium text-slate-900 shadow-sm' : 'text-slate-500'}`}>为预建网关签发</button>
-          </div>
-
-          {issueMode === 'new' ? (
-            <div className="grid gap-4 sm:grid-cols-2">
+          <div className="grid gap-4 sm:grid-cols-2">
               <label className="space-y-1.5 text-sm"><span className="font-medium text-slate-700">网关名称</span><Input required maxLength={128} value={gatewayName} onChange={(event) => setGatewayName(event.target.value)} placeholder="例如：上海生产网关 01" /></label>
               <label className="space-y-1.5 text-sm"><span className="font-medium text-slate-700">网关类型</span><select required value={gatewayType} onChange={(event) => setGatewayType(event.target.value)} className="h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500">{gatewayTypeOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
               <label className="space-y-1.5 text-sm sm:col-span-2"><span className="font-medium text-slate-700">网络名称</span><Input required maxLength={128} value={networkName} onChange={(event) => setNetworkName(event.target.value)} placeholder="例如：上海生产网" /></label>
               <div className="space-y-2 text-sm sm:col-span-2">
-                <div className="flex items-center justify-between gap-3"><span className="font-medium text-slate-700">允许网段</span><span className="text-xs text-slate-500">从物理站点选择内网网段</span></div>
+                <div className="flex items-center justify-between gap-3"><span className="font-medium text-slate-700">允许网段</span><span className="text-xs text-slate-500">从网络站点选择内网网段</span></div>
                 {selectableSiteNetworks.length === 0 ? (
                   <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-5 text-center">
-                    <p className="text-sm text-slate-600">当前没有已启用的物理站点内网网段。</p>
-                    <p className="mt-1 text-xs text-slate-500">请先在物理站点数据中配置并启用内网网段，再回来创建网关。</p>
+                    <p className="text-sm text-slate-600">当前没有已启用且未绑定网关的网络站点内网网段。</p>
+                    <p className="mt-1 text-xs text-slate-500">请先配置并启用站点内网网段；已绑定其他网关的站点需先解除绑定。</p>
                   </div>
                 ) : (
                   <div className="max-h-56 space-y-1 overflow-y-auto rounded-lg border border-slate-200 p-2">
@@ -376,19 +342,16 @@ export const EnrollmentTokens: React.FC = () => {
                     })}
                   </div>
                 )}
-                {selectedNetworkIDs.length > 0 && <span className="block text-xs text-blue-700">已选择 {selectedNetworkIDs.length} 个网段；提交时服务端会再次确认网段仍然启用。</span>}
+                {selectedNetworkIDs.length > 0 && <span className="block text-xs text-blue-700">已选择 {selectedNetworkIDs.length} 个网段；提交时服务端会再次确认站点仍然启用且未被其他网关占用。</span>}
               </div>
               <label className="flex items-center gap-2 text-sm text-slate-700 sm:col-span-2"><input type="checkbox" checked={requireApproval} onChange={(event) => setRequireApproval(event.target.checked)} className="h-4 w-4 rounded border-slate-300 text-blue-600" /> 网关注册后需要管理员审批</label>
-            </div>
-          ) : (
-            <label className="block space-y-1.5 text-sm"><span className="font-medium text-slate-700">预建网关</span><select required value={selectedGatewayID} onChange={(event) => setSelectedGatewayID(event.target.value)} className="h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm"><option value="">请选择</option>{availableGateways.map((gateway) => <option key={gateway.id} value={gateway.id}>{gateway.gateway_name} · {gateway.network_name} ({gateway.gateway_id})</option>)}</select>{availableGateways.length === 0 && <span className="block text-xs text-amber-700">当前没有可签发凭证的预建网关。</span>}</label>
-          )}
+          </div>
 
           <div className="grid gap-4 sm:grid-cols-2">
             <label className="space-y-1.5 text-sm"><span className="font-medium text-slate-700">凭证有效期（小时）</span><Input required type="number" min={1} max={168} value={expiresInHours} onChange={(event) => setExpiresInHours(Number(event.target.value))} /></label>
             <label className="space-y-1.5 text-sm"><span className="font-medium text-slate-700">备注</span><Input maxLength={512} value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="可选" /></label>
           </div>
-          <div className="flex justify-end gap-2 border-t border-slate-100 pt-4"><Button type="button" variant="outline" onClick={() => setIssueOpen(false)} disabled={issuing}>取消</Button><Button type="submit" isLoading={issuing} disabled={issueMode === 'new' && selectableSiteNetworks.length === 0}><KeyRound className="h-4 w-4" />创建并签发</Button></div>
+          <div className="flex justify-end gap-2 border-t border-slate-100 pt-4"><Button type="button" variant="outline" onClick={() => setIssueOpen(false)} disabled={issuing}>取消</Button><Button type="submit" isLoading={issuing} disabled={selectableSiteNetworks.length === 0}><KeyRound className="h-4 w-4" />创建并签发</Button></div>
         </form>
       </Dialog>
 

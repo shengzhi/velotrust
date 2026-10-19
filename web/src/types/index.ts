@@ -93,6 +93,9 @@ export interface Device {
 }
 
 export interface VpcNatMapping {
+  id?: number;
+  version_no?: number;
+  network_id?: number;
   enabled: boolean;
   virtualCidr: string; // 映射后的虚拟影子网段, 如 "172.31.10.0/24"
   natType: '1:1_Bidirectional' | 'SNAT_Masquerade' | 'DNAT_VirtualIP';
@@ -102,6 +105,8 @@ export interface VpcNatMapping {
 
 export interface Site {
   id: string;
+  networkId?: number;
+  versionNo?: number;
   name: string;
   localSubnet: string;
   gatewayNodeId: string;
@@ -111,7 +116,9 @@ export interface Site {
   createdAt: string;
   // VPC 重叠网段 NAT 映射 (VPC Overlap NAT)
   natMapping?: VpcNatMapping;
-  cloudProvider?: 'Aliyun' | 'TencentCloud' | 'AWS' | 'HuaweiCloud' | 'IDC_OnPrem';
+  // Optional presentation metadata used by topology mock data; not persisted
+  // by the network-site API.
+  cloudProvider?: string;
 }
 
 export interface Policy {

@@ -146,7 +146,7 @@ export const initialSysMenus: SysMenu[] = [
   {
     id: 'menu-sites',
     parentId: 'menu-dir-network',
-    title: '物理站点',
+    title: '网络站点',
     path: '/sites',
     component: 'pages/Sites.tsx',
     icon: 'Globe',
@@ -493,7 +493,7 @@ export const initialAuthResources: AuthResource[] = [
     createdAt: '2024-01-01T00:00:00Z',
     supportedActions: [
       { action: 'read', label: '读取', description: '查询网关健康状态、节点信息与 Peer 对端列表' },
-      { action: 'write', label: '写入', description: '增删网关、修改监听端口与物理站点绑定' },
+      { action: 'write', label: '写入', description: '增删网关、修改监听端口与网络站点绑定' },
       { action: 'execute', label: '广播执行', description: '触发 WireGuard Peer 热同步下发与隧道重载' },
     ],
   },

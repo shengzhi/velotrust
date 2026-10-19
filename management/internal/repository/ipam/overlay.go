@@ -104,7 +104,7 @@ func assertOverlayCIDRCompatible(s *xorm.Session, cidr string) error {
 		args  []interface{}
 		pool  bool
 	}{
-		{"SELECT network_name AS name, cidr::text AS cidr FROM t_ztna_network WHERE status='active'", nil, false},
+		{"SELECT network_name AS name, cidr::text AS cidr FROM t_ztna_network WHERE status='active' AND is_del=FALSE", nil, false},
 		{"SELECT pool_name AS name, network_cidr::text AS cidr FROM t_ztna_address_pool", nil, true},
 		{"SELECT network_name || ' NAT 影子网段' AS name, virtual_cidr::text AS cidr FROM t_ztna_nat_mapping WHERE enabled=TRUE AND virtual_cidr IS NOT NULL", nil, false},
 	}
@@ -463,7 +463,7 @@ func (r *Repository) CheckPrefix(ctx *servicecontext.Context, cidr string) (mode
 	type candidate struct{ Name, CIDR string }
 	var existing []candidate
 	queries := []string{
-		"SELECT network_name AS name, cidr::text AS cidr FROM t_ztna_network WHERE status='active'",
+		"SELECT network_name AS name, cidr::text AS cidr FROM t_ztna_network WHERE status='active' AND is_del=FALSE",
 		"SELECT pool_name AS name, network_cidr::text AS cidr FROM t_ztna_address_pool WHERE status='active'",
 		"SELECT network_name || ' NAT 影子网段' AS name, virtual_cidr::text AS cidr FROM t_ztna_nat_mapping WHERE enabled=TRUE AND virtual_cidr IS NOT NULL",
 	}
@@ -514,18 +514,11 @@ func (r *Repository) CheckPrefix(ctx *servicecontext.Context, cidr string) (mode
 	return model.Conflict{IsValid: true, Message: message, IsWithinOverlay: within}, nil
 }
 
-func (r *Repository) ListNATMappings(ctx *servicecontext.Context) ([]model.NATMapping, error) {
-	query := "SELECT m.id, m.network_id, m.network_name, m.real_cidr::text AS real_cidr, m.virtual_cidr::text AS virtual_cidr, m.nat_type, m.enabled, m.description, m.created_at, m.updated_at, m.version_no FROM t_ztna_nat_mapping m JOIN t_ztna_network n ON n.id=m.network_id ORDER BY m.network_name, m.id"
-	s := r.db.Engine().NewSession().Context(ctx)
-	defer s.Close()
-	var mappings []model.NATMapping
-	if err := s.SQL(query).Find(&mappings); err != nil {
-		return nil, fmt.Errorf("list IPAM NAT mappings: %w", err)
-	}
-	return mappings, nil
+func (r *Repository) SaveSiteNATMapping(ctx *servicecontext.Context, actorID int64, mapping *model.NATMapping, audit *model.AuditEvent) error {
+	return r.saveNATMapping(ctx, actorID, mapping, audit)
 }
 
-func (r *Repository) SaveNATMapping(ctx *servicecontext.Context, actorID int64, mapping *model.NATMapping, audit *model.AuditEvent) error {
+func (r *Repository) saveNATMapping(ctx *servicecontext.Context, actorID int64, mapping *model.NATMapping, audit *model.AuditEvent) error {
 	if actorID <= 0 || mapping == nil || mapping.NetworkID <= 0 || audit == nil {
 		return errors.New("IPAM NAT mapping and audit event are required")
 	}
@@ -534,16 +527,27 @@ func (r *Repository) SaveNATMapping(ctx *servicecontext.Context, actorID int64, 
 		if err := lockIPAMCatalog(s); err != nil {
 			return err
 		}
-		if err := requirePermission(s, actorID, "ipam.network.write"); err != nil {
+		if err := requirePermission(s, actorID, "ztna.site.write"); err != nil {
 			return err
 		}
-		var network model.Network
-		found, err := s.SQL("SELECT id, network_name, cidr::text AS cidr, status FROM t_ztna_network WHERE id=? FOR UPDATE", mapping.NetworkID).Get(&network)
+		var network struct {
+			ID          int64  `xorm:"'id'"`
+			NetworkName string `xorm:"'network_name'"`
+			CIDR        string `xorm:"'cidr'"`
+			Status      string `xorm:"'status'"`
+			NetworkType string `xorm:"'network_type'"`
+			IsDeleted   bool   `xorm:"'is_del'"`
+		}
+		query := "SELECT id, network_name, cidr::text AS cidr, status, network_type, is_del FROM t_ztna_network WHERE id=? FOR UPDATE"
+		found, err := s.SQL(query, mapping.NetworkID).Get(&network)
 		if err != nil {
 			return fmt.Errorf("load business network for NAT mapping: %w", err)
 		}
-		if !found || network.Status != model.StatusActive {
+		if !found || network.Status != model.StatusActive || network.IsDeleted {
 			return errors.New("NAT mapping requires an active IPAM business network")
+		}
+		if network.NetworkType != "site" {
+			return errors.New("site NAT mapping requires an active network-site network")
 		}
 		mapping.NetworkName = network.NetworkName
 		mapping.RealCIDR = network.CIDR
@@ -641,6 +645,15 @@ func assertBusinessNetworkCompatible(s *xorm.Session, cidr string) error {
 	return nil
 }
 
+// EnsureBusinessNetworkCompatible validates a network-site prefix while
+// holding the same catalog lock used by IPAM network and pool mutations.
+func EnsureBusinessNetworkCompatible(s *xorm.Session, cidr string) error {
+	if err := lockIPAMCatalog(s); err != nil {
+		return err
+	}
+	return assertBusinessNetworkCompatible(s, cidr)
+}
+
 func assertNATShadowAvailable(s *xorm.Session, cidr string, mappingID int64) error {
 	candidate, err := netip.ParsePrefix(cidr)
 	if err != nil {
@@ -650,7 +663,7 @@ func assertNATShadowAvailable(s *xorm.Session, cidr string, mappingID int64) err
 		query string
 		args  []interface{}
 	}{
-		{"SELECT network_name AS name, cidr::text AS cidr FROM t_ztna_network WHERE status='active'", nil},
+		{"SELECT network_name AS name, cidr::text AS cidr FROM t_ztna_network WHERE status='active' AND is_del=FALSE", nil},
 		{"SELECT pool_name AS name, network_cidr::text AS cidr FROM t_ztna_address_pool WHERE status='active'", nil},
 		{"SELECT network_name || ' NAT 影子网段' AS name, virtual_cidr::text AS cidr FROM t_ztna_nat_mapping WHERE enabled=TRUE AND virtual_cidr IS NOT NULL AND id<>?", []interface{}{mappingID}},
 		{"SELECT '全局 Overlay 网络' AS name, network_cidr::text AS cidr FROM t_ztna_overlay_network WHERE id=1", nil},
@@ -709,7 +722,7 @@ func assertPoolCIDRAvailable(s *xorm.Session, cidr string, exceptPoolID int64) e
 		query string
 		args  []interface{}
 	}{
-		{"SELECT network_name AS name, cidr::text AS cidr FROM t_ztna_network WHERE status='active'", nil},
+		{"SELECT network_name AS name, cidr::text AS cidr FROM t_ztna_network WHERE status='active' AND is_del=FALSE", nil},
 		{"SELECT pool_name AS name, network_cidr::text AS cidr FROM t_ztna_address_pool WHERE status='active' AND id<>?", []interface{}{exceptPoolID}},
 		{"SELECT network_name || ' NAT 影子网段' AS name, virtual_cidr::text AS cidr FROM t_ztna_nat_mapping WHERE enabled=TRUE AND virtual_cidr IS NOT NULL", nil},
 	}

@@ -151,7 +151,7 @@ export const initialNodes: Node[] = [
     name: 'gw-sz-branch-01',
     type: 'gateway',
     nodeTypeLabel: 'IDC机房接入网关',
-    networkName: '深圳创新物理专网',
+    networkName: '深圳创新网络站点',
     allowedSubnets: ['192.168.30.0/24'],
     nodeRoles: ['流量转发', '物理机房互联'],
     virtualIp: '10.0.0.3/24',
@@ -551,7 +551,7 @@ export const initialSites: Site[] = [
   },
   {
     id: 'site-sz',
-    name: '深圳创新基地 (IDC 物理私有网)',
+    name: '深圳创新基地 (IDC 网络站点)',
     localSubnet: '192.168.30.0/24',
     gatewayNodeId: 'node-gw-sz',
     gatewayNodeName: 'gw-sz-branch-01',
@@ -2505,8 +2505,8 @@ PersistentKeepalive = 25`;
       { name: 'Overlay 全局大网段', cidr: '10.100.0.0/16', type: 'overlay' },
       { name: '阿里云华东 VPC', cidr: '172.16.0.0/12', type: 'cloud_vpc' },
       { name: '腾讯云华南 VPC', cidr: '10.200.0.0/16', type: 'cloud_vpc' },
-      { name: '北京总部物理 LAN', cidr: '192.168.10.0/24', type: 'physical_lan' },
-      { name: '上海研发中心物理 LAN', cidr: '192.168.20.0/24', type: 'physical_lan' },
+      { name: '北京总部内网', cidr: '192.168.10.0/24', type: 'physical_lan' },
+      { name: '上海研发中心内网', cidr: '192.168.20.0/24', type: 'physical_lan' },
     ];
 
     if (!cidr.includes('/')) {
@@ -2525,7 +2525,7 @@ PersistentKeepalive = 25`;
       return {
         isValid: true,
         hasConflict: true,
-        conflictTarget: '企业既有云 VPC 或物理机房局域网',
+        conflictTarget: '企业既有云 VPC 或数据中心局域网',
         message: `严重警告：规划网段 ${cidr} 与现存物理/云 VPC 产生 IP 路由重叠！WireGuard 客户端将出现非对称路由或丢包，必须重新规划。`,
       };
     }

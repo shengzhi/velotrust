@@ -185,13 +185,13 @@ func (*AgentMessage_ConfigApplied) isAgentMessage_Body() {}
 func (*AgentMessage_RuntimeStatus) isAgentMessage_Body() {}
 
 type Hello struct {
-	state                 protoimpl.MessageState `protogen:"open.v1"`
-	NodeId                string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
-	NodeKind              NodeKind               `protobuf:"varint,2,opt,name=node_kind,json=nodeKind,proto3,enum=velotrust.hub.v1.NodeKind" json:"node_kind,omitempty"`
-	WireguardPublicKey    string                 `protobuf:"bytes,3,opt,name=wireguard_public_key,json=wireguardPublicKey,proto3" json:"wireguard_public_key,omitempty"`
-	AppliedConfigRevision string                 `protobuf:"bytes,4,opt,name=applied_config_revision,json=appliedConfigRevision,proto3" json:"applied_config_revision,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	NodeId             string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	NodeKind           NodeKind               `protobuf:"varint,2,opt,name=node_kind,json=nodeKind,proto3,enum=velotrust.hub.v1.NodeKind" json:"node_kind,omitempty"`
+	WireguardPublicKey string                 `protobuf:"bytes,3,opt,name=wireguard_public_key,json=wireguardPublicKey,proto3" json:"wireguard_public_key,omitempty"`
+	AppliedConfigHash  string                 `protobuf:"bytes,4,opt,name=applied_config_hash,json=appliedConfigHash,proto3" json:"applied_config_hash,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *Hello) Reset() {
@@ -245,9 +245,9 @@ func (x *Hello) GetWireguardPublicKey() string {
 	return ""
 }
 
-func (x *Hello) GetAppliedConfigRevision() string {
+func (x *Hello) GetAppliedConfigHash() string {
 	if x != nil {
-		return x.AppliedConfigRevision
+		return x.AppliedConfigHash
 	}
 	return ""
 }
@@ -298,7 +298,7 @@ func (x *Heartbeat) GetSequence() uint64 {
 
 type ConfigApplied struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Revision      string                 `protobuf:"bytes,1,opt,name=revision,proto3" json:"revision,omitempty"`
+	ConfigHash    string                 `protobuf:"bytes,1,opt,name=config_hash,json=configHash,proto3" json:"config_hash,omitempty"`
 	Success       bool                   `protobuf:"varint,2,opt,name=success,proto3" json:"success,omitempty"`
 	ErrorCode     string                 `protobuf:"bytes,3,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -335,9 +335,9 @@ func (*ConfigApplied) Descriptor() ([]byte, []int) {
 	return file_shared_proto_v1_hub_proto_rawDescGZIP(), []int{3}
 }
 
-func (x *ConfigApplied) GetRevision() string {
+func (x *ConfigApplied) GetConfigHash() string {
 	if x != nil {
-		return x.Revision
+		return x.ConfigHash
 	}
 	return ""
 }
@@ -357,11 +357,11 @@ func (x *ConfigApplied) GetErrorCode() string {
 }
 
 type RuntimeStatus struct {
-	state                 protoimpl.MessageState `protogen:"open.v1"`
-	ConnectedPeerCount    uint32                 `protobuf:"varint,1,opt,name=connected_peer_count,json=connectedPeerCount,proto3" json:"connected_peer_count,omitempty"`
-	AppliedConfigRevision string                 `protobuf:"bytes,2,opt,name=applied_config_revision,json=appliedConfigRevision,proto3" json:"applied_config_revision,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	ConnectedPeerCount uint32                 `protobuf:"varint,1,opt,name=connected_peer_count,json=connectedPeerCount,proto3" json:"connected_peer_count,omitempty"`
+	AppliedConfigHash  string                 `protobuf:"bytes,2,opt,name=applied_config_hash,json=appliedConfigHash,proto3" json:"applied_config_hash,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *RuntimeStatus) Reset() {
@@ -401,9 +401,9 @@ func (x *RuntimeStatus) GetConnectedPeerCount() uint32 {
 	return 0
 }
 
-func (x *RuntimeStatus) GetAppliedConfigRevision() string {
+func (x *RuntimeStatus) GetAppliedConfigHash() string {
 	if x != nil {
-		return x.AppliedConfigRevision
+		return x.AppliedConfigHash
 	}
 	return ""
 }
@@ -575,10 +575,10 @@ func (x *Welcome) GetHeartbeatIntervalSeconds() uint32 {
 }
 
 type ConfigSnapshot struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Revision      string                 `protobuf:"bytes,1,opt,name=revision,proto3" json:"revision,omitempty"`
-	Sha256        []byte                 `protobuf:"bytes,2,opt,name=sha256,proto3" json:"sha256,omitempty"`
-	Payload       []byte                 `protobuf:"bytes,3,opt,name=payload,proto3" json:"payload,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Identifies the content in the database's current desired configuration.
+	ConfigHash    string `protobuf:"bytes,1,opt,name=config_hash,json=configHash,proto3" json:"config_hash,omitempty"`
+	Payload       []byte `protobuf:"bytes,3,opt,name=payload,proto3" json:"payload,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -613,18 +613,11 @@ func (*ConfigSnapshot) Descriptor() ([]byte, []int) {
 	return file_shared_proto_v1_hub_proto_rawDescGZIP(), []int{7}
 }
 
-func (x *ConfigSnapshot) GetRevision() string {
+func (x *ConfigSnapshot) GetConfigHash() string {
 	if x != nil {
-		return x.Revision
+		return x.ConfigHash
 	}
 	return ""
-}
-
-func (x *ConfigSnapshot) GetSha256() []byte {
-	if x != nil {
-		return x.Sha256
-	}
-	return nil
 }
 
 func (x *ConfigSnapshot) GetPayload() []byte {
@@ -740,22 +733,23 @@ const file_shared_proto_v1_hub_proto_rawDesc = "" +
 	"\theartbeat\x18\x02 \x01(\v2\x1b.velotrust.hub.v1.HeartbeatH\x00R\theartbeat\x12H\n" +
 	"\x0econfig_applied\x18\x03 \x01(\v2\x1f.velotrust.hub.v1.ConfigAppliedH\x00R\rconfigApplied\x12H\n" +
 	"\x0eruntime_status\x18\x04 \x01(\v2\x1f.velotrust.hub.v1.RuntimeStatusH\x00R\rruntimeStatusB\x06\n" +
-	"\x04body\"\xc3\x01\n" +
+	"\x04body\"\xbb\x01\n" +
 	"\x05Hello\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x127\n" +
 	"\tnode_kind\x18\x02 \x01(\x0e2\x1a.velotrust.hub.v1.NodeKindR\bnodeKind\x120\n" +
-	"\x14wireguard_public_key\x18\x03 \x01(\tR\x12wireguardPublicKey\x126\n" +
-	"\x17applied_config_revision\x18\x04 \x01(\tR\x15appliedConfigRevision\"'\n" +
+	"\x14wireguard_public_key\x18\x03 \x01(\tR\x12wireguardPublicKey\x12.\n" +
+	"\x13applied_config_hash\x18\x04 \x01(\tR\x11appliedConfigHash\"'\n" +
 	"\tHeartbeat\x12\x1a\n" +
-	"\bsequence\x18\x01 \x01(\x04R\bsequence\"d\n" +
-	"\rConfigApplied\x12\x1a\n" +
-	"\brevision\x18\x01 \x01(\tR\brevision\x12\x18\n" +
+	"\bsequence\x18\x01 \x01(\x04R\bsequence\"i\n" +
+	"\rConfigApplied\x12\x1f\n" +
+	"\vconfig_hash\x18\x01 \x01(\tR\n" +
+	"configHash\x12\x18\n" +
 	"\asuccess\x18\x02 \x01(\bR\asuccess\x12\x1d\n" +
 	"\n" +
-	"error_code\x18\x03 \x01(\tR\terrorCode\"y\n" +
+	"error_code\x18\x03 \x01(\tR\terrorCode\"q\n" +
 	"\rRuntimeStatus\x120\n" +
-	"\x14connected_peer_count\x18\x01 \x01(\rR\x12connectedPeerCount\x126\n" +
-	"\x17applied_config_revision\x18\x02 \x01(\tR\x15appliedConfigRevision\"\xab\x02\n" +
+	"\x14connected_peer_count\x18\x01 \x01(\rR\x12connectedPeerCount\x12.\n" +
+	"\x13applied_config_hash\x18\x02 \x01(\tR\x11appliedConfigHash\"\xab\x02\n" +
 	"\n" +
 	"HubMessage\x125\n" +
 	"\awelcome\x18\x01 \x01(\v2\x19.velotrust.hub.v1.WelcomeH\x00R\awelcome\x12K\n" +
@@ -766,11 +760,11 @@ const file_shared_proto_v1_hub_proto_rawDesc = "" +
 	"\aWelcome\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12<\n" +
-	"\x1aheartbeat_interval_seconds\x18\x02 \x01(\rR\x18heartbeatIntervalSeconds\"^\n" +
-	"\x0eConfigSnapshot\x12\x1a\n" +
-	"\brevision\x18\x01 \x01(\tR\brevision\x12\x16\n" +
-	"\x06sha256\x18\x02 \x01(\fR\x06sha256\x12\x18\n" +
-	"\apayload\x18\x03 \x01(\fR\apayload\"T\n" +
+	"\x1aheartbeat_interval_seconds\x18\x02 \x01(\rR\x18heartbeatIntervalSeconds\"Y\n" +
+	"\x0eConfigSnapshot\x12\x1f\n" +
+	"\vconfig_hash\x18\x01 \x01(\tR\n" +
+	"configHash\x12\x18\n" +
+	"\apayload\x18\x03 \x01(\fR\apayloadJ\x04\b\x02\x10\x03R\x06sha256\"T\n" +
 	"\fHeartbeatAck\x12\x1a\n" +
 	"\bsequence\x18\x01 \x01(\x04R\bsequence\x12(\n" +
 	"\x10server_time_unix\x18\x02 \x01(\x03R\x0eserverTimeUnix\"1\n" +

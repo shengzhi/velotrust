@@ -143,7 +143,7 @@ export const AccessMatrix: React.FC = () => {
             网络访问权限透视
           </h1>
           <p className="text-xs text-slate-500 mt-0.5">
-            透视安全组、员工账号或终端在全网可达的物理子网、关键主机与内网 DNS 视界
+            透视安全组、员工账号或终端在全网可达的企业内网子网、关键主机与内网 DNS 视界
           </p>
         </div>
       </div>
@@ -466,7 +466,7 @@ export const AccessMatrix: React.FC = () => {
                     : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
                 }`}
               >
-                物理子网 ({matrixData.accessibleSubnets.length})
+                企业内网子网 ({matrixData.accessibleSubnets.length})
               </button>
               <button
                 onClick={() => setResourceTab('services')}

@@ -382,7 +382,7 @@ export const NodeDetail: React.FC = () => {
               </span>
             </div>
             <div className="flex items-center justify-between py-1 border-b border-slate-100">
-              <span className="text-slate-500">物理网络站点</span>
+              <span className="text-slate-500">网络站点</span>
               <span className="font-medium text-slate-800">{node.siteName}</span>
             </div>
             {node.type === 'gateway' && (
@@ -657,7 +657,7 @@ export const NodeDetail: React.FC = () => {
                         </div>
                         <div className="text-[11px] text-slate-400">
                           {sub.type === 'site_primary'
-                            ? '物理站点主局域网'
+                            ? '网络站点主局域网'
                             : sub.type === 'nat_shadow'
                             ? '跨云 NAT 影子段'
                             : 'Mesh 路由通告'}
@@ -942,7 +942,7 @@ export const NodeDetail: React.FC = () => {
               required
             />
             <p className="text-[11px] text-slate-500 mt-1">
-              请确保该网段位于该网关物理/VPC 网络可直连通信的地址段内
+              请确保该网段位于该网关可直连的内网或 VPC 地址段内
             </p>
           </div>
 

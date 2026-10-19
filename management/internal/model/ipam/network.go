@@ -16,18 +16,17 @@ const (
 // Network describes an enterprise routed network. It is distinct from an
 // overlay address pool used to allocate WireGuard tunnel addresses.
 type Network struct {
-	database.BaseModel `xorm:"extends"`
-	ID                 int64   `xorm:"pk autoincr 'id'" json:"id"`
-	NetworkName        string  `xorm:"'network_name'" json:"network_name"`
-	NetworkCode        string  `xorm:"'network_code'" json:"network_code"`
-	NetworkType        string  `xorm:"'network_type'" json:"network_type"`
-	CIDR               string  `xorm:"'cidr'" json:"cidr"`
-	Region             *string `xorm:"'region'" json:"region,omitempty"`
-	Environment        *string `xorm:"'environment'" json:"environment,omitempty"`
-	Description        *string `xorm:"'description'" json:"description,omitempty"`
-	Status             string  `xorm:"'status'" json:"status"`
-	CreatedBy          int64   `xorm:"'created_by'" json:"-"`
-	UpdatedBy          int64   `xorm:"'updated_by'" json:"-"`
+	database.DeletableModel `xorm:"extends"`
+	ID                      int64   `xorm:"pk autoincr 'id'" json:"id"`
+	NetworkName             string  `xorm:"'network_name'" json:"network_name"`
+	NetworkCode             string  `xorm:"'network_code'" json:"network_code"`
+	NetworkType             string  `xorm:"'network_type'" json:"network_type"`
+	CIDR                    string  `xorm:"'cidr'" json:"cidr"`
+	GatewayNodeID           *int64  `xorm:"'gateway_node_id'" json:"gateway_node_id,omitempty"`
+	Region                  *string `xorm:"'region'" json:"region,omitempty"`
+	Environment             *string `xorm:"'environment'" json:"environment,omitempty"`
+	Description             *string `xorm:"'description'" json:"description,omitempty"`
+	Status                  string  `xorm:"'status'" json:"status"`
 }
 
 func (Network) TableName() string { return TableNetwork }
@@ -57,8 +56,6 @@ type Pool struct {
 	Status             string  `xorm:"'status'" json:"status"`
 	Used               int64   `xorm:"-" json:"used"`
 	Total              int64   `xorm:"-" json:"total"`
-	CreatedBy          int64   `xorm:"'created_by'" json:"-"`
-	UpdatedBy          int64   `xorm:"'updated_by'" json:"-"`
 }
 
 func (Pool) TableName() string { return "t_ztna_address_pool" }
@@ -75,13 +72,11 @@ type Lease struct {
 	IDPGroup           *string    `xorm:"'idp_group'" json:"idp_group,omitempty"`
 	WireGuardPubKey    string     `xorm:"-" json:"wireguard_pubkey"`
 	WireGuardPubKeyRaw *string    `xorm:"'wireguard_pubkey'" json:"-"`
-	CreatedBy          int64      `xorm:"'created_by'" json:"-"`
 	Status             string     `xorm:"'status'" json:"status"`
 	PoolName           string     `xorm:"-" json:"pool_name"`
 	AllocatedAt        time.Time  `xorm:"'allocated_at'" json:"allocated_at"`
 	ReleasedAt         *time.Time `xorm:"'released_at'" json:"released_at,omitempty"`
 	LastHandshake      string     `xorm:"-" json:"last_handshake"`
-	UpdatedBy          int64      `xorm:"'updated_by'" json:"-"`
 }
 
 func (Lease) TableName() string { return "t_ztna_address_lease" }
@@ -96,8 +91,6 @@ type NATMapping struct {
 	NATType            string  `xorm:"'nat_type'" json:"nat_type"`
 	Enabled            bool    `xorm:"'enabled'" json:"enabled"`
 	Description        *string `xorm:"'description'" json:"description,omitempty"`
-	CreatedBy          int64   `xorm:"'created_by'" json:"-"`
-	UpdatedBy          int64   `xorm:"'updated_by'" json:"-"`
 }
 
 func (NATMapping) TableName() string { return "t_ztna_nat_mapping" }
@@ -106,8 +99,6 @@ type OverlayNetwork struct {
 	database.BaseModel `xorm:"extends"`
 	ID                 int16  `xorm:"pk 'id'" json:"id"`
 	NetworkCIDR        string `xorm:"'network_cidr'" json:"cidr"`
-	CreatedBy          int64  `xorm:"'created_by'" json:"-"`
-	UpdatedBy          int64  `xorm:"'updated_by'" json:"-"`
 }
 
 func (OverlayNetwork) TableName() string { return "t_ztna_overlay_network" }

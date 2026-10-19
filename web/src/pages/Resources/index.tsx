@@ -466,13 +466,13 @@ export const Resources: React.FC = () => {
 
               {/* Site selector */}
               <div className="flex items-center gap-2">
-                <span className="text-xs text-slate-400 shrink-0">物理/云站点:</span>
+                <span className="text-xs text-slate-400 shrink-0">网络站点:</span>
                 <select
                   value={selectedSite}
                   onChange={(e) => setSelectedSite(e.target.value)}
                   className="py-1.5 px-3 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 focus:outline-none"
                 >
-                  <option value="all">全部物理站点 ({resources.length})</option>
+                  <option value="all">全部网络站点 ({resources.length})</option>
                   {sites.map((s) => (
                     <option key={s.id} value={s.id}>
                       {s.name} ({s.localSubnet})
@@ -575,7 +575,7 @@ export const Resources: React.FC = () => {
                         </span>
                       </div>
                       <div className="flex items-center justify-between">
-                        <span className="text-slate-400">归属物理/云网段:</span>
+                        <span className="text-slate-400">归属网络站点:</span>
                         <span className="text-slate-700 truncate max-w-[180px]">{res.siteName}</span>
                       </div>
                       <div className="flex items-center justify-between">
@@ -1012,7 +1012,7 @@ export const Resources: React.FC = () => {
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">归属物理/云网段 (Site)</label>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">归属网络站点</label>
                 <select
                   value={editingResource.siteId}
                   onChange={(e) => {

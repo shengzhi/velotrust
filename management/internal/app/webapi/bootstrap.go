@@ -13,15 +13,18 @@ import (
 	enrollmentHandler "velotrust/management/internal/handler/enrollment"
 	"velotrust/management/internal/handler/iam"
 	ipamHandler "velotrust/management/internal/handler/ipam"
+	siteHandler "velotrust/management/internal/handler/site"
 	"velotrust/management/internal/lib/cache"
 	"velotrust/management/internal/lib/logger"
 	"velotrust/management/internal/middleware"
 	appEnrollmentRepo "velotrust/management/internal/repository/enrollment"
 	appIAMRepo "velotrust/management/internal/repository/iam"
 	appIPAMRepo "velotrust/management/internal/repository/ipam"
+	appSiteRepo "velotrust/management/internal/repository/site"
 	appEnrollmentService "velotrust/management/internal/service/enrollment"
 	appIAMService "velotrust/management/internal/service/iam"
 	appIPAMService "velotrust/management/internal/service/ipam"
+	appSiteService "velotrust/management/internal/service/site"
 	management "velotrust/management/runtime"
 	"velotrust/pkg/ioc"
 	"velotrust/pkg/jrpc"
@@ -117,6 +120,15 @@ func Build(conf *config.Config, listenAddr, version string) (*management.Server,
 		_ = db.Close()
 		return nil, nil, nil, fmt.Errorf("resolve IPAM service from IOC: %w", err)
 	}
+	siteService, err := ioc.GetObject[*appSiteService.Service]()
+	if err != nil {
+		if ceremonyCloser != nil {
+			_ = ceremonyCloser.Close()
+		}
+		_ = service.Close()
+		_ = db.Close()
+		return nil, nil, nil, fmt.Errorf("resolve network-site service from IOC: %w", err)
+	}
 	server, err := management.New(management.Config{
 		ListenAddr: listenAddr, Version: version, IdentityResolver: resolver,
 		TrustedProxies: conf.HTTP.TrustedProxies,
@@ -133,7 +145,10 @@ func Build(conf *config.Config, listenAddr, version string) (*management.Server,
 		if err := enrollmentHandler.Register(rpc, enrollmentService, service); err != nil {
 			return err
 		}
-		return ipamHandler.Register(rpc, ipamService, service)
+		if err := ipamHandler.Register(rpc, ipamService, service); err != nil {
+			return err
+		}
+		return siteHandler.Register(rpc, siteService, service)
 	})
 	if err != nil {
 		if ceremonyCloser != nil {
@@ -228,6 +243,28 @@ func registerDependencies(conf *config.Config, db *database.Database, ceremonySt
 			return nil, err
 		}
 		return appIPAMService.New(store, permissions)
+	}, ioc.Singleton)
+	ioc.RegistInterfaceFunc[appSiteRepo.Store, appSiteRepo.Repository](func() (*appSiteRepo.Repository, error) {
+		sharedDB, err := ioc.GetObject[*database.Database]()
+		if err != nil {
+			return nil, err
+		}
+		return appSiteRepo.New(sharedDB)
+	}, ioc.Singleton)
+	ioc.RegistObjectFunc[appSiteService.Service](func() (*appSiteService.Service, error) {
+		store, err := ioc.GetObject[appSiteRepo.Store]()
+		if err != nil {
+			return nil, err
+		}
+		permissions, err := ioc.GetObject[*appIAMService.Service]()
+		if err != nil {
+			return nil, err
+		}
+		natService, err := ioc.GetObject[*appIPAMService.Service]()
+		if err != nil {
+			return nil, err
+		}
+		return appSiteService.New(store, permissions, natService)
 	}, ioc.Singleton)
 	dependencyRegistered = true
 	return nil

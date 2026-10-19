@@ -44,8 +44,8 @@ func (r *Repository) ListSelectableSiteNetworks(ctx *servicecontext.Context) ([]
 }
 
 func (r *Repository) listNetworks(ctx *servicecontext.Context, activeOnly bool, networkType string) ([]model.Network, error) {
-	query := "SELECT id, network_name, network_code, network_type, cidr::text AS cidr, region, environment, description, status, created_at, updated_at, version_no FROM " + model.TableNetwork
-	conditions := make([]string, 0, 2)
+	query := "SELECT id, network_name, network_code, network_type, cidr::text AS cidr, gateway_node_id, region, environment, description, status, is_del, created_at, updated_at, version_no FROM " + model.TableNetwork
+	conditions := []string{"is_del=FALSE"}
 	args := make([]interface{}, 0, 2)
 	if activeOnly {
 		conditions = append(conditions, "status='active'")
@@ -93,7 +93,7 @@ func (r *Repository) resolveActiveNetworks(ctx *servicecontext.Context, ids []in
 	defer s.Close()
 	var networks []model.Network
 	pls, args := placeholders(ids)
-	query := "SELECT id, network_name, network_code, network_type, cidr::text AS cidr, region, environment, description, status, created_at, updated_at, version_no FROM " + model.TableNetwork + " WHERE status='active' AND id IN (" + pls + ")"
+	query := "SELECT id, network_name, network_code, network_type, cidr::text AS cidr, gateway_node_id, region, environment, description, status, is_del, created_at, updated_at, version_no FROM " + model.TableNetwork + " WHERE status='active' AND is_del=FALSE AND id IN (" + pls + ")"
 	if networkType != "" {
 		query += " AND network_type=?"
 		args = append(args, networkType)
@@ -103,7 +103,7 @@ func (r *Repository) resolveActiveNetworks(ctx *servicecontext.Context, ids []in
 		return nil, fmt.Errorf("resolve selected active routed networks: %w", err)
 	}
 	if len(networks) != len(ids) {
-		return nil, errors.New("one or more selected networks are unavailable, disabled, or are not physical-site networks")
+		return nil, errors.New("one or more selected networks are unavailable, disabled, or are not network-site networks")
 	}
 	return networks, nil
 }
@@ -160,12 +160,18 @@ func (r *Repository) SetNetworkStatus(ctx *servicecontext.Context, actorID, netw
 			return err
 		}
 		var network model.Network
-		found, err := s.SQL("SELECT id, network_name, network_code, network_type, cidr::text AS cidr, status, version_no FROM "+model.TableNetwork+" WHERE id=? FOR UPDATE", networkID).Get(&network)
+		found, err := s.SQL("SELECT id, network_name, network_code, network_type, cidr::text AS cidr, gateway_node_id, status, is_del, version_no FROM "+model.TableNetwork+" WHERE id=? AND is_del=FALSE FOR UPDATE", networkID).Get(&network)
 		if err != nil {
 			return fmt.Errorf("lock IPAM network for update: %w", err)
 		}
 		if !found || network.VersionNo != expectedVersion {
 			return errors.New("IPAM network was not found or has changed; refresh and try again")
+		}
+		if network.NetworkType == "site" {
+			return errors.New("network-site network status must be managed from the Sites service")
+		}
+		if status == model.StatusDisabled && network.GatewayNodeID != nil {
+			return errors.New("network is assigned to a gateway; unbind the gateway before disabling it")
 		}
 		if status == model.StatusActive {
 			if err := assertBusinessNetworkCompatible(s, network.CIDR); err != nil {
@@ -207,6 +213,9 @@ func requirePermission(s *xorm.Session, actorID int64, permissionCode string) er
 		return fmt.Errorf("check IPAM permission: %w", err)
 	}
 	if allowed.Count < 1 {
+		if permissionCode == "ztna.site.write" {
+			return errors.New("network-site write permission is required")
+		}
 		return errors.New("IPAM network write permission is required")
 	}
 	return nil
@@ -226,7 +235,10 @@ func writeAudit(ctx *servicecontext.Context, tx *database.DBTransaction, event *
 	if targetType == "" {
 		targetType = "ztna_network"
 	}
-	actor := fmt.Sprintf("%d", event.ActorID)
+	actor := ctx.UserName()
+	if actor == "" {
+		actor = fmt.Sprintf("%d", event.ActorID)
+	}
 	audit := &iamModel.AuditLog{
 		EventID: event.EventID, UserID: &event.ActorID, UserName: actor, Action: event.Action,
 		TargetType: targetType, TargetID: &event.TargetID, TargetName: &event.TargetName,

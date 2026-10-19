@@ -8,7 +8,6 @@ import {
   Globe,
   ExternalLink,
   Server,
-  Layers,
   ArrowLeftRight,
   ShieldAlert,
   ShieldCheck,
@@ -26,7 +25,7 @@ import {
   Sliders,
 } from 'lucide-react';
 import { mockApi } from '../data/mock';
-import { Site, Node, FailSafeConfig, VpcNatMapping } from '../types';
+import { Site, FailSafeConfig, VpcNatMapping } from '../types';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Select } from '../components/ui/select';
@@ -46,13 +45,14 @@ import { ConfirmDialog } from '../components/ConfirmDialog';
 import { EmptyState } from '../components/EmptyState';
 import { useToast } from '../components/ui/toast';
 import { isValidCidr } from '../utils/format';
+import { siteApi, SiteGatewayOption } from '../services/site';
 
 export const Sites: React.FC = () => {
   const navigate = useNavigate();
   const { success, error } = useToast();
 
   const [sites, setSites] = useState<Site[]>([]);
-  const [gatewayNodes, setGatewayNodes] = useState<Node[]>([]);
+  const [gatewayNodes, setGatewayNodes] = useState<SiteGatewayOption[]>([]);
   const [failSafeConfig, setFailSafeConfig] = useState<FailSafeConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -68,7 +68,6 @@ export const Sites: React.FC = () => {
     localSubnet: '',
     gatewayNodeId: '',
     status: 'active' as 'active' | 'inactive',
-    cloudProvider: 'Aliyun' as 'Aliyun' | 'TencentCloud' | 'AWS' | 'HuaweiCloud' | 'IDC_OnPrem',
     // NAT Mapping Config
     natEnabled: false,
     virtualCidr: '172.31.10.0/24',
@@ -100,17 +99,16 @@ export const Sites: React.FC = () => {
 
   const loadData = async () => {
     try {
-      const [s, n, fs] = await Promise.all([
-        mockApi.getSites(),
-        mockApi.getNodes(),
+      const [s, gateways, fs] = await Promise.all([
+        siteApi.listSites(),
+        siteApi.listGateways(),
         mockApi.getFailSafeConfig(),
       ]);
       setSites(s);
-      const gateways = n.filter((node: Node) => node.type === 'gateway');
       setGatewayNodes(gateways);
       setFailSafeConfig(fs);
     } catch {
-      error('加载物理站点与容灾数据失败');
+      error('加载网络站点与容灾数据失败');
     } finally {
       setLoading(false);
     }
@@ -136,9 +134,8 @@ export const Sites: React.FC = () => {
     setSiteForm({
       name: '',
       localSubnet: '192.168.100.0/24',
-      gatewayNodeId: gatewayNodes[0]?.id || '',
+      gatewayNodeId: gatewayNodes.length ? String(gatewayNodes[0].id) : '',
       status: 'active',
-      cloudProvider: 'Aliyun',
       natEnabled: false,
       virtualCidr: '172.31.100.0/24',
       natType: '1:1_Bidirectional',
@@ -155,7 +152,6 @@ export const Sites: React.FC = () => {
       localSubnet: s.localSubnet,
       gatewayNodeId: s.gatewayNodeId,
       status: s.status,
-      cloudProvider: s.cloudProvider || 'Aliyun',
       natEnabled: !!s.natMapping?.enabled,
       virtualCidr: s.natMapping?.virtualCidr || '172.31.10.0/24',
       natType: s.natMapping?.natType || '1:1_Bidirectional',
@@ -169,6 +165,9 @@ export const Sites: React.FC = () => {
     setTargetNatSite(s);
     setNatForm({
       enabled: s.natMapping ? s.natMapping.enabled : true,
+      id: s.natMapping?.id,
+      version_no: s.natMapping?.version_no,
+      network_id: s.networkId,
       virtualCidr: s.natMapping?.virtualCidr || '172.31.10.0/24',
       natType: s.natMapping?.natType || '1:1_Bidirectional',
       description: s.natMapping?.description || `针对 ${s.name} 真实网段 ${s.localSubnet} 的防冲突 NAT 映射`,
@@ -178,13 +177,25 @@ export const Sites: React.FC = () => {
 
   const handleSaveNat = async () => {
     if (!targetNatSite) return;
+    if (!targetNatSite.networkId) {
+      error('站点网络记录缺失，请刷新后重试');
+      return;
+    }
     if (natForm.enabled && !isValidCidr(natForm.virtualCidr)) {
       error('虚拟影子网段 CIDR 格式不正确，如 172.31.10.0/24');
       return;
     }
     try {
       setSavingNat(true);
-      await mockApi.updateSiteNatMapping(targetNatSite.id, natForm);
+      await siteApi.saveNATMapping({
+        id: natForm.id ?? 0,
+        expected_version: natForm.version_no ?? 0,
+        network_id: targetNatSite.networkId,
+        nat_type: natForm.natType,
+        virtual_cidr: natForm.virtualCidr || undefined,
+        enabled: natForm.enabled,
+        description: natForm.description,
+      });
       success(`站点 [${targetNatSite.name}] 的 VPC 重叠 NAT 映射已更新`);
       setIsNatDrawerOpen(false);
       setTargetNatSite(null);
@@ -204,9 +215,11 @@ export const Sites: React.FC = () => {
     } else if (!isValidCidr(siteForm.localSubnet)) {
       errs.localSubnet = 'CIDR 格式不正确，例如: 192.168.10.0/24';
     }
-    if (!siteForm.gatewayNodeId) errs.gatewayNodeId = '请选择归属网关节点';
     if (siteForm.natEnabled && !isValidCidr(siteForm.virtualCidr)) {
       errs.virtualCidr = '影子虚拟网段 CIDR 格式不正确，例如: 172.31.10.0/24';
+    }
+    if (siteForm.natEnabled && siteForm.status !== 'active') {
+      errs.natEnabled = '只有启用状态的站点才能启用 NAT';
     }
     setFormErrors(errs);
     return Object.keys(errs).length === 0;
@@ -217,32 +230,41 @@ export const Sites: React.FC = () => {
     if (!validate()) return;
     setSaving(true);
     try {
-      const payload: Partial<Site> = {
+      const payload = {
         name: siteForm.name,
-        localSubnet: siteForm.localSubnet,
-        gatewayNodeId: siteForm.gatewayNodeId,
-        status: siteForm.status,
-        cloudProvider: siteForm.cloudProvider,
-        natMapping: {
-          enabled: siteForm.natEnabled,
-          virtualCidr: siteForm.virtualCidr,
-          natType: siteForm.natType,
-          description: siteForm.natDesc,
-          mappedAt: siteForm.natEnabled ? new Date().toISOString() : undefined,
-        },
+        local_subnet: siteForm.localSubnet,
+        gateway_node_id: siteForm.gatewayNodeId ? Number(siteForm.gatewayNodeId) : null,
+        status: siteForm.status === 'active' ? 'active' as const : 'disabled' as const,
+        id: editingSite ? Number(editingSite.id) : undefined,
+        expected_version: editingSite?.versionNo,
       };
 
-      if (editingSite) {
-        await mockApi.updateSite(editingSite.id, payload as any);
-        success(`站点 "${siteForm.name}" 已更新`);
-      } else {
-        await mockApi.createSite(payload as any);
-        success(`站点 "${siteForm.name}" 创建成功`);
-      }
+      const savedSite = await siteApi.saveSite(payload);
+      const existingNat = editingSite?.natMapping;
       setIsModalOpen(false);
       await loadData();
-    } catch {
-      error('保存站点失败');
+      if (siteForm.status === 'active' && (siteForm.natEnabled || existingNat)) {
+        if (!savedSite.networkId) throw new Error('站点网络记录缺失');
+        try {
+          await siteApi.saveNATMapping({
+            id: existingNat?.id ?? 0,
+            expected_version: existingNat?.version_no ?? 0,
+            network_id: savedSite.networkId,
+            nat_type: siteForm.natType,
+            virtual_cidr: siteForm.virtualCidr || undefined,
+            enabled: siteForm.natEnabled,
+            description: siteForm.natDesc,
+          });
+        } catch (natError: any) {
+          await loadData();
+          error(`站点已保存，但 NAT 配置未保存：${natError?.message || '请重试'}`);
+          return;
+        }
+      }
+      success(editingSite ? `站点 "${siteForm.name}" 已更新` : `站点 "${siteForm.name}" 创建成功`);
+      await loadData();
+    } catch (err: any) {
+      error(err?.message || '保存站点失败');
     } finally {
       setSaving(false);
     }
@@ -252,12 +274,12 @@ export const Sites: React.FC = () => {
     if (!siteToDelete) return;
     setDeleting(true);
     try {
-      await mockApi.deleteSite(siteToDelete.id);
+      await siteApi.deleteSite(siteToDelete);
       success(`站点 "${siteToDelete.name}" 已删除`);
       setSiteToDelete(null);
       await loadData();
-    } catch {
-      error('删除站点失败');
+    } catch (err: any) {
+      error(err?.message || '删除站点失败');
     } finally {
       setDeleting(false);
     }
@@ -378,11 +400,11 @@ export const Sites: React.FC = () => {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>站点名称与云厂商</TableHead>
-                  <TableHead>物理/VPC真实子网</TableHead>
+                  <TableHead>站点名称</TableHead>
+                  <TableHead>站点内网网段</TableHead>
                   <TableHead>重叠网段 NAT 影子映射</TableHead>
                   <TableHead>指定汇聚网关</TableHead>
-                  <TableHead>节点数</TableHead>
+                  <TableHead>关联网关数</TableHead>
                   <TableHead>网络状态</TableHead>
                   <TableHead className="text-right">操作</TableHead>
                 </TableRow>
@@ -413,9 +435,6 @@ export const Sites: React.FC = () => {
                                 <span>{site.name}</span>
                               </div>
                               <div className="flex items-center gap-1.5 mt-0.5">
-                                <Badge variant="outline" className="text-[10px] py-0 px-1 font-mono text-slate-600">
-                                  {site.cloudProvider || 'IDC_OnPrem'}
-                                </Badge>
                                 {site.localSubnet === '192.168.10.0/24' && (
                                   <Badge variant="warning" className="text-[10px] py-0 px-1 bg-amber-50 text-amber-700 border border-amber-200">
                                     网段潜在重叠
@@ -437,7 +456,11 @@ export const Sites: React.FC = () => {
                               <div className="flex items-center gap-1.5">
                                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
                                   <ArrowLeftRight className="w-3 h-3 text-emerald-600" />
-                                  1:1 NAT 激活
+                                  {site.natMapping?.natType === '1:1_Bidirectional'
+                                    ? '1:1 NAT 激活'
+                                    : site.natMapping?.natType === 'SNAT_Masquerade'
+                                      ? 'SNAT 激活'
+                                      : 'DNAT 激活'}
                                 </span>
                                 <span className="font-mono text-xs font-bold text-indigo-700">
                                   {site.natMapping?.virtualCidr}
@@ -453,6 +476,7 @@ export const Sites: React.FC = () => {
                               <Button
                                 variant="ghost"
                                 size="sm"
+                                disabled={site.status !== 'active'}
                                 onClick={() => openQuickNatModal(site)}
                                 className="h-6 text-[11px] text-blue-600 hover:bg-blue-50 px-1.5"
                               >
@@ -465,7 +489,7 @@ export const Sites: React.FC = () => {
                         <TableCell>
                           {site.gatewayNodeId ? (
                             <button
-                              onClick={() => navigate(`/nodes/${site.gatewayNodeId}`)}
+                              onClick={() => navigate('/enrollment-tokens')}
                               className="text-xs font-medium text-slate-700 hover:text-blue-600 flex items-center gap-1.5 font-mono"
                             >
                               <Server className="w-3.5 h-3.5 text-slate-400" />
@@ -492,21 +516,13 @@ export const Sites: React.FC = () => {
                             <Button
                               variant="outline"
                               size="sm"
+                              disabled={site.status !== 'active'}
                               title="配置重叠网段 NAT"
                               onClick={() => openQuickNatModal(site)}
                               className="h-8 gap-1 text-xs text-indigo-600 border-indigo-200 hover:bg-indigo-50"
                             >
                               <ArrowLeftRight className="w-3.5 h-3.5" />
                               <span>NAT 映射</span>
-                            </Button>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => navigate(`/nodes?site=${site.id}`)}
-                              className="h-8 gap-1 text-xs text-slate-700 hover:text-blue-600"
-                            >
-                              <Layers className="w-3.5 h-3.5" />
-                              <span>查看节点</span>
                             </Button>
                             <Button
                               variant="ghost"
@@ -794,11 +810,11 @@ export const Sites: React.FC = () => {
         <div className="space-y-4">
           <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs space-y-1">
             <div className="flex justify-between">
-              <span className="text-slate-500">目标物理/云端站点:</span>
+              <span className="text-slate-500">目标网络站点:</span>
               <strong className="text-slate-900">{targetNatSite?.name}</strong>
             </div>
             <div className="flex justify-between">
-              <span className="text-slate-500">真实物理网段 (True VPC Subnet):</span>
+              <span className="text-slate-500">站点内网网段 (VPC Subnet):</span>
               <strong className="font-mono text-blue-700">{targetNatSite?.localSubnet}</strong>
             </div>
           </div>
@@ -881,8 +897,8 @@ export const Sites: React.FC = () => {
       <Dialog
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
-        title={editingSite ? '修改物理网络站点' : '新建物理网络站点'}
-        description="配置地域机房网络、归属云服务商及 WireGuard 汇聚网关"
+        title={editingSite ? '修改网络站点' : '新建网络站点'}
+        description="配置本地网络范围及其 WireGuard 汇聚网关"
         maxWidth="md"
       >
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -893,13 +909,12 @@ export const Sites: React.FC = () => {
             <Input
               value={siteForm.name}
               onChange={(e) => setSiteForm({ ...siteForm, name: e.target.value })}
-              placeholder="例如: 杭州研发园区 (阿里云 VPC)"
+              placeholder="例如: 杭州研发园区"
               error={formErrors.name}
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div>
+          <div>
               <label className="block text-xs font-medium text-slate-700 mb-1">
                 本地子网段 (CIDR) <span className="text-rose-500">*</span>
               </label>
@@ -909,38 +924,20 @@ export const Sites: React.FC = () => {
                 placeholder="例如: 192.168.40.0/24"
                 error={formErrors.localSubnet}
               />
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">云厂商/位置</label>
-              <Select
-                value={siteForm.cloudProvider}
-                onChange={(e) =>
-                  setSiteForm({ ...siteForm, cloudProvider: e.target.value as any })
-                }
-              >
-                <option value="Aliyun">阿里云 (Aliyun)</option>
-                <option value="TencentCloud">腾讯云 (Tencent Cloud)</option>
-                <option value="AWS">亚马逊云 (AWS)</option>
-                <option value="HuaweiCloud">华为云 (Huawei Cloud)</option>
-                <option value="IDC_OnPrem">本地自建机房 (IDC On-Prem)</option>
-              </Select>
-            </div>
           </div>
 
           <div>
             <label className="block text-xs font-medium text-slate-700 mb-1">
-              汇聚网关节点 <span className="text-rose-500">*</span>
+              汇聚网关节点
             </label>
             <Select
               value={siteForm.gatewayNodeId}
               onChange={(e) => setSiteForm({ ...siteForm, gatewayNodeId: e.target.value })}
-              error={formErrors.gatewayNodeId}
             >
-              <option value="">请选择网关节点</option>
+              <option value="">不指定网关（可稍后配置）</option>
               {gatewayNodes.map((gw) => (
-                <option key={gw.id} value={gw.id}>
-                  {gw.name} ({gw.virtualIp}) • {gw.siteName}
+                <option key={gw.id} value={String(gw.id)}>
+                  {gw.gateway_name} ({gw.gateway_id}) • {gw.status}
                 </option>
               ))}
             </Select>
@@ -955,14 +952,30 @@ export const Sites: React.FC = () => {
               </span>
               <input
                 type="checkbox"
+                disabled={siteForm.status !== 'active'}
                 checked={siteForm.natEnabled}
                 onChange={(e) => setSiteForm({ ...siteForm, natEnabled: e.target.checked })}
                 className="h-4 w-4 text-blue-600 rounded border-slate-300"
               />
             </div>
+            {formErrors.natEnabled && <p className="text-[11px] text-rose-600">{formErrors.natEnabled}</p>}
 
             {siteForm.natEnabled && (
               <div className="pt-2 border-t border-slate-200 space-y-2">
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-600 mb-0.5">NAT 转换模式</label>
+                  <Select
+                    value={siteForm.natType}
+                    onChange={(e) => setSiteForm({
+                      ...siteForm,
+                      natType: e.target.value as typeof siteForm.natType,
+                    })}
+                  >
+                    <option value="1:1_Bidirectional">1:1 双向映射</option>
+                    <option value="SNAT_Masquerade">出站 SNAT</option>
+                    <option value="DNAT_VirtualIP">虚拟地址 DNAT</option>
+                  </Select>
+                </div>
                 <div>
                   <label className="block text-[11px] font-medium text-slate-600 mb-0.5">
                     虚拟影子网段 (Shadow CIDR)
@@ -982,9 +995,10 @@ export const Sites: React.FC = () => {
             <label className="block text-xs font-medium text-slate-700 mb-1">站点运行状态</label>
             <Select
               value={siteForm.status}
-              onChange={(e) =>
-                setSiteForm({ ...siteForm, status: e.target.value as 'active' | 'inactive' })
-              }
+              onChange={(e) => {
+                const status = e.target.value as 'active' | 'inactive';
+                setSiteForm({ ...siteForm, status, natEnabled: status === 'active' && siteForm.natEnabled });
+              }}
             >
               <option value="active">正常活跃 (active)</option>
               <option value="inactive">维护停用 (inactive)</option>

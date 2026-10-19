@@ -382,7 +382,7 @@ export const GatewayBehindNetworkDiagram: React.FC<GatewayBehindNetworkDiagramPr
                     <span className="font-medium text-slate-800">{node.name}</span>
                   </div>
                   <div className="flex justify-between items-center text-xs">
-                    <span className="text-slate-500">物理站点</span>
+                    <span className="text-slate-500">网络站点</span>
                     <span className="font-medium text-slate-700">{node.siteName}</span>
                   </div>
                   <div className="flex justify-between items-center text-xs">
