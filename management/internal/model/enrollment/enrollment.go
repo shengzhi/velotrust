@@ -9,7 +9,7 @@ import (
 
 const (
 	TableGateway    = ztnaModel.TableNode
-	TableCredential = "t_gateway_registration_token"
+	TableCredential = ztnaModel.TableGatewayRegistrationToken
 	StatusPending   = "pending"
 	StatusUsed      = "used"
 	StatusExpired   = "expired"

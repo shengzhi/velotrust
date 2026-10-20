@@ -8,24 +8,25 @@ import (
 )
 
 const (
-	TableDevice                = "t_ztna_device"
-	TableDeviceCredential      = "t_ztna_device_credential"
-	TableDevicePostureCheck    = "t_ztna_device_posture_check"
-	TableNode                  = "t_ztna_node"
-	TableProtectedResource     = "t_ztna_protected_resource"
-	TableAccessPolicy          = "t_ztna_access_policy"
-	TablePolicySubject         = "t_ztna_policy_subject"
-	TablePolicyResource        = "t_ztna_policy_resource"
-	TableAuthorizationDecision = "t_ztna_authorization_decision"
-	TableAuthorizationGrant    = "t_ztna_authorization_grant"
-	TableTunnel                = "t_ztna_tunnel"
-	TableTunnelPeer            = "t_ztna_tunnel_peer"
-	TableConfig                = "t_ztna_config"
-	TableNodeConfigTask        = "t_ztna_node_config_task"
-	TableNodeConfigTaskEvent   = "t_ztna_node_config_task_event"
-	TableNodeStatusReport      = "t_ztna_node_status_report"
-	TableRelay                 = "t_ztna_relay"
-	TableSecurityEvent         = "t_ztna_security_event"
+	TableDevice                   = "t_ztna_device"
+	TableDeviceCredential         = "t_ztna_device_credential"
+	TableDevicePostureCheck       = "t_ztna_device_posture_check"
+	TableNode                     = "t_ztna_node"
+	TableGatewayRegistrationToken = "t_gateway_registration_token"
+	TableProtectedResource        = "t_ztna_protected_resource"
+	TableAccessPolicy             = "t_ztna_access_policy"
+	TablePolicySubject            = "t_ztna_policy_subject"
+	TablePolicyResource           = "t_ztna_policy_resource"
+	TableAuthorizationDecision    = "t_ztna_authorization_decision"
+	TableAuthorizationGrant       = "t_ztna_authorization_grant"
+	TableTunnel                   = "t_ztna_tunnel"
+	TableTunnelPeer               = "t_ztna_tunnel_peer"
+	TableConfig                   = "t_ztna_config"
+	TableNodeConfigTask           = "t_ztna_node_config_task"
+	TableNodeConfigTaskEvent      = "t_ztna_node_config_task_event"
+	TableNodeStatusReport         = "t_ztna_node_status_report"
+	TableRelay                    = "t_ztna_relay"
+	TableSecurityEvent            = "t_ztna_security_event"
 )
 
 type Device struct {
@@ -129,6 +130,8 @@ type ProtectedResource struct {
 
 func (ProtectedResource) TableName() string { return TableProtectedResource }
 
+// AccessPolicy stores the only current ruleset. BaseModel.VersionNo is used
+// for optimistic persistence concurrency; this model has no business revision.
 type AccessPolicy struct {
 	database.BaseModel `xorm:"extends"`
 	ID                 int64   `xorm:"pk autoincr 'id'"`
@@ -230,6 +233,8 @@ type TunnelPeer struct {
 
 func (TunnelPeer) TableName() string { return TableTunnelPeer }
 
+// Config stores the one current expected config per target. ConfigHash tracks
+// content convergence; BaseModel.VersionNo is only a persistence token.
 type Config struct {
 	database.BaseModel `xorm:"extends"`
 	ID                 int64   `xorm:"pk autoincr 'id'"`
@@ -326,6 +331,20 @@ type SecurityEvent struct {
 }
 
 func (SecurityEvent) TableName() string { return TableSecurityEvent }
+
+// PolicySubjectRef and AccessPolicyData are service-facing projections of a
+// current policy and its current relationship rows; neither is a persistence
+// table or a policy revision.
+type PolicySubjectRef struct {
+	Type string `json:"subject_type"`
+	ID   int64  `json:"subject_id"`
+}
+
+type AccessPolicyData struct {
+	Policy      AccessPolicy       `json:"policy"`
+	Subjects    []PolicySubjectRef `json:"subjects"`
+	ResourceIDs []int64            `json:"resource_ids"`
+}
 
 var (
 	_ database.IModel = (*Device)(nil)

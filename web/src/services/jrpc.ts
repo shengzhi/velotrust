@@ -47,6 +47,11 @@ const businessMessages: Record<string, string> = {
   IAM_USER_STATUS_DENIED: '不能禁用当前账号或最后一个有效平台管理员。',
   IAM_ROLE_GRANT_DENIED: '不能向当前登录账号授予或撤销角色。',
   ENROLLMENT_INVALID_ARGUMENT: '注册凭证信息不完整或格式不正确，请检查输入内容。',
+  ZTNA_NODE_INVALID_ARGUMENT: '节点参数无效，请检查提交内容。',
+  ZTNA_NODE_NOT_FOUND: '虚拟节点不存在或已被移除。',
+  ZTNA_NODE_VERSION_CONFLICT: '节点信息已被其他操作修改，请刷新后重试。',
+  ZTNA_NODE_TRANSITION_DENIED: '当前节点状态不允许执行此状态变更。',
+  ZTNA_NODE_ACTIVATION_REQUIRES_REGISTRATION: '节点完成注册并提交公钥后才能启用。',
 };
 
 function errorMessage(error: RPCErrorPayload | null | undefined): string {
