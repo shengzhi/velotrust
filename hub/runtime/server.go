@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 
 	"velotrust/hub/config"
@@ -24,21 +25,27 @@ type Server struct {
 	transport *hubgrpc.Server
 }
 
-// New constructs a TLS-protected HUB server and registers the supplied
-// services. The caller controls when Serve is started.
+// New constructs a HUB server using the configured TLS mode and registers the
+// supplied services. The caller controls when Serve is started.
 func New(cfg config.Config, registrars ...Registrar) (*Server, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	certificate, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
-	if err != nil {
-		return nil, fmt.Errorf("load HUB TLS certificate: %w", err)
+	var tlsConfig *tls.Config
+	if cfg.TLS.IsEnabled() {
+		certificate, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load HUB TLS certificate: %w", err)
+		}
+		tlsConfig = &tls.Config{
+			MinVersion:   tls.VersionTLS12,
+			Certificates: []tls.Certificate{certificate},
+		}
+	} else {
+		slog.Warn("HUB gRPC TLS is disabled; control traffic is plaintext and the client cannot authenticate the HUB server")
 	}
 
-	transport := hubgrpc.NewServer(&tls.Config{
-		MinVersion:   tls.VersionTLS12,
-		Certificates: []tls.Certificate{certificate},
-	})
+	transport := hubgrpc.NewServer(tlsConfig)
 	for _, registrar := range registrars {
 		if registrar == nil {
 			return nil, errors.New("HUB service registrar is nil")

@@ -1,14 +1,16 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, Copy, RefreshCw, Server, ShieldAlert } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, Copy, Layers, Network, RefreshCw, Server, ShieldAlert, XCircle } from 'lucide-react';
 import { Button } from '../../components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card';
 import { Badge } from '../../components/ui/badge';
 import { StatusBadge } from '../../components/StatusBadge';
 import { Select } from '../../components/ui/select';
+import { Input } from '../../components/ui/input';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { useToast } from '../../components/ui/toast';
 import { VirtualNode, VirtualNodeStatus, virtualNodeApi } from '../../services/node';
+import { IPAMLease, IPAMPool, ipamApi } from '../../services/ipam';
 import { formatDateTime } from '../../utils/format';
 
 const statusLabels: Record<VirtualNodeStatus, string> = {
@@ -42,27 +44,75 @@ export const NodeDetail: React.FC = () => {
   const { success, error } = useToast();
   const [node, setNode] = useState<VirtualNode | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [targetStatus, setTargetStatus] = useState<VirtualNodeStatus | ''>('');
   const [confirmRevoke, setConfirmRevoke] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [gatewayPools, setGatewayPools] = useState<IPAMPool[]>([]);
+  const [gatewayLease, setGatewayLease] = useState<IPAMLease | null>(null);
+  const [gatewayIPAMLoading, setGatewayIPAMLoading] = useState(false);
+  const [gatewayIPAMError, setGatewayIPAMError] = useState('');
+  const [selectedGatewayPool, setSelectedGatewayPool] = useState('');
+  const [requestedGatewayIP, setRequestedGatewayIP] = useState('');
+  const [gatewayAddressSaving, setGatewayAddressSaving] = useState(false);
+  const [publicEndpointInput, setPublicEndpointInput] = useState('');
+  const [publicEndpointEditing, setPublicEndpointEditing] = useState(false);
+  const [publicEndpointSaving, setPublicEndpointSaving] = useState(false);
 
-  const loadNode = async () => {
+  const loadGatewayAddress = async (gateway: VirtualNode) => {
+    setGatewayIPAMLoading(true);
+    setGatewayIPAMError('');
+    try {
+      const [pools, leases] = await Promise.all([
+        ipamApi.listPools(),
+        ipamApi.listLeases(),
+      ]);
+      const activeGatewayPools = pools.filter((pool) => pool.type === 'Gateway' && pool.status === 'active');
+      const activeGatewayLeases = leases
+        .filter((lease) => lease.node_type === 'Gateway' && lease.status !== 'Released')
+        .sort((left, right) => right.allocated_at.localeCompare(left.allocated_at));
+      const lease = gateway.public_key
+        ? activeGatewayLeases.find((item) => item.wireguard_pubkey === gateway.public_key)
+          ?? activeGatewayLeases.find((item) => item.target_name === gateway.node_name && !item.wireguard_pubkey)
+        : activeGatewayLeases.find((item) => item.target_name === gateway.node_name);
+      setGatewayPools(activeGatewayPools);
+      setGatewayLease(lease ?? null);
+      setSelectedGatewayPool((current) => activeGatewayPools.some((pool) => String(pool.id) === current)
+        ? current
+        : String(activeGatewayPools[0]?.id ?? ''));
+      setRequestedGatewayIP('');
+    } catch (cause) {
+      setGatewayIPAMError(cause instanceof Error ? cause.message : '加载 Gateway 地址分配信息失败');
+    } finally {
+      setGatewayIPAMLoading(false);
+    }
+  };
+
+  const loadNode = async (manualRefresh = false) => {
+    if (manualRefresh) setRefreshing(true);
     const nodeID = Number(id);
     if (!Number.isSafeInteger(nodeID) || nodeID <= 0) {
       setNode(null);
       setLoading(false);
+      setRefreshing(false);
       return;
     }
     try {
       const result = await virtualNodeApi.get(nodeID);
       setNode(result);
-      setTargetStatus('');
+      setPublicEndpointInput(result.public_endpoint ?? '');
+      if (!manualRefresh) setTargetStatus('');
+      if (result.node_type === 'gateway') {
+        const gatewayAddressLoading = loadGatewayAddress(result);
+        if (manualRefresh) await gatewayAddressLoading;
+      }
     } catch (err) {
       error(err instanceof Error ? err.message : '加载虚拟节点失败');
-      setNode(null);
+      if (!manualRefresh) setNode(null);
     } finally {
       setLoading(false);
+      if (manualRefresh) setRefreshing(false);
     }
   };
 
@@ -82,6 +132,52 @@ export const NodeDetail: React.FC = () => {
       error(err instanceof Error ? err.message : '更新节点状态失败');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const savePublicEndpoint = async () => {
+    if (!node) return;
+    setPublicEndpointSaving(true);
+    try {
+      await virtualNodeApi.setPublicEndpoint(node, publicEndpointInput.trim());
+      setPublicEndpointEditing(false);
+      success(publicEndpointInput.trim() ? '公网端点已更新' : '公网端点已清除');
+      await loadNode();
+    } catch (cause) {
+      error(cause instanceof Error ? cause.message : '保存公网端点失败');
+    } finally {
+      setPublicEndpointSaving(false);
+    }
+  };
+
+  const assignGatewayAddress = async () => {
+    if (!node || node.node_type !== 'gateway') return;
+    const pool = gatewayPools.find((item) => String(item.id) === selectedGatewayPool);
+    if (!pool) {
+      error('请先选择一个启用的 Gateway 地址池');
+      return;
+    }
+    if (pool.allocation_mode === 'static' && !requestedGatewayIP.trim()) {
+      error('静态地址池需要填写要分配的 IPv4 地址');
+      return;
+    }
+    setGatewayAddressSaving(true);
+    try {
+      const allocatedLease = await ipamApi.allocateAddress({
+        pool_id: pool.id,
+        target_name: node.node_name,
+        node_type: 'Gateway',
+        ...(pool.allocation_mode === 'static' ? { requested_ip: requestedGatewayIP.trim() } : {}),
+        wireguard_pubkey: node.public_key ?? undefined,
+        endpoint: node.public_endpoint ?? undefined,
+      });
+      setGatewayLease(allocatedLease);
+      success(`已分配 ${allocatedLease.virtual_ip}/32；HUB 会从 IPAM 租约生成隧道配置`);
+      await loadGatewayAddress(node);
+    } catch (cause) {
+      error(cause instanceof Error ? cause.message : '分配 Gateway 地址失败');
+    } finally {
+      setGatewayAddressSaving(false);
     }
   };
 
@@ -116,8 +212,14 @@ export const NodeDetail: React.FC = () => {
     );
   }
 
+  const approvalPending = node.node_type === 'gateway'
+    && node.node_status === 'pending'
+    && node.require_approval
+    && Boolean(node.public_key && node.registered_at);
   const displayValue = (value?: string | null) => value || '—';
   const dateValue = (value?: string | null) => value ? formatDateTime(value) : '从未上报';
+  const leasedGatewayAddress = gatewayLease ? `${gatewayLease.virtual_ip}/32` : '';
+  const selectedPool = gatewayPools.find((pool) => String(pool.id) === selectedGatewayPool);
 
   return (
     <div className="space-y-5">
@@ -129,23 +231,37 @@ export const NodeDetail: React.FC = () => {
           <div>
             <div className="flex flex-wrap items-center gap-2">
               <h1 className="text-xl font-bold tracking-tight text-slate-900">{node.node_name}</h1>
-              <StatusBadge status={node.node_status} label={statusLabels[node.node_status]} />
+              <StatusBadge status={node.node_status} label={approvalPending ? '待审批' : statusLabels[node.node_status]} />
               <Badge variant={node.node_type === 'gateway' ? 'primary' : 'outline'}>{typeLabels[node.node_type]}</Badge>
             </div>
             <p className="mt-1 font-mono text-xs text-slate-500">{node.node_code} · 节点 ID {node.id} · 版本 {node.version_no}</p>
           </div>
         </div>
-        {options.length > 0 && (
-          <div className="flex w-full items-center gap-2 sm:w-auto">
-            <Select className="min-w-40" value={targetStatus} onChange={(event) => setTargetStatus(event.target.value as VirtualNodeStatus | '')}>
-              <option value="">选择生命周期操作</option>
-              {options.map((status) => <option key={status} value={status}>{statusLabels[status]}</option>)}
-            </Select>
-            <Button size="sm" disabled={!targetStatus || saving} isLoading={saving} onClick={() => targetStatus === 'revoked' ? setConfirmRevoke(true) : targetStatus && void saveStatus(targetStatus)}>
-              应用
-            </Button>
-          </div>
-        )}
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+          <Button variant="outline" size="sm" disabled={refreshing || saving || gatewayAddressSaving} onClick={() => void loadNode(true)} className="gap-1.5">
+            <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />刷新
+          </Button>
+          {approvalPending ? (
+            <div className="flex w-full gap-2 sm:w-auto">
+              <Button size="sm" disabled={saving} isLoading={saving} onClick={() => void saveStatus('active')} className="gap-1.5">
+                <CheckCircle2 className="h-4 w-4" />批准注册
+              </Button>
+              <Button variant="outline" size="sm" disabled={saving} onClick={() => setConfirmRevoke(true)} className="gap-1.5 text-rose-700 hover:text-rose-800">
+                <XCircle className="h-4 w-4" />拒绝注册
+              </Button>
+            </div>
+          ) : options.length > 0 && (
+            <div className="flex w-full items-center gap-2 sm:w-auto">
+              <Select className="min-w-40" value={targetStatus} onChange={(event) => setTargetStatus(event.target.value as VirtualNodeStatus | '')}>
+                <option value="">选择生命周期操作</option>
+                {options.map((status) => <option key={status} value={status}>{statusLabels[status]}</option>)}
+              </Select>
+              <Button size="sm" disabled={!targetStatus || saving} isLoading={saving} onClick={() => targetStatus === 'revoked' ? setConfirmRevoke(true) : targetStatus && void saveStatus(targetStatus)}>
+                应用
+              </Button>
+            </div>
+          )}
+        </div>
       </div>
 
       {node.node_status === 'revoked' && (
@@ -155,16 +271,19 @@ export const NodeDetail: React.FC = () => {
         </div>
       )}
 
-      <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs text-blue-800">
-        状态变更会写入管理数据库并记录审计。HUB 在线控制通道尚未接入，因此当前不会立即向运行节点推送配置或断开已建立的隧道。
-      </div>
+      {approvalPending && (
+        <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+          <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>Gateway 已使用注册凭证完成注册并绑定公钥，当前仍处于待审批状态。批准后 HUB 会结束等待并要求网关重新进行身份认证；拒绝会撤销此节点身份。</span>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         <Card>
           <CardHeader><CardTitle className="flex items-center gap-2 text-sm"><Server className="h-4 w-4 text-blue-600" />节点身份与运行状态</CardTitle></CardHeader>
           <CardContent className="space-y-3 text-xs">
             <InfoRow label="节点类型" value={typeLabels[node.node_type]} />
-            <InfoRow label="生命周期状态" value={<StatusBadge status={node.node_status} label={statusLabels[node.node_status]} />} />
+            <InfoRow label="生命周期状态" value={<StatusBadge status={node.node_status} label={approvalPending ? '待审批' : statusLabels[node.node_status]} />} />
             <InfoRow label="健康状态" value={node.health_status} />
             <InfoRow label="Agent 版本" value={displayValue(node.agent_version)} />
             <InfoRow label="最近心跳" value={dateValue(node.last_heartbeat_at)} />
@@ -182,7 +301,59 @@ export const NodeDetail: React.FC = () => {
           <CardHeader><CardTitle className="text-sm">端点与公钥</CardTitle></CardHeader>
           <CardContent className="space-y-3 text-xs">
             <InfoRow label="控制端点" value={displayValue(node.control_endpoint)} mono />
-            <InfoRow label="公网端点" value={displayValue(node.public_endpoint)} mono />
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="text-slate-500">公网 WireGuard 端点</div>
+                  {publicEndpointEditing ? (
+                    <div className="mt-1.5 flex flex-col gap-2 sm:flex-row">
+                      <Input
+                        id="node-public-endpoint"
+                        value={publicEndpointInput}
+                        onChange={(event) => setPublicEndpointInput(event.target.value)}
+                        placeholder="gateway.example.com:51820"
+                        maxLength={255}
+                        className="h-8 min-w-0 flex-1 font-mono text-xs"
+                        aria-label="公网 WireGuard 端点"
+                        autoFocus
+                      />
+                      <div className="flex shrink-0 gap-2">
+                        <Button
+                          size="sm"
+                          disabled={publicEndpointSaving || refreshing || publicEndpointInput.trim() === (node.public_endpoint ?? '')}
+                          isLoading={publicEndpointSaving}
+                          onClick={() => void savePublicEndpoint()}
+                        >保存</Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={publicEndpointSaving}
+                          onClick={() => {
+                            setPublicEndpointInput(node.public_endpoint ?? '');
+                            setPublicEndpointEditing(false);
+                          }}
+                        >取消</Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="mt-1 break-all font-mono font-medium text-slate-800">{node.public_endpoint || '未设置'}</div>
+                  )}
+                  {publicEndpointEditing && <p className="mt-1.5 text-[11px] leading-4 text-slate-500">填写其他节点可访问的 UDP 地址和端口；NAT 后请填写公网映射端口。留空并保存可清除。</p>}
+                </div>
+                {!publicEndpointEditing && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={refreshing || saving || gatewayAddressSaving}
+                    onClick={() => {
+                      setPublicEndpointInput(node.public_endpoint ?? '');
+                      setPublicEndpointEditing(true);
+                    }}
+                    className="shrink-0"
+                  >编辑</Button>
+                )}
+              </div>
+            </div>
             <InfoRow label="私网端点" value={displayValue(node.private_endpoint)} mono />
             <div className="border-t border-slate-100 pt-3">
               <div className="mb-1 text-slate-500">WireGuard 公钥</div>
@@ -194,6 +365,59 @@ export const NodeDetail: React.FC = () => {
           </CardContent>
         </Card>
       </div>
+
+      {node.node_type === 'gateway' && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-sm"><Network className="h-4 w-4 text-blue-600" />Gateway 隧道 IP</CardTitle>
+            <p className="text-xs text-slate-500">从 IPAM 的 Gateway 地址池分配地址；HUB 根据租约自动生成并同步隧道配置。</p>
+          </CardHeader>
+          <CardContent className="space-y-4 text-xs">
+            {gatewayIPAMLoading ? (
+              <div className="flex items-center text-slate-500"><RefreshCw className="mr-2 h-4 w-4 animate-spin" />正在读取 IPAM 租约…</div>
+            ) : gatewayIPAMError ? (
+              <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-rose-800">{gatewayIPAMError}</div>
+            ) : gatewayLease ? (
+              <div className="space-y-3">
+                <div className="grid grid-cols-1 gap-3 rounded-lg border border-slate-200 bg-slate-50 p-4 sm:grid-cols-3">
+                  <InfoRow label="IPAM 地址" value={<span className="font-mono font-semibold">{leasedGatewayAddress}</span>} />
+                  <InfoRow label="所属地址池" value={gatewayLease.pool_name || '—'} />
+                  <InfoRow label="租约状态" value={<Badge variant={gatewayLease.status === 'Active' ? 'success' : 'primary'}>{gatewayLease.status === 'Active' ? '活动' : '保留'}</Badge>} />
+                </div>
+                <div className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-emerald-800"><CheckCircle2 className="h-4 w-4 shrink-0" />该 IPAM 租约是 HUB 生成 Gateway 隧道地址的唯一来源。</div>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {gatewayPools.length ? (
+                  <div className="grid grid-cols-1 items-end gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+                    <div>
+                      <label className="mb-1.5 block text-xs font-medium text-slate-700">Gateway 地址池</label>
+                      <Select value={selectedGatewayPool} onChange={(event) => { setSelectedGatewayPool(event.target.value); setRequestedGatewayIP(''); }}>
+                        <option value="">选择地址池</option>
+                        {gatewayPools.map((pool) => <option key={pool.id} value={pool.id}>{pool.pool_name} · {pool.cidr} · {pool.allocation_mode === 'dynamic' ? '动态' : '静态'}</option>)}
+                      </Select>
+                    </div>
+                    {selectedPool?.allocation_mode === 'static' ? (
+                      <div>
+                        <label className="mb-1.5 block text-xs font-medium text-slate-700">指定 IPv4 地址</label>
+                        <Input value={requestedGatewayIP} onChange={(event) => setRequestedGatewayIP(event.target.value)} placeholder="例如 10.100.0.1" className="font-mono" />
+                      </div>
+                    ) : <div className="flex items-center gap-2 rounded-lg bg-slate-50 p-3 text-slate-500"><Layers className="h-4 w-4" />动态池会自动选择空闲地址</div>}
+                    <Button onClick={() => void assignGatewayAddress()} disabled={!selectedPool || gatewayAddressSaving || (selectedPool.allocation_mode === 'static' && !requestedGatewayIP.trim())} isLoading={gatewayAddressSaving} className="gap-1.5">
+                      <Network className="h-4 w-4" />分配地址
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-3 rounded-lg border border-slate-200 bg-slate-50 p-4 sm:flex-row sm:items-center sm:justify-between">
+                    <span className="text-slate-600">尚无启用的 Gateway 地址池。请先在 IPAM 中创建类型为 Gateway 的 Overlay 地址池。</span>
+                    <Button variant="outline" size="sm" onClick={() => navigate('/ipam')} className="shrink-0">打开 IPAM</Button>
+                  </div>
+                )}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>
@@ -241,9 +465,11 @@ export const NodeDetail: React.FC = () => {
         isOpen={confirmRevoke}
         onClose={() => setConfirmRevoke(false)}
         onConfirm={() => void saveStatus('revoked')}
-        title="确认撤销虚拟节点"
-        description={`撤销后“${node.node_name}”将进入不可恢复的终态，后续需重新注册新的节点身份。`}
-        confirmText="确认撤销"
+        title={approvalPending ? '确认拒绝网关注册' : '确认撤销虚拟节点'}
+        description={approvalPending
+          ? `拒绝后“${node.node_name}”的节点身份将被撤销，网关不能通过本次注册继续接入。`
+          : `撤销后“${node.node_name}”将进入不可恢复的终态，后续需重新注册新的节点身份。`}
+        confirmText={approvalPending ? '确认拒绝' : '确认撤销'}
         danger
         isLoading={saving}
       />

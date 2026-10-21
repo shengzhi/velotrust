@@ -88,7 +88,6 @@ flowchart LR
 | `t_ztna_tunnel` | [隧道 Peer 与中继](ztna_tunnel_data_design.md) | 逻辑隧道 |
 | `t_ztna_tunnel_peer` | [隧道 Peer 与中继](ztna_tunnel_data_design.md) | 隧道 Peer |
 | `t_ztna_relay` | [隧道 Peer 与中继](ztna_tunnel_data_design.md) | 中继节点扩展 |
-| `t_ztna_config` | [配置发布与节点状态](ztna_config_data_design.md) | 当前期望配置 |
 | `t_ztna_node_config_task` | [配置发布与节点状态](ztna_config_data_design.md) | 节点配置分发任务 |
 | `t_ztna_node_config_task_event` | [配置发布与节点状态](ztna_config_data_design.md) | 配置任务事件 |
 | `t_ztna_node_status_report` | [配置发布与节点状态](ztna_config_data_design.md) | 节点状态快照 |
@@ -109,21 +108,22 @@ flowchart LR
 | [015](../../../management/migrations/postgresql/015_unify_gateway_nodes_and_audit_actors.sql) | 网关身份与网络关系合入通用节点，迁移外键与审计用户名。 |
 | [016](../../../management/migrations/postgresql/016_network_gateway_ownership.sql) | 统一网络网关归属，重命名 gateway_node_id，删除节点网络关系表并增加反向查询索引。 |
 | [017](../../../management/migrations/postgresql/017_remove_node_endpoint.sql) | 删除未被业务使用且与节点主表端点字段重复的候选端点表。 |
-| [018](../../../management/migrations/postgresql/018_current_policy_and_config_state.sql) | 将策略规则移入策略当前行；将配置修订折叠为每目标一条当前配置，并以内容摘要标识。 |
+| [018](../../../management/migrations/postgresql/018_current_policy_and_config_state.sql) | 将策略规则移入策略当前行，并将旧配置修订折叠为过渡期当前配置表。 |
+| [019](../../../management/migrations/postgresql/019_compile_gateway_config_from_business_data.sql) | 删除过渡期 `t_ztna_config` 和手工配置权限；HUB 改为从当前网络、Peer、IPAM 与 NAT 数据编译 Gateway 配置。 |
 
 - `t_gateway_node`、`t_gateway_node_network` 已由迁移 015 删除，不列为当前有效表；网关身份使用 `t_ztna_node`；网络归属随后由迁移 016 统一至网络表。
 - 注册凭证保留 `t_gateway_registration_token` 表名，目标列由 `gateway_row_id` 改为 `node_id`，引用统一节点。
 - 迁移 016 将 `t_ztna_network.gateway_row_id` 重命名为 `gateway_node_id`，迁移唯一且一致的网关绑定后删除 `t_ztna_node_network`。每个网络最多一个网关，同一网关可拥有多个网络。
 - 迁移 017 删除 `t_ztna_node_endpoint`；当前端点值保存在 `t_ztna_node` 的 `control_endpoint`、`public_endpoint` 和 `private_endpoint` 字段中。
-- 迁移 018 删除策略修订历史，将当前规则保存在 `t_ztna_access_policy.rules_json`；配置表改为 `t_ztna_config`，每个目标只保留当前状态。配置分发任务和 Agent 状态以 config_hash 比对，公共 `version_no` 只负责并发写入保护。
+- 迁移 018 将策略当前规则保存在 `t_ztna_access_policy.rules_json`，并短暂引入 `t_ztna_config` 作为兼容配置源；迁移 019 删除该表。Gateway 配置现由 HUB 从业务表编译，任务和节点报告通过 `config_hash` 比对实际收敛状态。
 - 旧迁移中的数字 created_by/updated_by 不是最终字段类型；015 把有值的 IAM 用户 ID 映射为用户名，无法映射的非零审计人会中止迁移。
 - schema 目录的单份建表文件是对应历史阶段的快照；恢复最终结构时必须应用后续迁移，不能仅执行初始快照。
 
 ## 6. 关系、约束和业务一致性
 
 - E-R 图中的实线表示 DDL 外键，虚线表示应用层约定。多态主体、配置目标、CIDR 包含关系以及以名称/标签存储的归属不自动具备数据库参照完整性。
-- 策略规则和期望配置以数据库当前记录为准，不维护业务修订历史；`config_hash` 仅用于内容比对和幂等应用。密钥轮换状态仍按密钥生命周期管理，公共 `version_no` 只用于并发写入保护。
-- 已授权规则经配置流程生成隧道、路由、ACL 和 NAT 期望状态。管理记录写入成功不代表节点已应用；以任务回执及状态校准收敛。
+- 策略规则和网络、隧道等业务数据以数据库当前记录为准，不维护业务修订历史；HUB 编译后的 `config_hash` 仅用于内容比对和幂等应用。密钥轮换状态仍按密钥生命周期管理，公共 `version_no` 只用于并发写入保护。
+- HUB 从已关联网络生成 Gateway 本地转发目的网段；该网段必须有物理或静态路由，不能由 Agent 错误地添加为 WireGuard 出口路由。Gateway 配置应用成功仍需用任务回执及状态校准收敛。
 - 真实业务网段允许多站点重叠；访问同址站点需要明确的影子网段映射。Overlay 地址池必须与全局范围相容并校验冲突，不能通过 NAT 台账替代 Overlay 地址租约。
 - JSON CHECK 多数只检查对象/数组形状；地址、公钥、策略语义、状态迁移及跨记录一致性需要服务层验证。
 - 准入、信任、审批或策略状态无法验证时默认拒绝；凭证消费、地址分配和状态更新使用事务与并发条件保护。

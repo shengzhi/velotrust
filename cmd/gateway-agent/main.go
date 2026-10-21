@@ -18,7 +18,6 @@ import (
 )
 
 type validationSummary struct {
-	GatewayID     string `json:"gateway_id"`
 	Interface     string `json:"interface"`
 	Peers         int    `json:"peers"`
 	Routes        int    `json:"routes"`
@@ -45,7 +44,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "help", "-h", "--help":
 		fmt.Fprintln(stdout, "usage: gateway-agent <run|validate|keygen> [options]")
 		fmt.Fprintln(stdout, "run --config PATH [--health-listen ADDRESS] [--log-level debug|info|warn|error]")
-		fmt.Fprintln(stdout, "run applies the local gateway config and serves /healthz and /readyz.")
+		fmt.Fprintln(stdout, "run authenticates with HUB, completes first-time registration when configured, and serves /healthz and /readyz.")
 		fmt.Fprintln(stdout, "validate checks the config without exposing its private key.")
 		fmt.Fprintln(stdout, "keygen creates one WireGuard key pair, which is also the node's network identity.")
 		return 0
@@ -145,7 +144,6 @@ func validateConfig(args []string, stdout, stderr io.Writer) int {
 		policy = "explicit-rules"
 	}
 	summary := validationSummary{
-		GatewayID:     cfg.GatewayID,
 		Interface:     cfg.Tunnel.Interface,
 		Peers:         len(cfg.Tunnel.Peers),
 		Routes:        len(cfg.Routes),

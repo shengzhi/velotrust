@@ -1,7 +1,15 @@
 {
   "instance_id": "hub-site-a-01",
   "listen_addr": "0.0.0.0:8081",
+  "database": {
+    "driver": "postgres",
+    "dsn": "${DATABASE_DSN}"
+  },
+  "heartbeat_interval_seconds": 15,
+  "heartbeat_timeout_seconds": 45,
+  "authentication_challenge_ttl_seconds": 30,
   "tls": {
+    "enabled": true,
     "cert_file": "/etc/velotrust/hub/tls.crt",
     "key_file": "/etc/velotrust/hub/tls.key"
   }

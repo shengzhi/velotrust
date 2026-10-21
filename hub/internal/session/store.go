@@ -19,6 +19,7 @@ type Record struct {
 type Store interface {
 	Acquire(context.Context, Record) error
 	Renew(context.Context, string, string, time.Time) error
+	WithCurrent(context.Context, string, string, time.Time, func() error) error
 	Release(context.Context, string, string) error
 	ExpireBefore(context.Context, time.Time) (int64, error)
 }

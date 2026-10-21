@@ -38,8 +38,8 @@ type NATMapping struct {
 }
 
 type GatewayOption struct {
-	ID          int64  `json:"id"`
-	GatewayID   string `json:"gateway_id"`
-	GatewayName string `json:"gateway_name"`
-	Status      string `json:"status"`
+	ID          int64  `xorm:"'id'" json:"id"`
+	GatewayID   string `xorm:"'gateway_id'" json:"gateway_id"`
+	GatewayName string `xorm:"'gateway_name'" json:"gateway_name"`
+	Status      string `xorm:"'status'" json:"status"`
 }

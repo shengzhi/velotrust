@@ -121,13 +121,13 @@ func (r *Repository) SaveSite(ctx *servicecontext.Context, actorID int64, site *
 		if err := requirePermission(s, actorID, "ztna.site.write"); err != nil {
 			return err
 		}
-		if site.GatewayNodeID != nil && site.Status != model.StatusActive {
-			return errors.New("only active network sites can be assigned to a gateway")
-		}
-		if err := validateGateway(s, site.GatewayNodeID); err != nil {
-			return err
-		}
 		if site.ID == 0 {
+			if site.GatewayNodeID != nil && site.Status != model.StatusActive {
+				return errors.New("only active network sites can be assigned to a gateway")
+			}
+			if err := validateGateway(s, site.GatewayNodeID); err != nil {
+				return err
+			}
 			if err := ensureSitePrefix(s, site.LocalSubnet); err != nil {
 				return err
 			}
@@ -161,16 +161,18 @@ func (r *Repository) SaveSite(ctx *servicecontext.Context, actorID int64, site *
 		if !found || network.VersionNo != site.VersionNo {
 			return errors.New("network site was not found or changed; refresh and try again")
 		}
-		if site.LocalSubnet != network.CIDR {
-			if err := ensureSitePrefix(s, site.LocalSubnet); err != nil {
-				return err
-			}
-			if err := ensureNoSiteReferences(s, network.ID, "changing the CIDR"); err != nil {
-				return err
-			}
+		if site.Name != network.NetworkName {
+			return errors.New("site name cannot be changed after creation")
 		}
-		if site.Status == model.StatusDisabled && network.Status != model.StatusDisabled {
-			if err := ensureNoSiteReferences(s, network.ID, "disabling the site"); err != nil {
+		if site.LocalSubnet != network.CIDR {
+			return errors.New("site CIDR cannot be changed after creation")
+		}
+		gatewayChanged := !sameGatewayNodeID(site.GatewayNodeID, network.GatewayNodeID)
+		if gatewayChanged && site.GatewayNodeID != nil && site.Status != model.StatusActive {
+			return errors.New("only active network sites can be assigned to a gateway")
+		}
+		if site.GatewayNodeID != nil && site.Status == model.StatusActive {
+			if err := validateGateway(s, site.GatewayNodeID); err != nil {
 				return err
 			}
 		}
@@ -217,9 +219,6 @@ func (r *Repository) DeleteSite(ctx *servicecontext.Context, actorID, siteID, ex
 		}
 		if !found || network.VersionNo != expectedVersion {
 			return errors.New("network site was not found or changed; refresh and try again")
-		}
-		if err := ensureNoSiteReferences(s, network.ID, "deleting the site"); err != nil {
-			return err
 		}
 		network.Status = model.StatusDisabled
 		network.GatewayNodeID = nil
@@ -268,17 +267,11 @@ func ensureSitePrefix(s *xorm.Session, cidr string) error {
 	return ipamRepository.EnsureBusinessNetworkCompatible(s, cidr)
 }
 
-func ensureNoSiteReferences(s *xorm.Session, networkID int64, operation string) error {
-	var references struct {
-		Count int64 `xorm:"'count'"`
+func sameGatewayNodeID(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
 	}
-	if _, err := s.SQL("SELECT COUNT(*) AS count FROM t_ztna_network WHERE id=? AND gateway_node_id IS NOT NULL", networkID).Get(&references); err != nil {
-		return fmt.Errorf("check site references before %s: %w", operation, err)
-	}
-	if references.Count > 0 {
-		return fmt.Errorf("this site is assigned to a gateway; unbind the gateway before %s", operation)
-	}
-	return nil
+	return *left == *right
 }
 
 func disableSiteNAT(s *xorm.Session, tx *database.DBTransaction, ctx *servicecontext.Context, networkID int64) error {

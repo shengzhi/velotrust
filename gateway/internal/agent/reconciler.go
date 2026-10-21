@@ -3,10 +3,12 @@ package agent
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +29,12 @@ type Driver interface {
 	// ApplyFirewall replaces all gateway rules. An empty slice must install a
 	// default-deny forwarding policy.
 	ApplyFirewall(context.Context, []config.ACLRule) error
+	// ApplyPeerRoutes installs the WireGuard routes described by Peer AllowedIPs.
+	ApplyPeerRoutes(context.Context, []config.Peer) error
+	// ApplyRoutes installs locally routed destination networks behind the
+	// Gateway using the host-selected egress interface and next hop. They must
+	// never be installed on the managed WireGuard tunnel. The host's default
+	// route may provide the next hop.
 	ApplyRoutes(context.Context, []string) error
 	ApplyNAT(context.Context, []config.NATMapping) error
 	EnableForwarding(context.Context) error
@@ -48,9 +56,10 @@ const (
 // Snapshot contains operational status without exposing tunnel keys or raw
 // backend errors through the health endpoint.
 type Snapshot struct {
-	Phase     Phase     `json:"phase"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Degraded  bool      `json:"degraded"`
+	Phase             Phase     `json:"phase"`
+	UpdatedAt         time.Time `json:"updated_at"`
+	Degraded          bool      `json:"degraded"`
+	AppliedConfigHash string    `json:"applied_config_hash,omitempty"`
 }
 
 type Reconciler struct {
@@ -58,6 +67,7 @@ type Reconciler struct {
 	driver       Driver
 	phase        Phase
 	configDigest [sha256.Size]byte
+	appliedHash  string
 	updatedAt    time.Time
 	started      bool
 	stopped      bool
@@ -99,6 +109,13 @@ func (r *Reconciler) Start(ctx context.Context) error {
 // blocked before mutation, firewall rules are installed before routes, and
 // forwarding is enabled only after every stage succeeds.
 func (r *Reconciler) Apply(ctx context.Context, desired config.Config) error {
+	return r.ApplyWithHash(ctx, desired, "")
+}
+
+// ApplyWithHash applies a complete desired state and records the authoritative
+// content hash supplied by the configuration source. An empty hash is
+// replaced with the locally calculated dataplane digest.
+func (r *Reconciler) ApplyWithHash(ctx context.Context, desired config.Config, contentHash string) error {
 	if ctx == nil {
 		return errors.New("context is required")
 	}
@@ -115,8 +132,13 @@ func (r *Reconciler) Apply(ctx context.Context, desired config.Config) error {
 	if err != nil {
 		return fmt.Errorf("fingerprint gateway config: %w", err)
 	}
+	if contentHash == "" {
+		contentHash = hex.EncodeToString(digest[:])
+	}
+	if len(contentHash) > 128 || strings.ContainsAny(contentHash, "\r\n\x00") {
+		return errors.New("configuration content hash is invalid")
+	}
 	slog.Debug("applying gateway configuration",
-		"gateway_id", desired.GatewayID,
 		"interface", desired.Tunnel.Interface,
 		"listen_port", desired.Tunnel.ListenPort,
 		"peer_count", len(desired.Tunnel.Peers),
@@ -132,6 +154,7 @@ func (r *Reconciler) Apply(ctx context.Context, desired config.Config) error {
 		return ErrAgentStopped
 	}
 	if digest == r.configDigest && r.phase == PhaseReady {
+		r.appliedHash = contentHash
 		return nil
 	}
 
@@ -142,6 +165,9 @@ func (r *Reconciler) Apply(ctx context.Context, desired config.Config) error {
 		{name: "block forwarding", fn: func() error { return r.driver.BlockForwarding(ctx) }},
 		{name: "apply tunnel", fn: func() error { return r.driver.ApplyTunnel(ctx, desired.Tunnel) }},
 		{name: "apply firewall", fn: func() error { return r.driver.ApplyFirewall(ctx, append([]config.ACLRule(nil), desired.Rules...)) }},
+		{name: "apply Peer routes", fn: func() error {
+			return r.driver.ApplyPeerRoutes(ctx, append([]config.Peer(nil), desired.Tunnel.Peers...))
+		}},
 		{name: "apply routes", fn: func() error { return r.driver.ApplyRoutes(ctx, append([]string(nil), desired.Routes...)) }},
 		{name: "apply NAT", fn: func() error { return r.driver.ApplyNAT(ctx, append([]config.NATMapping(nil), desired.NAT...)) }},
 		{name: "enable forwarding", fn: func() error { return r.driver.EnableForwarding(ctx) }},
@@ -157,10 +183,11 @@ func (r *Reconciler) Apply(ctx context.Context, desired config.Config) error {
 		slog.Debug("gateway configuration stage completed", "stage", stage.name, "duration", time.Since(startedAt))
 	}
 	r.configDigest = digest
+	r.appliedHash = contentHash
 	r.phase = PhaseReady
 	r.started = true
 	r.updatedAt = time.Now().UTC()
-	slog.Info("gateway configuration applied", "gateway_id", desired.GatewayID, "phase", r.phase)
+	slog.Info("gateway configuration applied", "interface", desired.Tunnel.Interface, "phase", r.phase)
 	return nil
 }
 
@@ -179,6 +206,21 @@ func (r *Reconciler) RejectConfiguration(ctx context.Context, cause error) error
 		return ErrAgentStopped
 	}
 	return r.failClosedLocked(ctx, fmt.Errorf("reject gateway configuration: %w", cause))
+}
+
+// BlockAndClose removes the active dataplane and clears its applied hash while
+// reporting only cleanup failures. It is used when the control plane revokes
+// authorization or changes the configuration source.
+func (r *Reconciler) BlockAndClose(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("context is required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stopped {
+		return ErrAgentStopped
+	}
+	return r.failClosedLocked(ctx, nil)
 }
 
 // Stop blocks forwarded traffic and closes the active dataplane. It can be
@@ -206,9 +248,10 @@ func (r *Reconciler) Status() Snapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return Snapshot{
-		Phase:     r.phase,
-		UpdatedAt: r.updatedAt,
-		Degraded:  r.phase == PhaseDegraded,
+		Phase:             r.phase,
+		UpdatedAt:         r.updatedAt,
+		Degraded:          r.phase == PhaseDegraded,
+		AppliedConfigHash: r.appliedHash,
 	}
 }
 
@@ -219,12 +262,30 @@ func (r *Reconciler) failClosedLocked(ctx context.Context, cause error) error {
 	closeErr := r.driver.Close(cleanupCtx)
 	combined := errors.Join(cause, wrapErr("block forwarding", blockErr), wrapErr("close dataplane", closeErr))
 	r.phase = PhaseDegraded
+	r.appliedHash = ""
 	r.updatedAt = time.Now().UTC()
 	return combined
 }
 
+// digestConfig hashes only dataplane state. HUB endpoint and node identity
+// changes must reconnect the control stream without interrupting forwarding.
 func digestConfig(cfg config.Config) ([sha256.Size]byte, error) {
-	data, err := json.Marshal(cfg)
+	state := struct {
+		SchemaVersion     uint32              `json:"schema_version"`
+		AllowDefaultRoute bool                `json:"allow_default_route,omitempty"`
+		Tunnel            config.Tunnel       `json:"tunnel"`
+		Routes            []string            `json:"routes,omitempty"`
+		NAT               []config.NATMapping `json:"nat,omitempty"`
+		Rules             []config.ACLRule    `json:"rules,omitempty"`
+	}{
+		SchemaVersion:     cfg.SchemaVersion,
+		AllowDefaultRoute: cfg.AllowDefaultRoute,
+		Tunnel:            cfg.Tunnel,
+		Routes:            cfg.Routes,
+		NAT:               cfg.NAT,
+		Rules:             cfg.Rules,
+	}
+	data, err := json.Marshal(state)
 	if err != nil {
 		return [sha256.Size]byte{}, err
 	}

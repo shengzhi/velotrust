@@ -134,7 +134,7 @@ export const Sites: React.FC = () => {
     setSiteForm({
       name: '',
       localSubnet: '192.168.100.0/24',
-      gatewayNodeId: gatewayNodes.length ? String(gatewayNodes[0].id) : '',
+      gatewayNodeId: '',
       status: 'active',
       natEnabled: false,
       virtualCidr: '172.31.100.0/24',
@@ -150,7 +150,7 @@ export const Sites: React.FC = () => {
     setSiteForm({
       name: s.name,
       localSubnet: s.localSubnet,
-      gatewayNodeId: s.gatewayNodeId,
+      gatewayNodeId: s.gatewayNodeId || '',
       status: s.status,
       natEnabled: !!s.natMapping?.enabled,
       virtualCidr: s.natMapping?.virtualCidr || '172.31.10.0/24',
@@ -221,6 +221,10 @@ export const Sites: React.FC = () => {
     if (siteForm.natEnabled && siteForm.status !== 'active') {
       errs.natEnabled = '只有启用状态的站点才能启用 NAT';
     }
+    const gatewayNodeId = siteForm.gatewayNodeId === '' ? null : Number(siteForm.gatewayNodeId);
+    if (gatewayNodeId !== null && (!Number.isSafeInteger(gatewayNodeId) || gatewayNodeId <= 0)) {
+      errs.gatewayNodeId = '请选择有效的 Gateway 节点';
+    }
     setFormErrors(errs);
     return Object.keys(errs).length === 0;
   };
@@ -231,24 +235,23 @@ export const Sites: React.FC = () => {
     setSaving(true);
     try {
       const payload = {
-        name: siteForm.name,
-        local_subnet: siteForm.localSubnet,
-        gateway_node_id: siteForm.gatewayNodeId ? Number(siteForm.gatewayNodeId) : null,
+        name: editingSite?.name ?? siteForm.name,
+        local_subnet: editingSite?.localSubnet ?? siteForm.localSubnet,
+        gateway_node_id: siteForm.gatewayNodeId === '' ? null : Number(siteForm.gatewayNodeId),
         status: siteForm.status === 'active' ? 'active' as const : 'disabled' as const,
         id: editingSite ? Number(editingSite.id) : undefined,
         expected_version: editingSite?.versionNo,
       };
 
       const savedSite = await siteApi.saveSite(payload);
-      const existingNat = editingSite?.natMapping;
       setIsModalOpen(false);
       await loadData();
-      if (siteForm.status === 'active' && (siteForm.natEnabled || existingNat)) {
+      if (!editingSite && siteForm.status === 'active' && siteForm.natEnabled) {
         if (!savedSite.networkId) throw new Error('站点网络记录缺失');
         try {
           await siteApi.saveNATMapping({
-            id: existingNat?.id ?? 0,
-            expected_version: existingNat?.version_no ?? 0,
+            id: 0,
+            expected_version: 0,
             network_id: savedSite.networkId,
             nat_type: siteForm.natType,
             virtual_cidr: siteForm.virtualCidr || undefined,
@@ -898,23 +901,36 @@ export const Sites: React.FC = () => {
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
         title={editingSite ? '修改网络站点' : '新建网络站点'}
-        description="配置本地网络范围及其 WireGuard 汇聚网关"
+        description={editingSite ? '编辑 Gateway 关联与站点状态；站点名称和网段创建后固定。' : '配置本地网络范围及其 WireGuard 汇聚网关'}
         maxWidth="md"
       >
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-xs font-medium text-slate-700 mb-1">
-              站点名称 <span className="text-rose-500">*</span>
-            </label>
-            <Input
-              value={siteForm.name}
-              onChange={(e) => setSiteForm({ ...siteForm, name: e.target.value })}
-              placeholder="例如: 杭州研发园区"
-              error={formErrors.name}
-            />
-          </div>
+          {editingSite ? (
+            <div className="grid grid-cols-2 gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+              <div>
+                <div className="text-xs text-slate-500">站点名称</div>
+                <div className="mt-1 text-sm font-medium text-slate-800">{editingSite.name}</div>
+              </div>
+              <div>
+                <div className="text-xs text-slate-500">本地子网段</div>
+                <div className="mt-1 font-mono text-sm text-slate-800">{editingSite.localSubnet}</div>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  站点名称 <span className="text-rose-500">*</span>
+                </label>
+                <Input
+                  value={siteForm.name}
+                  onChange={(e) => setSiteForm({ ...siteForm, name: e.target.value })}
+                  placeholder="例如: 杭州研发园区"
+                  error={formErrors.name}
+                />
+              </div>
 
-          <div>
+              <div>
               <label className="block text-xs font-medium text-slate-700 mb-1">
                 本地子网段 (CIDR) <span className="text-rose-500">*</span>
               </label>
@@ -924,7 +940,9 @@ export const Sites: React.FC = () => {
                 placeholder="例如: 192.168.40.0/24"
                 error={formErrors.localSubnet}
               />
-          </div>
+              </div>
+            </>
+          )}
 
           <div>
             <label className="block text-xs font-medium text-slate-700 mb-1">
@@ -937,14 +955,15 @@ export const Sites: React.FC = () => {
               <option value="">不指定网关（可稍后配置）</option>
               {gatewayNodes.map((gw) => (
                 <option key={gw.id} value={String(gw.id)}>
-                  {gw.gateway_name} ({gw.gateway_id}) • {gw.status}
+                  {gw.gateway_name} • {gw.status}
                 </option>
               ))}
             </Select>
+            {formErrors.gatewayNodeId && <p className="mt-1 text-xs text-rose-500">{formErrors.gatewayNodeId}</p>}
           </div>
 
-          {/* Inline NAT Option */}
-          <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 space-y-2">
+          {/* Inline NAT setup is available only while creating a site. */}
+          {!editingSite && <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-xs font-semibold text-slate-800 flex items-center gap-1.5">
                 <ArrowLeftRight className="w-3.5 h-3.5 text-indigo-600" />
@@ -989,7 +1008,7 @@ export const Sites: React.FC = () => {
                 </div>
               </div>
             )}
-          </div>
+          </div>}
 
           <div>
             <label className="block text-xs font-medium text-slate-700 mb-1">站点运行状态</label>
@@ -1022,7 +1041,7 @@ export const Sites: React.FC = () => {
         onClose={() => setSiteToDelete(null)}
         onConfirm={handleDeleteConfirm}
         title="确认删除站点"
-        description={`确定要删除站点 "${siteToDelete?.name}" (${siteToDelete?.localSubnet}) 吗？相关路由表条目与 NAT 映射将被同步清除。`}
+        description={`确定要删除站点 "${siteToDelete?.name}" (${siteToDelete?.localSubnet}) 吗？该站点将从关联 Gateway 配置中移除，NAT 映射也会停用。`}
         danger={true}
         isLoading={deleting}
       />

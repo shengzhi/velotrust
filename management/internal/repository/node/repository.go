@@ -219,7 +219,57 @@ func (r *Repository) SetNodeStatus(ctx *servicecontext.Context, actorID, nodeID 
 			}
 			return fmt.Errorf("save virtual-node status: %w", err)
 		}
-		if err := saveAudit(ctx, tx, actorID, &current, before, status, revokedCredentialCount); err != nil {
+		if err := saveAudit(ctx, tx, actorID, &current, "ztna.node.status", map[string]any{
+			"node_status_from":                         before,
+			"node_status_to":                           status,
+			"pending_registration_credentials_revoked": revokedCredentialCount,
+		}); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
+func (r *Repository) SetNodePublicEndpoint(ctx *servicecontext.Context, actorID, nodeID int64, endpoint string, expectedVersion int64) error {
+	if ctx == nil || actorID <= 0 || nodeID <= 0 || expectedVersion <= 0 {
+		return errors.New("authenticated operator, node ID, and expected version are required")
+	}
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		s := tx.Session
+		if err := requirePermission(s, actorID, "ztna.node.write"); err != nil {
+			return err
+		}
+		var current model.Node
+		found, err := s.SQL("SELECT * FROM "+model.TableNode+" WHERE id=? FOR UPDATE", nodeID).Get(&current)
+		if err != nil {
+			return fmt.Errorf("lock virtual node for public endpoint update: %w", err)
+		}
+		if !found {
+			return appErrors.NewResourceError("ZTNA_NODE_NOT_FOUND", "virtual node", true)
+		}
+		if current.VersionNo != expectedVersion {
+			return appErrors.NewResourceError("ZTNA_NODE_VERSION_CONFLICT", "virtual node", false)
+		}
+		before := ""
+		if current.PublicEndpoint != nil {
+			before = *current.PublicEndpoint
+		}
+		if before == endpoint {
+			return nil
+		}
+		current.PublicEndpoint = optionalString(endpoint)
+		current.Update(ctx.UserName())
+		current.Cols("public_endpoint")
+		if _, err := tx.Save(&current); err != nil {
+			if errors.Is(err, database.ErrVersionConflict) {
+				return appErrors.NewResourceError("ZTNA_NODE_VERSION_CONFLICT", "virtual node", false)
+			}
+			return fmt.Errorf("save virtual-node public endpoint: %w", err)
+		}
+		if err := saveAudit(ctx, tx, actorID, &current, "ztna.node.public_endpoint", map[string]any{
+			"public_endpoint_from": optionalString(before),
+			"public_endpoint_to":   optionalString(endpoint),
+		}); err != nil {
 			return err
 		}
 		return nil
@@ -292,12 +342,8 @@ func requirePermission(s *xorm.Session, actorID int64, permissionCode string) er
 	return nil
 }
 
-func saveAudit(ctx *servicecontext.Context, tx *database.DBTransaction, actorID int64, node *model.Node, before, after string, revokedCredentials int) error {
-	changes, err := json.Marshal(map[string]any{
-		"node_status_from":                         before,
-		"node_status_to":                           after,
-		"pending_registration_credentials_revoked": revokedCredentials,
-	})
+func saveAudit(ctx *servicecontext.Context, tx *database.DBTransaction, actorID int64, node *model.Node, action string, changeDetails map[string]any) error {
+	changes, err := json.Marshal(changeDetails)
 	if err != nil {
 		return fmt.Errorf("encode virtual-node audit details: %w", err)
 	}
@@ -312,13 +358,13 @@ func saveAudit(ctx *servicecontext.Context, tx *database.DBTransaction, actorID 
 	targetID, targetName := fmt.Sprintf("%d", node.ID), node.NodeName
 	audit := &iamModel.AuditLog{
 		EventID: hex.EncodeToString(eventID[:]), UserID: &actorID, UserName: userName,
-		Action: "ztna.node.status", TargetType: "ztna_node", TargetID: &targetID,
+		Action: action, TargetType: "ztna_node", TargetID: &targetID,
 		TargetName: &targetName, Result: "success", SourceIP: optionalString(ctx.ClientIP()),
 		RequestID: optionalString(ctx.RequestID()), ChangesJSON: changes, OccurredAt: time.Now().UTC(),
 	}
 	audit.CreateNew(userName)
 	if _, err := tx.Save(audit); err != nil {
-		return fmt.Errorf("write virtual-node status audit: %w", err)
+		return fmt.Errorf("write virtual-node audit for %s: %w", action, err)
 	}
 	return nil
 }

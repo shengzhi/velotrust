@@ -290,7 +290,7 @@ func (r *Repository) SetPoolStatus(ctx *servicecontext.Context, actorID, poolID 
 }
 
 func (r *Repository) ListLeases(ctx *servicecontext.Context) ([]model.Lease, error) {
-	query := "SELECT l.id, l.pool_id, l.address::text AS address, l.node_type, l.target_name, COALESCE(l.endpoint,'') AS endpoint, l.allocation_mode, l.idp_group, COALESCE(l.wireguard_pubkey,'') AS wireguard_pubkey, CASE l.status WHEN 'active' THEN 'Active' WHEN 'reserved' THEN 'Reserved' ELSE 'Released' END AS status, p.pool_name, l.allocated_at, l.released_at FROM t_ztna_address_lease l JOIN t_ztna_address_pool p ON p.id=l.pool_id ORDER BY l.allocated_at DESC, l.id DESC LIMIT 5000"
+	query := "SELECT l.id, l.pool_id, host(l.address) AS address, l.node_type, l.target_name, COALESCE(l.endpoint,'') AS endpoint, l.allocation_mode, l.idp_group, COALESCE(l.wireguard_pubkey,'') AS wireguard_pubkey, CASE l.status WHEN 'active' THEN 'Active' WHEN 'reserved' THEN 'Reserved' ELSE 'Released' END AS status, p.pool_name, l.allocated_at, l.released_at FROM t_ztna_address_lease l JOIN t_ztna_address_pool p ON p.id=l.pool_id ORDER BY l.allocated_at DESC, l.id DESC LIMIT 5000"
 	s := r.db.Engine().NewSession().Context(ctx)
 	defer s.Close()
 	type leaseRow struct {
@@ -361,7 +361,7 @@ func (r *Repository) AllocateAddress(ctx *servicecontext.Context, actorID int64,
 		var usedRows []struct {
 			Address string `xorm:"'address'"`
 		}
-		if err := s.SQL("SELECT address::text AS address FROM t_ztna_address_lease WHERE pool_id=? AND status IN ('active','reserved')", lease.PoolID).Find(&usedRows); err != nil {
+		if err := s.SQL("SELECT host(address) AS address FROM t_ztna_address_lease WHERE pool_id=? AND status IN ('active','reserved')", lease.PoolID).Find(&usedRows); err != nil {
 			return fmt.Errorf("load occupied addresses: %w", err)
 		}
 		used := make(map[netip.Addr]struct{}, len(usedRows))
@@ -426,7 +426,7 @@ func (r *Repository) ReleaseLease(ctx *servicecontext.Context, actorID, leaseID 
 			return err
 		}
 		var lease model.Lease
-		found, err := s.SQL("SELECT id, pool_id, address::text AS address, node_type, target_name, COALESCE(endpoint,'') AS endpoint, allocation_mode, idp_group, wireguard_pubkey, status, allocated_at, released_at, created_at, updated_at, version_no, created_by, updated_by FROM t_ztna_address_lease WHERE id=? FOR UPDATE", leaseID).Get(&lease)
+		found, err := s.SQL("SELECT id, pool_id, host(address) AS address, node_type, target_name, COALESCE(endpoint,'') AS endpoint, allocation_mode, idp_group, wireguard_pubkey, status, allocated_at, released_at, created_at, updated_at, version_no, created_by, updated_by FROM t_ztna_address_lease WHERE id=? FOR UPDATE", leaseID).Get(&lease)
 		if err != nil {
 			return fmt.Errorf("lock IP address lease for release: %w", err)
 		}

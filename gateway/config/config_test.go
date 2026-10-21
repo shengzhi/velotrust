@@ -14,7 +14,6 @@ import (
 func validConfig() Config {
 	return Config{
 		SchemaVersion: 1,
-		GatewayID:     "gw-west-1",
 		Tunnel: Tunnel{
 			Interface:  "vtrust0",
 			Address:    "10.100.0.1/24",
@@ -109,7 +108,7 @@ func TestDecodeIsStrictAndSingleDocument(t *testing.T) {
 	if _, err := Decode(bytes.NewReader(unknownField)); err == nil {
 		t.Fatal("Decode() accepted an unknown field")
 	}
-	duplicateField := bytes.Replace(data, []byte(`"gateway_id":"gw-west-1"`), []byte(`"gateway_id":"gw-west-1","gateway_id":"gw-west-2"`), 1)
+	duplicateField := bytes.Replace(data, []byte(`"schema_version":1`), []byte(`"schema_version":1,"schema_version":1`), 1)
 	if _, err := Decode(bytes.NewReader(duplicateField)); err == nil {
 		t.Fatal("Decode() accepted a duplicate field")
 	}

@@ -62,4 +62,10 @@ export const virtualNodeApi = {
       node_status: nodeStatus,
       expected_version: node.version_no,
     }),
+  setPublicEndpoint: (node: VirtualNode, publicEndpoint: string) =>
+    jrpcCall<{ success: boolean }>('NODE_SetNodePublicEndpoint', {
+      id: node.id,
+      public_endpoint: publicEndpoint,
+      expected_version: node.version_no,
+    }),
 };

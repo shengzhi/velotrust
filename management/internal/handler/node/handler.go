@@ -14,9 +14,10 @@ import (
 type Handler struct{ service *appNode.Service }
 
 var methodPolicies = map[string]middleware.IAMMethodPolicy{
-	"ListNodes":     {Authenticated: true, Permission: "ztna.node.read"},
-	"GetNode":       {Authenticated: true, Permission: "ztna.node.read"},
-	"SetNodeStatus": {Authenticated: true, Permission: "ztna.node.write"},
+	"ListNodes":             {Authenticated: true, Permission: "ztna.node.read"},
+	"GetNode":               {Authenticated: true, Permission: "ztna.node.read"},
+	"SetNodeStatus":         {Authenticated: true, Permission: "ztna.node.write"},
+	"SetNodePublicEndpoint": {Authenticated: true, Permission: "ztna.node.write"},
 }
 
 func Register(server *jrpc.Server, service *appNode.Service, checker middleware.PermissionChecker) error {
@@ -90,6 +91,22 @@ func (h *Handler) SetNodeStatus(ctx *jrpc.Context, args *SetNodeStatusArgs) (*Mu
 		return nil, errors.New("virtual-node status arguments are required")
 	}
 	if err := h.service.SetNodeStatus(middleware.ServiceContext(ctx), args.ID, args.NodeStatus, args.ExpectedVersion); err != nil {
+		return nil, err
+	}
+	return &MutationReply{Success: true}, nil
+}
+
+type SetNodePublicEndpointArgs struct {
+	ID              int64  `json:"id" validate:"required,gt=0"`
+	PublicEndpoint  string `json:"public_endpoint" validate:"omitempty,max=255"`
+	ExpectedVersion int64  `json:"expected_version" validate:"required,gt=0"`
+}
+
+func (h *Handler) SetNodePublicEndpoint(ctx *jrpc.Context, args *SetNodePublicEndpointArgs) (*MutationReply, error) {
+	if args == nil {
+		return nil, errors.New("virtual-node public endpoint arguments are required")
+	}
+	if err := h.service.SetNodePublicEndpoint(middleware.ServiceContext(ctx), args.ID, args.PublicEndpoint, args.ExpectedVersion); err != nil {
 		return nil, err
 	}
 	return &MutationReply{Success: true}, nil

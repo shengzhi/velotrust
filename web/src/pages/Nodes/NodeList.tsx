@@ -42,6 +42,13 @@ const healthLabels: Record<VirtualNode['health_status'], string> = {
   unhealthy: '异常',
 };
 
+function isGatewayApprovalPending(node: VirtualNode): boolean {
+  return node.node_type === 'gateway'
+    && node.node_status === 'pending'
+    && node.require_approval
+    && Boolean(node.public_key && node.registered_at);
+}
+
 export const NodeList: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -52,6 +59,7 @@ export const NodeList: React.FC = () => {
   const [search, setSearch] = useState(searchParams.get('q') ?? '');
   const [typeFilter, setTypeFilter] = useState(searchParams.get('type') ?? 'all');
   const [statusFilter, setStatusFilter] = useState(searchParams.get('status') ?? 'all');
+  const approvalOnly = searchParams.get('approval') === 'pending';
 
   const loadNodes = async (refresh = false) => {
     if (refresh) setRefreshing(true);
@@ -74,8 +82,9 @@ export const NodeList: React.FC = () => {
     if (search) params.q = search;
     if (typeFilter !== 'all') params.type = typeFilter;
     if (statusFilter !== 'all') params.status = statusFilter;
+    if (approvalOnly) params.approval = 'pending';
     setSearchParams(params, { replace: true });
-  }, [search, typeFilter, statusFilter, setSearchParams]);
+  }, [search, typeFilter, statusFilter, approvalOnly, setSearchParams]);
 
   const filteredNodes = useMemo(() => {
     const normalizedSearch = search.trim().toLowerCase();
@@ -89,11 +98,14 @@ export const NodeList: React.FC = () => {
       ].some((value) => value.toLowerCase().includes(normalizedSearch));
       return matchesSearch
         && (typeFilter === 'all' || node.node_type === typeFilter)
-        && (statusFilter === 'all' || node.node_status === statusFilter);
+        && (statusFilter === 'all' || node.node_status === statusFilter)
+        && (!approvalOnly || isGatewayApprovalPending(node));
     });
-  }, [nodes, search, typeFilter, statusFilter]);
+  }, [nodes, search, typeFilter, statusFilter, approvalOnly]);
 
+  const approvalCount = useMemo(() => nodes.filter(isGatewayApprovalPending).length, [nodes]);
   const countByStatus = useMemo(() => nodes.reduce<Record<string, number>>((counts, node) => {
+    if (node.node_status === 'pending' && isGatewayApprovalPending(node)) return counts;
     counts[node.node_status] = (counts[node.node_status] ?? 0) + 1;
     return counts;
   }, {}), [nodes]);
@@ -118,6 +130,32 @@ export const NodeList: React.FC = () => {
           </Button>
         </div>
       </div>
+
+      <Card className={`flex flex-col gap-3 border p-4 sm:flex-row sm:items-center sm:justify-between ${approvalCount > 0 ? 'border-amber-200 bg-amber-50' : 'border-slate-200 bg-white'}`}>
+        <div>
+          <div className={`text-sm font-semibold ${approvalCount > 0 ? 'text-amber-900' : 'text-slate-800'}`}>网关注册审批</div>
+          <p className={`mt-1 text-xs ${approvalCount > 0 ? 'text-amber-800' : 'text-slate-500'}`}>
+            {approvalCount > 0 ? `有 ${approvalCount} 个网关已提交注册，正在等待审批。` : '需要审批的网关完成注册后会显示在这里。'}
+          </p>
+        </div>
+        <Button
+          variant={approvalCount > 0 ? 'primary' : 'outline'}
+          size="sm"
+          className="shrink-0"
+          onClick={() => {
+            setTypeFilter(approvalOnly ? 'all' : 'gateway');
+            setStatusFilter('all');
+            setSearchParams((previous) => {
+              const next = new URLSearchParams(previous);
+              if (approvalOnly) next.delete('approval');
+              else next.set('approval', 'pending');
+              return next;
+            });
+          }}
+        >
+          {approvalOnly ? '查看全部节点' : `查看待审批网关（${approvalCount}）`}
+        </Button>
+      </Card>
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
         {(['pending', 'active', 'disabled', 'quarantined', 'revoked'] as VirtualNodeStatus[]).map((status) => (
@@ -174,7 +212,16 @@ export const NodeList: React.FC = () => {
                     title={nodes.length === 0 ? '尚无虚拟节点' : '没有匹配的虚拟节点'}
                     description={nodes.length === 0 ? '网关身份通过注册凭证预建；其他节点需由对应注册流程写入节点目录。' : '调整搜索条件或清除筛选后重试。'}
                     actionText="清除筛选"
-                    onAction={() => { setSearch(''); setTypeFilter('all'); setStatusFilter('all'); }}
+                    onAction={() => {
+                      setSearch('');
+                      setTypeFilter('all');
+                      setStatusFilter('all');
+                      setSearchParams((previous) => {
+                        const next = new URLSearchParams(previous);
+                        next.delete('approval');
+                        return next;
+                      });
+                    }}
                   />
                 </TableCell>
               </TableRow>
@@ -193,7 +240,7 @@ export const NodeList: React.FC = () => {
                     </div>
                   )}
                 </TableCell>
-                <TableCell><StatusBadge status={node.node_status} label={statusLabels[node.node_status]} /></TableCell>
+                <TableCell><StatusBadge status={node.node_status} label={isGatewayApprovalPending(node) ? '待审批' : statusLabels[node.node_status]} /></TableCell>
                 <TableCell>
                   <span className={`inline-flex items-center gap-1.5 text-xs ${node.health_status === 'healthy' ? 'text-emerald-700' : node.health_status === 'degraded' ? 'text-amber-700' : node.health_status === 'unhealthy' ? 'text-rose-700' : 'text-slate-500'}`}>
                     <Activity className="h-3.5 w-3.5" />{healthLabels[node.health_status]}

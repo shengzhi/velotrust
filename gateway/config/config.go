@@ -32,12 +32,48 @@ var (
 // An empty rule list intentionally means deny all forwarded traffic.
 type Config struct {
 	SchemaVersion     uint32       `json:"schema_version"`
-	GatewayID         string       `json:"gateway_id"`
+	Hub               *HubConfig   `json:"hub,omitempty"`
 	AllowDefaultRoute bool         `json:"allow_default_route,omitempty"`
 	Tunnel            Tunnel       `json:"tunnel"`
-	Routes            []string     `json:"routes,omitempty"`
+	Routes            []string     `json:"routes,omitempty"` // Destinations forwarded by this Gateway to its locally routed networks.
 	NAT               []NATMapping `json:"nat,omitempty"`
 	Rules             []ACLRule    `json:"rules,omitempty"`
+}
+
+// HubConfig enables the authenticated Gateway control stream when present.
+// TLS is enabled by default; setting TLS to false explicitly selects plaintext
+// gRPC and disables transport encryption and HUB certificate verification.
+type HubConfig struct {
+	Endpoint          string `json:"endpoint"`
+	ServerName        string `json:"server_name,omitempty"`
+	CAFile            string `json:"ca_file,omitempty"`
+	TLS               *bool  `json:"tls,omitempty"`
+	RegistrationToken string `json:"registration_token,omitempty"`
+}
+
+// TLSEnabled defaults to true so existing and newly written configs remain
+// secure unless plaintext transport is explicitly requested.
+func (c HubConfig) TLSEnabled() bool {
+	return c.TLS == nil || *c.TLS
+}
+
+func (c *HubConfig) UnmarshalJSON(data []byte) error {
+	type hubConfigAlias HubConfig
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var decoded hubConfigAlias
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("HUB config contains multiple JSON values")
+		}
+		return err
+	}
+	*c = HubConfig(decoded)
+	return nil
 }
 
 // UnmarshalJSON accepts the former generation field for schema-version-1
@@ -54,6 +90,11 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 		}
 		delete(fields, "generation")
 	}
+	// Older configs identified the Gateway by a locally supplied business ID.
+	// HUB now resolves that identity from the registered public key or the
+	// one-time registration token, so retain read compatibility without keeping
+	// the value in the active configuration model.
+	delete(fields, "gateway_id")
 
 	dataWithoutLegacyField, err := json.Marshal(fields)
 	if err != nil {
@@ -114,8 +155,9 @@ type NATMapping struct {
 }
 
 const (
-	NATTypeDNAT = "dnat"
-	NATTypeSNAT = "snat"
+	NATTypeDNAT       = "dnat"
+	NATTypeSNAT       = "snat"
+	NATTypeMasquerade = "masquerade"
 )
 
 type ACLRule struct {
@@ -132,6 +174,73 @@ type ACLRule struct {
 // Decode reads one strict JSON config document and validates its contents.
 func Decode(r io.Reader) (Config, error) {
 	return decode(r, false)
+}
+
+// DecodeHubSnapshot validates a HUB-owned data-plane snapshot and combines it
+// with secrets and transport settings that must remain local to the Gateway.
+// The snapshot is not allowed to select a HUB endpoint or supply private keys.
+func DecodeHubSnapshot(local Config, payload []byte) (Config, error) {
+	if len(payload) == 0 || len(payload) > maxConfigBytes {
+		return Config{}, fmt.Errorf("HUB configuration payload must be between 1 and %d bytes", maxConfigBytes)
+	}
+	if err := rejectDuplicateFields(payload); err != nil {
+		return Config{}, fmt.Errorf("decode HUB configuration: %w", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return Config{}, fmt.Errorf("decode HUB configuration fields: %w", err)
+	}
+	if hasJSONField(fields, "hub") {
+		return Config{}, errors.New("HUB snapshot must not contain local HUB transport settings")
+	}
+	var tunnelFields map[string]json.RawMessage
+	if rawTunnel, exists := fields["tunnel"]; !exists || json.Unmarshal(rawTunnel, &tunnelFields) != nil {
+		return Config{}, errors.New("HUB snapshot must contain a valid tunnel object")
+	}
+	if hasJSONField(tunnelFields, "private_key") {
+		return Config{}, errors.New("HUB snapshot must not contain a WireGuard private key")
+	}
+	if hasJSONField(tunnelFields, "private_key_file") {
+		return Config{}, errors.New("HUB snapshot must not contain a private-key file reference")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	var desired Config
+	if err := decoder.Decode(&desired); err != nil {
+		return Config{}, fmt.Errorf("decode HUB data-plane configuration: %w", err)
+	}
+	if desired.Tunnel.Interface != "" && desired.Tunnel.Interface != local.Tunnel.Interface {
+		return Config{}, fmt.Errorf("HUB tunnel interface %q does not match the local interface %q", desired.Tunnel.Interface, local.Tunnel.Interface)
+	}
+	if desired.Tunnel.Address == "" {
+		return Config{}, errors.New("HUB snapshot must include tunnel.address")
+	}
+	// Interface names, listen ports, and private keys identify local operating
+	// system resources and remain controlled by the Gateway host. Older
+	// snapshots may still include the interface and listen_port fields; an
+	// interface must agree with the local value, while the local listen port is
+	// always authoritative.
+	desired.Tunnel.Interface = local.Tunnel.Interface
+	desired.Tunnel.ListenPort = local.Tunnel.ListenPort
+	if desired.Tunnel.MTU == 0 {
+		desired.Tunnel.MTU = local.Tunnel.MTU
+	}
+	desired.Hub = local.Hub
+	desired.Tunnel.PrivateKey = local.Tunnel.PrivateKey
+	desired.Tunnel.PrivateKeyFile = ""
+	if err := desired.Validate(); err != nil {
+		return Config{}, fmt.Errorf("validate HUB data-plane configuration: %w", err)
+	}
+	return desired.Canonical(), nil
+}
+
+func hasJSONField(fields map[string]json.RawMessage, name string) bool {
+	for field := range fields {
+		if strings.EqualFold(field, name) {
+			return true
+		}
+	}
+	return false
 }
 
 func decode(r io.Reader, allowPrivateKeyFile bool) (Config, error) {
@@ -256,6 +365,10 @@ func scanJSONValue(decoder *json.Decoder) error {
 // Canonical returns an independent copy with network fields normalized for
 // stable reconciliation and idempotency checks.
 func (c Config) Canonical() Config {
+	if c.Hub != nil {
+		hubConfigCopy := *c.Hub
+		c.Hub = &hubConfigCopy
+	}
 	c.Tunnel.MTU = c.Tunnel.EffectiveMTU()
 	c.Tunnel.Peers = append([]Peer(nil), c.Tunnel.Peers...)
 	for i := range c.Tunnel.Peers {
@@ -273,6 +386,9 @@ func (c Config) Canonical() Config {
 			c.NAT[i].ShadowPrefix = canonicalPrefix(c.NAT[i].ShadowPrefix)
 			c.NAT[i].RealPrefix = canonicalPrefix(c.NAT[i].RealPrefix)
 		case NATTypeSNAT:
+			c.NAT[i].SourcePrefix = canonicalPrefix(c.NAT[i].SourcePrefix)
+			c.NAT[i].DestinationPrefix = canonicalPrefix(c.NAT[i].DestinationPrefix)
+		case NATTypeMasquerade:
 			c.NAT[i].SourcePrefix = canonicalPrefix(c.NAT[i].SourcePrefix)
 			c.NAT[i].DestinationPrefix = canonicalPrefix(c.NAT[i].DestinationPrefix)
 		}
@@ -375,6 +491,9 @@ func LoadFileWithDigest(path string) (Config, [sha256.Size]byte, error) {
 		_, _ = hash.Write(keyData)
 		copy(digest[:], hash.Sum(nil))
 	}
+	if cfg.Hub != nil && cfg.Hub.CAFile != "" && !filepath.IsAbs(cfg.Hub.CAFile) {
+		cfg.Hub.CAFile = filepath.Join(filepath.Dir(path), cfg.Hub.CAFile)
+	}
 	return cfg.Canonical(), digest, nil
 }
 
@@ -434,8 +553,10 @@ func (c Config) Validate() error {
 	if c.SchemaVersion != 1 {
 		return fmt.Errorf("unsupported schema_version %d", c.SchemaVersion)
 	}
-	if !identifierPattern.MatchString(c.GatewayID) {
-		return errors.New("gateway_id must be 1 to 128 safe ASCII characters")
+	if c.Hub != nil {
+		if err := validateHubConfig(*c.Hub); err != nil {
+			return err
+		}
 	}
 	if !interfacePattern.MatchString(c.Tunnel.Interface) || c.Tunnel.Interface == "." || c.Tunnel.Interface == ".." {
 		return errors.New("tunnel.interface must be a valid Linux interface name")
@@ -443,9 +564,11 @@ func (c Config) Validate() error {
 	if c.Tunnel.MTU != 0 && (c.Tunnel.MTU < 1280 || c.Tunnel.MTU > 9000) {
 		return errors.New("tunnel.mtu must be between 1280 and 9000")
 	}
-	address, err := netip.ParsePrefix(c.Tunnel.Address)
-	if err != nil || !address.IsValid() || address.Bits() == 0 || address.Addr().IsUnspecified() || address.Addr().IsMulticast() || address.Addr().Is4In6() {
-		return errors.New("tunnel.address must be a valid unicast IP prefix")
+	if c.Tunnel.Address != "" || c.Hub == nil {
+		address, err := netip.ParsePrefix(c.Tunnel.Address)
+		if err != nil || !address.IsValid() || address.Bits() == 0 || address.Addr().IsUnspecified() || address.Addr().IsMulticast() || address.Addr().Is4In6() {
+			return errors.New("tunnel.address must be a valid unicast IP prefix")
+		}
 	}
 	if c.Tunnel.ListenPort == 0 {
 		return errors.New("tunnel.listen_port must be between 1 and 65535")
@@ -504,8 +627,11 @@ func (c Config) Validate() error {
 	for i, rawRoute := range c.Routes {
 		route, _ := netip.ParsePrefix(rawRoute)
 		route = route.Masked()
-		if !routeCoveredByPeer(route, peerAllowedPrefixes) {
-			return fmt.Errorf("routes[%d] %s is not covered by any tunnel.peers[].allowed_ips prefix", i, route)
+		for _, peerPrefix := range peerAllowedPrefixes {
+			if route.Addr().Is4() == peerPrefix.Addr().Is4() &&
+				peerPrefix.Bits() >= route.Bits() && route.Contains(peerPrefix.Addr()) {
+				return fmt.Errorf("routes[%d] %s overlaps Peer AllowedIPs %s which would route part of a locally associated network into WireGuard", i, route, peerPrefix)
+			}
 		}
 	}
 	if err := validateNAT(c.NAT, c.Tunnel.Interface); err != nil {
@@ -515,15 +641,6 @@ func (c Config) Validate() error {
 		return err
 	}
 	return nil
-}
-
-func routeCoveredByPeer(route netip.Prefix, peerPrefixes []netip.Prefix) bool {
-	for _, peerPrefix := range peerPrefixes {
-		if peerPrefix.Addr().Is4() == route.Addr().Is4() && peerPrefix.Bits() <= route.Bits() && peerPrefix.Contains(route.Addr()) {
-			return true
-		}
-	}
-	return false
 }
 
 func validateWireGuardKey(value string) error {
@@ -555,6 +672,33 @@ func validateEndpoint(endpoint string) error {
 	port, err := strconv.ParseUint(portText, 10, 16)
 	if err != nil || port == 0 {
 		return errors.New("port must be between 1 and 65535")
+	}
+	return nil
+}
+
+func validateHubConfig(cfg HubConfig) error {
+	if strings.TrimSpace(cfg.Endpoint) == "" {
+		return errors.New("hub.endpoint is required when HUB control is configured")
+	}
+	if err := validateEndpoint(cfg.Endpoint); err != nil {
+		return fmt.Errorf("hub.endpoint %w", err)
+	}
+	if strings.TrimSpace(cfg.ServerName) != cfg.ServerName || strings.ContainsAny(cfg.ServerName, " \t\r\n/\\\x00") {
+		return errors.New("hub.server_name is malformed")
+	}
+	if strings.ContainsAny(cfg.CAFile, "\r\n\x00") {
+		return errors.New("hub.ca_file contains invalid characters")
+	}
+	if cfg.RegistrationToken != "" {
+		if len(cfg.RegistrationToken) > 128 || !strings.HasPrefix(cfg.RegistrationToken, "vtreg_") {
+			return errors.New("hub.registration_token has an invalid format")
+		}
+		secret := make([]byte, 32)
+		decoded, err := base64.RawURLEncoding.Decode(secret, []byte(strings.TrimPrefix(cfg.RegistrationToken, "vtreg_")))
+		clear(secret)
+		if err != nil || decoded != 32 {
+			return errors.New("hub.registration_token has an invalid format")
+		}
 	}
 	return nil
 }
@@ -659,8 +803,23 @@ func validateNAT(mappings []NATMapping, tunnelInterface string) error {
 				}
 			}
 			snatRules = append(snatRules, mapping)
+		case NATTypeMasquerade:
+			if mapping.ShadowPrefix != "" || mapping.RealPrefix != "" || mapping.EgressInterface != "" || mapping.ToAddress != "" {
+				return fmt.Errorf("nat[%d] masquerade mapping contains unsupported address or DNAT fields", i)
+			}
+			source, err := netip.ParsePrefix(mapping.SourcePrefix)
+			if err != nil || !source.IsValid() || source.Addr().Is4In6() || source.Bits() == 0 {
+				return fmt.Errorf("nat[%d].source_prefix is invalid or too broad", i)
+			}
+			destination, err := netip.ParsePrefix(mapping.DestinationPrefix)
+			if err != nil || !destination.IsValid() || destination.Addr().Is4In6() || destination.Bits() == 0 {
+				return fmt.Errorf("nat[%d].destination_prefix is invalid or too broad", i)
+			}
+			if source.Addr().Is4() != destination.Addr().Is4() {
+				return fmt.Errorf("nat[%d] masquerade prefix address families differ", i)
+			}
 		default:
-			return fmt.Errorf("nat[%d].type must be %q or %q", i, NATTypeDNAT, NATTypeSNAT)
+			return fmt.Errorf("nat[%d].type must be %q, %q, or %q", i, NATTypeDNAT, NATTypeSNAT, NATTypeMasquerade)
 		}
 	}
 	return nil

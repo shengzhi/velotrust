@@ -1,16 +1,11 @@
-// Package ztna provides PostgreSQL persistence for the current ZTNA policy
-// and configuration state.
+// Package ztna provides PostgreSQL persistence for current ZTNA policy state.
 package ztna
 
 import (
-	"bytes"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	servicecontext "velotrust/management/internal/context"
 	model "velotrust/management/internal/model/ztna"
@@ -18,9 +13,7 @@ import (
 	"xorm.io/xorm"
 )
 
-// Repository persists the current ZTNA state. Access policies and target
-// configurations are updated in place; this package deliberately has no
-// policy or configuration revision tables.
+// Repository persists the current ZTNA policy state.
 type Repository struct {
 	db *database.Database
 }
@@ -155,116 +148,6 @@ func (r *Repository) ListAccessPolicies(ctx *servicecontext.Context) ([]model.Ac
 		return nil, fmt.Errorf("list current access policies: %w", err)
 	}
 	return policies, nil
-}
-
-// GetCurrentConfig loads the single current configuration row for a target.
-func (r *Repository) GetCurrentConfig(ctx *servicecontext.Context, targetType string, targetID int64) (*model.Config, error) {
-	if ctx == nil {
-		return nil, errors.New("service context is required")
-	}
-	if err := validateConfigTargetKey(targetType, targetID); err != nil {
-		return nil, err
-	}
-	s := r.db.Engine().NewSession().Context(ctx)
-	defer s.Close()
-	var config model.Config
-	found, err := s.Where("target_type=? AND target_id=?", targetType, targetID).Get(&config)
-	if err != nil {
-		return nil, fmt.Errorf("load current target configuration: %w", err)
-	}
-	if !found {
-		return nil, nil
-	}
-	return &config, nil
-}
-
-// SaveCurrentConfig inserts or replaces the one current config row for a
-// target. BaseModel.VersionNo is the persistence concurrency marker; it is not
-// a business config version. Use zero only when initializing a target.
-func (r *Repository) SaveCurrentConfig(ctx *servicecontext.Context, config *model.Config) error {
-	if ctx == nil || strings.TrimSpace(ctx.UserName()) == "" {
-		return errors.New("authenticated service context is required")
-	}
-	if config == nil {
-		return errors.New("target configuration is required")
-	}
-	working := *config
-	if working.VersionNo < 0 {
-		return errors.New("config concurrency version must not be negative")
-	}
-	if err := validateConfig(&working); err != nil {
-		return err
-	}
-
-	err := r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
-		if err := validateConfigTarget(tx.Session, working.TargetType, working.TargetID); err != nil {
-			return err
-		}
-		var current model.Config
-		found, err := tx.Session.SQL("SELECT * FROM "+model.TableConfig+" WHERE target_type=? AND target_id=? FOR UPDATE", working.TargetType, working.TargetID).Get(&current)
-		if err != nil {
-			return fmt.Errorf("lock current target configuration: %w", err)
-		}
-		if !found {
-			if working.VersionNo != 0 || working.ID != 0 {
-				return errors.New("current target configuration does not exist; refresh and try again")
-			}
-			working.CreateNew(ctx.UserName())
-			if _, err := tx.Save(&working); err != nil {
-				return fmt.Errorf("insert current target configuration: %w", err)
-			}
-			if err := enqueueCurrentConfig(ctx, tx, working.TargetType, working.TargetID, working.ConfigHash); err != nil {
-				return err
-			}
-			return nil
-		}
-		if working.VersionNo <= 0 || current.VersionNo != working.VersionNo {
-			return errors.New("current target configuration changed; refresh and try again")
-		}
-		if working.ID != 0 && working.ID != current.ID {
-			return errors.New("configuration ID does not match the specified target")
-		}
-		contentChanged := current.ConfigHash != working.ConfigHash || !bytes.Equal(current.ConfigJSON, working.ConfigJSON) || !sameStringPointer(current.ConfigBlobRef, working.ConfigBlobRef)
-		if current.ConfigHash == working.ConfigHash && contentChanged {
-			return errors.New("configuration content changed without changing its content hash")
-		}
-		if !contentChanged {
-			if sameStringPointer(current.Reason, working.Reason) {
-				working = current
-				return nil
-			}
-			current.Reason = working.Reason
-			current.Update(ctx.UserName())
-			current.Cols("reason")
-			if _, err := tx.Save(&current); err != nil {
-				return fmt.Errorf("update current target configuration reason: %w", err)
-			}
-			working = current
-			return nil
-		}
-		current.ConfigHash = working.ConfigHash
-		if working.ConfigJSON == nil {
-			current.ConfigJSON = nil
-		} else {
-			current.ConfigJSON = append(current.ConfigJSON[:0], working.ConfigJSON...)
-		}
-		current.ConfigBlobRef = working.ConfigBlobRef
-		current.Reason = working.Reason
-		current.Update(ctx.UserName())
-		current.Cols("config_hash", "config_json", "config_blob_ref", "reason")
-		if _, err := tx.Save(&current); err != nil {
-			return fmt.Errorf("replace current target configuration: %w", err)
-		}
-		working = current
-		if err := enqueueCurrentConfig(ctx, tx, working.TargetType, working.TargetID, working.ConfigHash); err != nil {
-			return err
-		}
-		return nil
-	})
-	if err == nil {
-		*config = working
-	}
-	return err
 }
 
 func validateAccessPolicy(policy *model.AccessPolicy) error {
@@ -408,133 +291,4 @@ func replacePolicyResources(ctx *servicecontext.Context, tx *database.DBTransact
 		}
 	}
 	return nil
-}
-
-func validateConfigTargetKey(targetType string, targetID int64) error {
-	switch targetType {
-	case "node", "device", "tunnel", "gateway":
-	default:
-		return fmt.Errorf("unsupported configuration target type %q", targetType)
-	}
-	if targetID <= 0 {
-		return errors.New("configuration target ID must be positive")
-	}
-	return nil
-}
-
-func validateConfig(config *model.Config) error {
-	config.TargetType = strings.TrimSpace(config.TargetType)
-	config.ConfigHash = strings.TrimSpace(config.ConfigHash)
-	if err := validateConfigTargetKey(config.TargetType, config.TargetID); err != nil {
-		return err
-	}
-	if config.ConfigHash == "" || len(config.ConfigHash) > 128 {
-		return errors.New("configuration content hash is required and must not exceed 128 characters")
-	}
-	if config.ConfigBlobRef != nil {
-		value := strings.TrimSpace(*config.ConfigBlobRef)
-		if value == "" {
-			config.ConfigBlobRef = nil
-		} else if len(value) > 512 {
-			return errors.New("configuration blob reference must not exceed 512 characters")
-		} else {
-			config.ConfigBlobRef = &value
-		}
-	}
-	hasJSON := len(config.ConfigJSON) > 0
-	hasBlob := config.ConfigBlobRef != nil
-	if hasJSON == hasBlob {
-		return errors.New("exactly one of inline configuration JSON or blob reference is required")
-	}
-	if hasJSON && !json.Valid(config.ConfigJSON) {
-		return errors.New("inline configuration must contain valid JSON")
-	}
-	if config.Reason != nil {
-		value := strings.TrimSpace(*config.Reason)
-		if value == "" {
-			config.Reason = nil
-		} else if len(value) > 512 {
-			return errors.New("configuration reason must not exceed 512 characters")
-		} else {
-			config.Reason = &value
-		}
-	}
-	return nil
-}
-
-func validateConfigTarget(s *xorm.Session, targetType string, targetID int64) error {
-	if err := validateConfigTargetKey(targetType, targetID); err != nil {
-		return err
-	}
-	var query string
-	switch targetType {
-	case "node":
-		query = "SELECT id FROM " + model.TableNode + " WHERE id=? FOR UPDATE"
-	case "gateway":
-		query = "SELECT id FROM " + model.TableNode + " WHERE id=? AND node_type='gateway' FOR UPDATE"
-	case "device":
-		query = "SELECT id FROM " + model.TableDevice + " WHERE id=? FOR KEY SHARE"
-	case "tunnel":
-		query = "SELECT id FROM " + model.TableTunnel + " WHERE id=? FOR KEY SHARE"
-	}
-	var result struct {
-		ID int64 `xorm:"'id'"`
-	}
-	found, err := s.SQL(query, targetID).Get(&result)
-	if err != nil {
-		return fmt.Errorf("validate configuration target: %w", err)
-	}
-	if !found {
-		return fmt.Errorf("configuration target %s/%d does not exist", targetType, targetID)
-	}
-	return nil
-}
-
-func enqueueCurrentConfig(ctx *servicecontext.Context, tx *database.DBTransaction, targetType string, nodeID int64, configHash string) error {
-	if targetType != "node" && targetType != "gateway" {
-		return nil
-	}
-
-	taskID, err := newConfigTaskID()
-	if err != nil {
-		return fmt.Errorf("generate configuration task ID: %w", err)
-	}
-	task := model.NodeConfigTask{
-		TaskID: taskID, NodeID: nodeID, TargetConfigHash: &configHash,
-		TaskType: "apply_config", Status: "pending", RetryCount: 0,
-	}
-	task.CreateNew(ctx.UserName())
-	if _, err := tx.Save(&task); err != nil {
-		return fmt.Errorf("create node configuration task: %w", err)
-	}
-
-	toStatus := task.Status
-	detail, err := json.Marshal(map[string]string{"target_config_hash": configHash})
-	if err != nil {
-		return fmt.Errorf("encode node configuration task event: %w", err)
-	}
-	event := model.NodeConfigTaskEvent{
-		TaskID: task.TaskID, NodeID: nodeID, EventType: "task.created",
-		ToStatus: &toStatus, DetailJSON: detail, OccurredAt: time.Now().UTC(),
-	}
-	event.CreateNew(ctx.UserName())
-	if _, err := tx.Save(&event); err != nil {
-		return fmt.Errorf("record node configuration task creation: %w", err)
-	}
-	return nil
-}
-
-func newConfigTaskID() (string, error) {
-	var value [16]byte
-	if _, err := rand.Read(value[:]); err != nil {
-		return "", err
-	}
-	return "cfg-" + hex.EncodeToString(value[:]), nil
-}
-
-func sameStringPointer(left, right *string) bool {
-	if left == nil || right == nil {
-		return left == nil && right == nil
-	}
-	return *left == *right
 }

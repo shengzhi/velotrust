@@ -551,7 +551,7 @@ Passkey 与 TOTP 认证器使用不同的数据模型。服务端保存验证公
 
 ## 7. 网络、节点与受保护资源模型
 
-网络站点直接使用 `t_ztna_network` 中 `network_type='site'` 的记录，不单独建表，也不拆成站点与站点网段两条记录。`network_code`、`network_name` 和 `cidr` 分别作为站点编码、名称和本地网段；`gateway_node_id`、`status`、`is_del` 及公共字段也保存在同一行。站点 ID 与网络 ID 相同，Gateway 注册和 NAT 映射继续引用这个网络 ID。有网关关联时不得删除、停用或修改 CIDR；删除通过 `is_del` 逻辑删除。NAT 继续使用 `t_ztna_nat_mapping`，由站点服务授权和管理。
+网络站点直接使用 `t_ztna_network` 中 `network_type='site'` 的记录，不单独建表，也不拆成站点与站点网段两条记录。`network_code`、`network_name` 和 `cidr` 分别作为站点编码、名称和本地网段；`gateway_node_id`、`status`、`is_del` 及公共字段也保存在同一行。站点 ID 与网络 ID 相同，Gateway 注册和 NAT 映射继续引用这个网络 ID。站点创建后名称和 CIDR 固定；编辑只允许调整 Gateway 关联和状态。删除通过 `is_del` 逻辑删除，并在同一事务中解除 Gateway 关联、停用 NAT 映射；HUB 后续编译时不再下发该站点。NAT 继续使用 `t_ztna_nat_mapping`，由站点服务授权和管理。
 
 ### 7.1 `t_ztna_network` — 企业网络/网络区域
 
@@ -672,11 +672,11 @@ Overlay 地址池不得与业务网段重叠；不同企业业务网段允许重
 
 约束建议：`public_key` 按适用范围唯一；隧道地址在同一地址域内唯一；`allowed_ips` 的冲突需要在配置生成时校验，不能仅依赖数据库唯一索引。
 
-### 9.3 `t_ztna_config` — 当前期望配置
+### 9.3 Gateway 配置编译 — 不建立配置 JSON 表
 
-字段：`id`、`target_type`、`target_id`、`config_hash`、`config_json` 或 `config_blob_ref`、公共字段、`reason`。唯一约束 `(target_type, target_id)`，每个目标仅保存一条可更新的当前配置。
+HUB 从业务主表编译 Gateway 当前期望状态，不另外维护 `t_ztna_config` JSON 副本。隧道地址来自节点公钥关联的有效 IPAM 租约；Peer 来自 Gateway 关联活动隧道中的活动 Peer；`routes` 来自绑定 Gateway 的活动网络站点 CIDR；NAT 来自这些站点的启用映射及 Overlay 全局网段。接口名、监听端口、私钥和 HUB 连接参数属于 Gateway 本机配置。
 
-`config_hash` 是当前内容的摘要，用于校验、幂等应用和与 Agent 实际状态比对，不是递增版本号。配置中若包含秘密材料，应避免直接保存未加密明文；能由安全引用或节点本地生成的私钥不应进入配置。
+HUB 对规范化编译结果计算摘要，以 `t_ztna_node_config_task.target_config_hash`、`t_ztna_node.last_config_hash` 和 `actual_config_hash` 进行幂等下发和收敛判断。数据库仅记录分发任务、任务事件和状态报告，不记录第二份期望 JSON。策略规则暂未定义稳定的 Gateway 编译输入，生成空规则集并默认拒绝。
 
 ### 9.4 `t_ztna_node_config_task` — 配置分发任务
 
@@ -757,7 +757,7 @@ Overlay 地址池不得与业务网段重叠；不同企业业务网段允许重
 
 ### 10.6 `t_ztna_nat_mapping` — 企业网络 NAT 映射台账（已实现）
 
-字段：`id`、`network_id`、`network_name`、`real_cidr`、`virtual_cidr`、`nat_type`、`enabled`、`description`、审计字段。`1:1_Bidirectional` 要求真实和虚拟网段前缀长度相同；SNAT 可不配置虚拟网段。当前实现负责持久化、校验和冲突检查，尚未将映射同步到 Gateway Agent，因此 `enabled` 只代表台账状态。
+字段：`id`、`network_id`、`network_name`、`real_cidr`、`virtual_cidr`、`nat_type`、`enabled`、`description`、审计字段。`1:1_Bidirectional` 要求真实和虚拟网段前缀长度相同；SNAT 可不配置虚拟网段。启用映射随网络站点数据由 HUB 编译并下发；当前支持将 `DNAT_VirtualIP` 与 `1:1_Bidirectional` 编译为前缀 DNAT，将 `SNAT_Masquerade` 编译为受源和目标网段限制的 Masquerade。
 
 ---
 
@@ -789,7 +789,7 @@ Overlay 地址池不得与业务网段重叠；不同企业业务网段允许重
 | 授权记录 | `t_ztna_authorization_decision` | 建议/可选 | 关键授权决策审计 |
 | 临时授权 | `t_ztna_authorization_grant` | 按需启用 | 审批与限时授权 |
 | 隧道 | `t_ztna_tunnel`、`t_ztna_tunnel_peer` | 必须（采用 WireGuard 时） | 逻辑隧道与 Peer |
-| 当前配置 | `t_ztna_config` | 必须 | 每个目标唯一的期望配置 |
+| Gateway 配置编译 | 复用节点、IPAM、网络站点、隧道 Peer 与 NAT 业务表 | 必须 | HUB 依据当前业务状态生成期望配置，不单独存储 JSON |
 | 配置任务 | `t_ztna_node_config_task` | 必须 | 可靠配置下发 |
 | 任务事件 | `t_ztna_node_config_task_event` | 推荐 | 状态变化追踪 |
 | 节点状态历史 | `t_ztna_node_status_report` | 按监控需求启用 | 历史状态快照 |
@@ -800,7 +800,7 @@ Overlay 地址池不得与业务网段重叠；不同企业业务网段允许重
 | 地址管理 | `t_ztna_overlay_network` | 已实现 | 显式初始化的 Overlay 全局私有地址范围 |
 | 地址管理 | `t_ztna_nat_mapping` | 已实现（数据面同步待实现） | 企业网段 NAT 映射配置台账 |
 
-当前 PostgreSQL IAM 初始 schema 已创建 22 张表，包含 Passkey 凭证与挑战字段；暂不创建外部组织表（`t_iam_external_org`、`t_iam_external_identity_org`）和目录同步任务表（`t_iam_integration_sync_task`）。IPAM 网络目录、地址池、租约、NAT 台账及 Overlay 全局范围由后续版本化 migration 008/009/010 创建；ZTNA 设备、节点、受保护资源、策略、隧道、配置下发及安全事件业务表由 migration 011 创建；网络站点管理字段和权限由 migration 013 增补到 `t_ztna_network`，不新增网络站点表。migration 018 将策略规则迁入策略主表并将配置修订折叠成每目标一条当前配置；活动的 apply_config 任务改为指向该目标的当前配置摘要，找不到唯一当前快照时迁移中止，要求先处理任务。后续更新覆盖数据库当前行，不保存策略或配置业务修订历史。migration 011 只提供初始持久化结构，其中标记为建议或按需启用的实体尚不代表业务功能已实现。
+当前 PostgreSQL IAM 初始 schema 已创建 22 张表，包含 Passkey 凭证与挑战字段；暂不创建外部组织表（`t_iam_external_org`、`t_iam_external_identity_org`）和目录同步任务表（`t_iam_integration_sync_task`）。IPAM 网络目录、地址池、租约、NAT 台账及 Overlay 全局范围由后续版本化 migration 008/009/010 创建；ZTNA 设备、节点、受保护资源、策略、隧道、配置下发及安全事件业务表由 migration 011 创建；网络站点管理字段和权限由 migration 013 增补到 `t_ztna_network`，不新增网络站点表。migration 018 将策略规则迁入策略主表并短暂保留当前配置表；migration 019 删除该过渡配置表和手工发布权限。HUB 当前根据 IPAM、Peer、网络站点和 NAT 业务表生成 Gateway 配置摘要，配置任务跟踪发送及应用结果，不存储完整配置 JSON。后续策略规则编译就绪前，Gateway ACL 默认拒绝。migration 011 只提供初始持久化结构，其中标记为建议或按需启用的实体尚不代表业务功能已实现。
 
 ---
 
@@ -828,11 +828,11 @@ Overlay 地址池不得与业务网段重叠；不同企业业务网段允许重
 
 推荐在一个数据库事务中完成：
 1. 更新数据库中的当前策略规则、主体和资源关系；
-2. 保存目标的当前期望配置及 config_hash；
+2. HUB 从权威业务记录编译节点的当前期望配置并计算 config_hash；
 3. 创建需要分发的配置任务或事务性 Outbox 记录；
 4. 写入审计事件。
 
-节点收到配置后必须验证来源、内容摘要和参数；应用成功后上报 actual_config_hash。后台将其与数据库当前 config_hash 比较，必要时重试或告警。策略和配置不保留递增业务版本；基础 `version_no` 仍用于防止并发写入覆盖。
+节点收到配置后必须验证来源、内容摘要和参数；应用成功后上报 actual_config_hash。后台将其与当前重新编译的 config_hash 比较，必要时重试或告警。配置 JSON 不单独存表，也不保留递增业务版本；基础 `version_no` 仍用于防止业务记录并发写入覆盖。
 
 ### 12.4 软删除与外键策略
 
@@ -873,7 +873,6 @@ Overlay 地址池不得与业务网段重叠；不同企业业务网段允许重
 | `t_iam_webauthn_credential` | `(rp_id, credential_id)` |
 | `t_ztna_device` | `device_uuid` |
 | `t_ztna_access_policy` | `policy_code` |
-| `t_ztna_config` | `(target_type, target_id)` |
 | `t_ztna_node` | `node_code` |
 | `t_ztna_protected_resource` | `resource_code` |
 | `t_ztna_tunnel` | `tunnel_code` |
@@ -971,7 +970,7 @@ func (User) TableName() string {
 - 验收：设备吊销能触发配置更新；CIDR/地址冲突能被发现；资源纳管不会自动授予访问权限。
 
 ### 阶段四：策略与配置下发
-- 完成当前策略主表、主体/资源关系、隧道 Peer、当前期望配置和配置任务。
+- 完成当前策略主表、主体/资源关系、隧道 Peer、基于业务数据的配置编译和配置任务。
 - 验收：策略当前状态及管理操作可审计；任务重试幂等；系统能区分已发送、已接收、已应用和已验证；节点离线时任务可恢复并告警。
 
 ### 阶段五：安全运营与可靠性

@@ -77,7 +77,7 @@ func (d *Driver) replaceNATLocked(mappings []config.NATMapping) error {
 	for _, mapping := range mappings {
 		var chain *nftables.Chain
 		var expressions []expr.Any
-		if mapping.Kind() == config.NATTypeSNAT {
+		if mapping.Kind() == config.NATTypeSNAT || mapping.Kind() == config.NATTypeMasquerade {
 			chain = postrouting
 			expressions, err = snatRuleExpressions(d.interfaceName, mapping)
 		} else {
@@ -266,19 +266,28 @@ func snatRuleExpressions(tunnelInterface string, mapping config.NATMapping) ([]e
 	if err != nil {
 		return nil, fmt.Errorf("parse SNAT destination prefix %q: %w", mapping.DestinationPrefix, err)
 	}
-	toAddress, err := netip.ParseAddr(mapping.ToAddress)
-	if err != nil {
-		return nil, fmt.Errorf("parse SNAT address %q: %w", mapping.ToAddress, err)
-	}
 	family := uint32(unix.NFPROTO_IPV6)
 	if source.Addr().Is4() {
 		family = unix.NFPROTO_IPV4
 	}
 	expressions := append([]expr.Any(nil), ifnameMatch(expr.MetaKeyIIFNAME, tunnelInterface)...)
-	expressions = append(expressions, ifnameMatch(expr.MetaKeyOIFNAME, mapping.EgressInterface)...)
 	expressions = append(expressions, familyMatch(source.Addr())...)
 	expressions = append(expressions, prefixMatch(source.Masked(), true)...)
 	expressions = append(expressions, prefixMatch(destination.Masked(), false)...)
+	if mapping.Kind() == config.NATTypeMasquerade {
+		expressions = append(expressions, &expr.Masq{})
+		return expressions, nil
+	}
+	toAddress, err := netip.ParseAddr(mapping.ToAddress)
+	if err != nil {
+		return nil, fmt.Errorf("parse SNAT address %q: %w", mapping.ToAddress, err)
+	}
+	if toAddress.Is4() != source.Addr().Is4() {
+		return nil, fmt.Errorf("SNAT address %q does not match the source address family", mapping.ToAddress)
+	}
+	expressions = append(expressions,
+		ifnameMatch(expr.MetaKeyOIFNAME, mapping.EgressInterface)...,
+	)
 	expressions = append(expressions,
 		&expr.Immediate{Register: unix.NFT_REG_1, Data: toAddress.AsSlice()},
 		&expr.NAT{Type: expr.NATTypeSourceNAT, Family: family, RegAddrMin: unix.NFT_REG_1},

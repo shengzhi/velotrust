@@ -163,7 +163,10 @@ func Build(conf *config.Config, listenAddr, version string) (*management.Server,
 		if err := siteHandler.Register(rpc, siteService, service); err != nil {
 			return err
 		}
-		return nodeHandler.Register(rpc, nodeService, service)
+		if err := nodeHandler.Register(rpc, nodeService, service); err != nil {
+			return err
+		}
+		return nil
 	})
 	if err != nil {
 		if ceremonyCloser != nil {

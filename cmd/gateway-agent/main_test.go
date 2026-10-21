@@ -14,7 +14,7 @@ import (
 const privateKeyForTest = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
 
 func TestValidateCommandOmitsPrivateKey(t *testing.T) {
-	configData := `{"schema_version":1,"gateway_id":"gw-test","generation":3,"tunnel":{"interface":"vtrust0","address":"10.100.0.1/24","listen_port":51820,"private_key":"` + privateKeyForTest + `"}}`
+	configData := `{"schema_version":1,"generation":3,"tunnel":{"interface":"vtrust0","address":"10.100.0.1/24","listen_port":51820,"private_key":"` + privateKeyForTest + `"}}`
 	path := filepath.Join(t.TempDir(), "gateway.json")
 	if err := os.WriteFile(path, []byte(configData), 0o600); err != nil {
 		t.Fatal(err)

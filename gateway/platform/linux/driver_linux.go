@@ -8,10 +8,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"net"
 	"net/netip"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +21,7 @@ import (
 	"time"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 	"golang.zx2c4.com/wireguard/conn"
 	wgdevice "golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
@@ -49,6 +52,7 @@ type Driver struct {
 	mu sync.Mutex
 
 	interfaceName string
+	routeRealm    int
 	backend       tunnelBackend
 	blocked       bool
 	rules         []config.ACLRule
@@ -58,7 +62,13 @@ type Driver struct {
 }
 
 func New(interfaceName string) *Driver {
-	return &Driver{interfaceName: interfaceName, blocked: true}
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte("velotrust-site-route:" + interfaceName))
+	realm := hash.Sum32()
+	if realm == 0 {
+		realm = 1
+	}
+	return &Driver{interfaceName: interfaceName, routeRealm: int(realm), blocked: true}
 }
 
 func (d *Driver) BlockForwarding(ctx context.Context) error {
@@ -142,34 +152,190 @@ func (d *Driver) ApplyRoutes(ctx context.Context, prefixes []string) error {
 	if err != nil {
 		return fmt.Errorf("find managed tunnel for routes: %w", err)
 	}
-
-	owned, err := netlink.RouteListFiltered(netlink.FAMILY_ALL, &netlink.Route{
-		LinkIndex: link.Attrs().Index,
-		Protocol:  netlink.RouteProtocol(managedRouteProto),
-	}, netlink.RT_FILTER_OIF|netlink.RT_FILTER_PROTOCOL)
-	if err != nil {
-		return fmt.Errorf("list previously managed routes: %w", err)
-	}
-	for i := range owned {
-		if err := netlink.RouteDel(&owned[i]); err != nil && !errors.Is(err, syscall.ESRCH) {
-			return fmt.Errorf("remove previous managed route: %w", err)
-		}
-	}
+	parsed := make([]netip.Prefix, 0, len(prefixes))
 	for _, raw := range prefixes {
 		prefix, err := netip.ParsePrefix(raw)
 		if err != nil || !prefix.IsValid() || prefix.Addr().Is4In6() {
 			return fmt.Errorf("invalid route prefix %q", raw)
 		}
-		prefix = prefix.Masked()
-		dst := &net.IPNet{IP: net.IP(prefix.Addr().AsSlice()), Mask: net.CIDRMask(prefix.Bits(), prefix.Addr().BitLen())}
+		parsed = append(parsed, prefix.Masked())
+	}
+	if err := removeManagedSiteRoutes(d.routeRealm); err != nil {
+		return fmt.Errorf("remove previous managed site routes: %w", err)
+	}
+	for _, prefix := range parsed {
+		probe := prefix.Addr()
+		if prefix.Bits() < probe.BitLen() {
+			probe = probe.Next()
+			if !prefix.Contains(probe) {
+				probe = prefix.Addr()
+			}
+		}
+		// Use the host's normal route lookup. FIBMatch is not supported by
+		// every kernel/netlink combination and can fail with EINVAL. RouteGet
+		// may return a synthetic /32 or /128 destination; that is the lookup
+		// result, not the prefix of the underlying route, so validate the
+		// selected egress interface instead of comparing route prefixes.
+		resolved, err := netlink.RouteGet(net.IP(probe.AsSlice()))
+		if err != nil {
+			return fmt.Errorf("resolve route for associated network %s: %w", prefix, err)
+		}
+		if len(resolved) == 0 {
+			return fmt.Errorf("associated network %s has no host route", prefix)
+		}
+		selected := resolved[0]
+		if selected.LinkIndex == link.Attrs().Index {
+			return fmt.Errorf("associated network %s resolves through managed WireGuard interface %q", prefix, d.interfaceName)
+		}
+		if selected.LinkIndex <= 0 {
+			return fmt.Errorf("associated network %s has no usable egress interface", prefix)
+		}
+		egress, err := netlink.LinkByIndex(selected.LinkIndex)
+		if err != nil {
+			return fmt.Errorf("resolve egress interface for associated network %s: %w", prefix, err)
+		}
+		if egress.Attrs().Flags&net.FlagUp == 0 || egress.Attrs().Flags&net.FlagLoopback != 0 {
+			return fmt.Errorf("associated network %s resolves through unusable egress interface %q", prefix, egress.Attrs().Name)
+		}
+
+		nextHop := "direct"
+		scope := netlink.SCOPE_LINK
+		var gateway net.IP
+		if selected.Gw != nil {
+			nextHop = selected.Gw.String()
+			scope = netlink.SCOPE_UNIVERSE
+			gateway = append(net.IP(nil), selected.Gw...)
+		}
+		table := selected.Table
+		if table == unix.RT_TABLE_UNSPEC {
+			table = unix.RT_TABLE_MAIN
+		}
+		route := &netlink.Route{
+			LinkIndex: selected.LinkIndex,
+			Scope:     scope,
+			Dst: &net.IPNet{
+				IP:   net.IP(prefix.Addr().AsSlice()),
+				Mask: net.CIDRMask(prefix.Bits(), prefix.Addr().BitLen()),
+			},
+			Gw:       gateway,
+			Priority: selected.Priority,
+			Table:    table,
+			Protocol: netlink.RouteProtocol(managedRouteProto),
+			Realm:    d.routeRealm,
+		}
+		if err := netlink.RouteAdd(route); err != nil {
+			if !errors.Is(err, syscall.EEXIST) {
+				return fmt.Errorf("install associated network route %s via %s dev %s: %w", prefix, nextHop, egress.Attrs().Name, err)
+			}
+			// An identical route may already be owned by the host. Accept it
+			// only when the kernel resolves the probe through the same path.
+			current, lookupErr := netlink.RouteGet(net.IP(probe.AsSlice()))
+			if lookupErr != nil || len(current) == 0 || current[0].LinkIndex != selected.LinkIndex || !current[0].Gw.Equal(selected.Gw) {
+				return fmt.Errorf("associated network route %s already exists through a different path", prefix)
+			}
+		}
+		slog.Debug("gateway associated network route installed", "network", prefix, "interface", egress.Attrs().Name, "next_hop", nextHop, "table", table)
+		if prefix.Addr().Is4() {
+			d.needsIPv4 = true
+		} else {
+			d.needsIPv6 = true
+		}
+	}
+	return nil
+}
+
+// removeManagedSiteRoutes removes only non-tunnel routes marked with the
+// Gateway's reserved route protocol. Peer AllowedIPs routes are attached to
+// the managed tunnel and are handled separately.
+func removeManagedSiteRoutes(routeRealm int) error {
+	routes, err := netlink.RouteListFiltered(netlink.FAMILY_ALL, &netlink.Route{
+		Protocol: netlink.RouteProtocol(managedRouteProto),
+	}, netlink.RT_FILTER_PROTOCOL)
+	if err != nil {
+		return err
+	}
+	for i := range routes {
+		if routes[i].Realm != routeRealm || routes[i].Dst == nil {
+			continue
+		}
+		if err := netlink.RouteDel(&routes[i]); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return fmt.Errorf("remove route %s: %w", routes[i].Dst, err)
+		}
+	}
+	return nil
+}
+
+// ApplyPeerRoutes installs routes to peer-owned networks over WireGuard. These
+// prefixes come from tunnel.peers[].allowed_ips; Gateway's top-level routes
+// are installed separately as locally routed site networks.
+func (d *Driver) ApplyPeerRoutes(ctx context.Context, peers []config.Peer) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	peerPrefixes := make(map[netip.Prefix]struct{})
+	for _, peer := range peers {
+		for _, raw := range peer.AllowedIPs {
+			prefix, err := netip.ParsePrefix(raw)
+			if err != nil || !prefix.IsValid() || prefix.Addr().Is4In6() {
+				return fmt.Errorf("invalid Peer route prefix %q", raw)
+			}
+			peerPrefixes[prefix.Masked()] = struct{}{}
+		}
+	}
+	prefixes := make([]netip.Prefix, 0, len(peerPrefixes))
+	for prefix := range peerPrefixes {
+		prefixes = append(prefixes, prefix)
+	}
+	sort.Slice(prefixes, func(i, j int) bool {
+		if prefixes[i].Addr().Is4() != prefixes[j].Addr().Is4() {
+			return prefixes[i].Addr().Is4()
+		}
+		return prefixes[i].String() < prefixes[j].String()
+	})
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	link, err := netlink.LinkByName(d.interfaceName)
+	if err != nil {
+		return fmt.Errorf("find managed tunnel for Peer routes: %w", err)
+	}
+	owned, err := netlink.RouteListFiltered(netlink.FAMILY_ALL, &netlink.Route{
+		LinkIndex: link.Attrs().Index,
+		Protocol:  netlink.RouteProtocol(managedRouteProto),
+	}, netlink.RT_FILTER_OIF|netlink.RT_FILTER_PROTOCOL)
+	if err != nil {
+		return fmt.Errorf("list previously managed Peer routes: %w", err)
+	}
+	for i := range owned {
+		if err := netlink.RouteDel(&owned[i]); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return fmt.Errorf("remove previous managed Peer route: %w", err)
+		}
+	}
+	for _, prefix := range prefixes {
+		probe := prefix.Addr()
+		if prefix.Bits() < probe.BitLen() {
+			probe = probe.Next()
+			if !prefix.Contains(probe) {
+				probe = prefix.Addr()
+			}
+		}
 		route := &netlink.Route{
 			LinkIndex: link.Attrs().Index,
-			Dst:       dst,
-			Scope:     netlink.SCOPE_UNIVERSE,
-			Protocol:  netlink.RouteProtocol(managedRouteProto),
+			Dst: &net.IPNet{
+				IP:   net.IP(prefix.Addr().AsSlice()),
+				Mask: net.CIDRMask(prefix.Bits(), prefix.Addr().BitLen()),
+			},
+			Scope:    netlink.SCOPE_UNIVERSE,
+			Protocol: netlink.RouteProtocol(managedRouteProto),
 		}
-		if err := netlink.RouteAdd(route); err != nil && !errors.Is(err, syscall.EEXIST) {
-			return fmt.Errorf("add route %s: %w", prefix, err)
+		if err := netlink.RouteAdd(route); err != nil {
+			if !errors.Is(err, syscall.EEXIST) {
+				return fmt.Errorf("add Peer route %s: %w", prefix, err)
+			}
+			resolved, lookupErr := netlink.RouteGet(net.IP(probe.AsSlice()))
+			if lookupErr != nil || len(resolved) == 0 || resolved[0].LinkIndex != link.Attrs().Index {
+				return fmt.Errorf("Peer route %s already exists outside managed WireGuard interface", prefix)
+			}
 		}
 		if prefix.Addr().Is4() {
 			d.needsIPv4 = true
@@ -193,21 +359,27 @@ func (d *Driver) ApplyNAT(ctx context.Context, mappings []config.NATMapping) err
 		return fmt.Errorf("replace gateway NAT mappings: %w", err)
 	}
 	for _, mapping := range mappings {
-		if mapping.Kind() == config.NATTypeSNAT {
+		switch mapping.Kind() {
+		case config.NATTypeSNAT:
 			slog.Debug("gateway SNAT mapping configured",
 				"source_prefix", mapping.SourcePrefix,
 				"destination_prefix", mapping.DestinationPrefix,
 				"egress_interface", mapping.EgressInterface,
 				"to_address", mapping.ToAddress,
 			)
-		} else {
+		case config.NATTypeMasquerade:
+			slog.Debug("gateway masquerade mapping configured",
+				"source_prefix", mapping.SourcePrefix,
+				"destination_prefix", mapping.DestinationPrefix,
+			)
+		default:
 			slog.Debug("gateway DNAT mapping configured",
 				"shadow_prefix", mapping.ShadowPrefix,
 				"real_prefix", mapping.RealPrefix,
 			)
 		}
 		prefixText := mapping.ShadowPrefix
-		if mapping.Kind() == config.NATTypeSNAT {
+		if mapping.Kind() == config.NATTypeSNAT || mapping.Kind() == config.NATTypeMasquerade {
 			prefixText = mapping.SourcePrefix
 		}
 		prefix, err := netip.ParsePrefix(prefixText)
@@ -340,6 +512,9 @@ func (d *Driver) Close(ctx context.Context) error {
 		}
 	} else if !isLinkNotFound(linkErr) {
 		result = errors.Join(result, fmt.Errorf("find tunnel during cleanup: %w", linkErr))
+	}
+	if err := removeManagedSiteRoutes(d.routeRealm); err != nil {
+		result = errors.Join(result, fmt.Errorf("remove managed site routes during cleanup: %w", err))
 	}
 	result = errors.Join(result, restoreForwarding(d.forwarding))
 	d.forwarding = nil

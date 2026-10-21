@@ -13,7 +13,6 @@ import (
 func validConfig() config.Config {
 	return config.Config{
 		SchemaVersion: 1,
-		GatewayID:     "gw-west-1",
 		Tunnel: config.Tunnel{
 			Interface:  "vtrust0",
 			Address:    "10.100.0.1/24",
@@ -65,6 +64,9 @@ func (d *fakeDriver) ApplyTunnel(context.Context, config.Tunnel) error {
 }
 func (d *fakeDriver) ApplyFirewall(context.Context, []config.ACLRule) error {
 	return d.record("firewall")
+}
+func (d *fakeDriver) ApplyPeerRoutes(context.Context, []config.Peer) error {
+	return d.record("peer-routes")
 }
 func (d *fakeDriver) ApplyRoutes(context.Context, []string) error {
 	return d.record("routes")
@@ -129,7 +131,7 @@ func TestApplyOrdersFirewallBeforeRouteAndEnablesLast(t *testing.T) {
 	if err := reconciler.Apply(context.Background(), validConfig()); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"block", "tunnel", "firewall", "routes", "nat", "enable", "unblock"}
+	want := []string{"block", "tunnel", "firewall", "peer-routes", "routes", "nat", "enable", "unblock"}
 	if strings.Join(driver.calls, ",") != strings.Join(want, ",") {
 		t.Fatalf("call order = %v, want %v", driver.calls, want)
 	}
@@ -147,7 +149,7 @@ func TestApplyFailureBlocksAndClosesDataplane(t *testing.T) {
 	if err := reconciler.Apply(context.Background(), validConfig()); err == nil {
 		t.Fatal("Apply() succeeded despite route failure")
 	}
-	want := []string{"block", "tunnel", "firewall", "routes", "block", "close"}
+	want := []string{"block", "tunnel", "firewall", "peer-routes", "routes", "block", "close"}
 	if strings.Join(driver.calls, ",") != strings.Join(want, ",") {
 		t.Fatalf("call order = %v, want %v", driver.calls, want)
 	}
@@ -190,7 +192,7 @@ func TestApplyIsIdempotentAndReconcilesChangedConfig(t *testing.T) {
 	}
 	changedCallCount := len(driver.calls)
 	if changedCallCount != callCount+7 {
-		t.Fatalf("changed config made %d dataplane calls, want %d", changedCallCount-callCount, 7)
+		t.Fatalf("changed config made %d dataplane calls, want %d", changedCallCount-callCount, 8)
 	}
 	if err := reconciler.Apply(context.Background(), changed); err != nil {
 		t.Fatalf("reapplying identical changed config failed: %v", err)

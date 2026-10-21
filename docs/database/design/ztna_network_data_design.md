@@ -67,7 +67,7 @@ erDiagram
 
 **业务一致性与生命周期**
 
-网络站点使用 `network_type=site`，站点管理读取时过滤 `is_del=false`；网关归属只保存到 gateway_node_id，允许网段直接取该网络的 cidr。`gateway_node_id` 外键未限制 node_type，业务需验证其确为可用网关。绑定网关后，站点业务限制删除、停用或修改 CIDR；应先保存解除绑定，再执行这些操作。只有启用的站点允许绑定网关；注册时对站点行加锁并拒绝覆盖已有绑定。唯一编码索引包含逻辑删除记录，不会自动释放编码。
+网络站点使用 `network_type=site`，站点管理读取时过滤 `is_del=false`；网关归属只保存到 gateway_node_id，允许网段直接取该网络的 cidr。`gateway_node_id` 外键未限制 node_type，业务需验证其确为可用网关。站点创建后名称和 CIDR 固定；编辑只允许调整 Gateway 关联和状态。停用站点会同步停用 NAT 映射，并因 HUB 只编译活动站点而从 Gateway 的期望配置中移除。删除通过逻辑删除完成，同时清空 Gateway 关联并停用 NAT 映射，即使站点当前已绑定 Gateway 也允许删除。只有活动站点允许新绑定 Gateway；注册时对站点行加锁并拒绝覆盖已有绑定。唯一编码索引包含逻辑删除记录，不会自动释放编码。
 
 ### 2.2 `t_ztna_nat_mapping` — 网络 NAT 映射
 

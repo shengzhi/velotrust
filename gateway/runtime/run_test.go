@@ -15,6 +15,7 @@ type lifecycleDriver struct{ closed bool }
 func (*lifecycleDriver) BlockForwarding(context.Context) error                 { return nil }
 func (*lifecycleDriver) ApplyTunnel(context.Context, config.Tunnel) error      { return nil }
 func (*lifecycleDriver) ApplyFirewall(context.Context, []config.ACLRule) error { return nil }
+func (*lifecycleDriver) ApplyPeerRoutes(context.Context, []config.Peer) error  { return nil }
 func (*lifecycleDriver) ApplyRoutes(context.Context, []string) error           { return nil }
 func (*lifecycleDriver) ApplyNAT(context.Context, []config.NATMapping) error   { return nil }
 func (*lifecycleDriver) EnableForwarding(context.Context) error                { return nil }
@@ -28,7 +29,6 @@ func TestRunWithDriverCleansUpWhenHealthListenerCannotStart(t *testing.T) {
 	driver := &lifecycleDriver{}
 	cfg := config.Config{
 		SchemaVersion: 1,
-		GatewayID:     "gw-test",
 		Tunnel: config.Tunnel{
 			Interface:  "vtrust0",
 			Address:    "10.100.0.1/24",
@@ -102,7 +102,7 @@ func TestFileConfigSourceRetriesUnchangedValidConfigWhenRequested(t *testing.T) 
 	}
 	source := newFileConfigSource(path, digest)
 	got, apply, changed, err := source.poll(true)
-	if err != nil || !apply || changed || got == nil || got.GatewayID != cfg.GatewayID {
+	if err != nil || !apply || changed || got == nil || got.Tunnel.Interface != cfg.Tunnel.Interface {
 		t.Fatalf("retry poll = (%v, %t, %t, %v), want unchanged config retry", got, apply, changed, err)
 	}
 }
@@ -110,7 +110,6 @@ func TestFileConfigSourceRetriesUnchangedValidConfigWhenRequested(t *testing.T) 
 func runtimeTestConfig() config.Config {
 	return config.Config{
 		SchemaVersion: 1,
-		GatewayID:     "gw-test",
 		Tunnel: config.Tunnel{
 			Interface:  "vtrust0",
 			Address:    "10.100.0.1/24",

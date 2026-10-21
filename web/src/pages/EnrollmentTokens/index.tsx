@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   AlertTriangle,
   Check,
@@ -59,6 +60,7 @@ function formatDate(value?: string | null): string {
 }
 
 export const EnrollmentTokens: React.FC = () => {
+  const navigate = useNavigate();
   const { success, error } = useToast();
   const [credentials, setCredentials] = useState<RegistrationCredential[]>([]);
   const [selectableSiteNetworks, setSelectableSiteNetworks] = useState<SelectableSiteNetwork[]>([]);
@@ -225,9 +227,14 @@ export const EnrollmentTokens: React.FC = () => {
         </div>
       </div>
 
-      <div className="flex gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-        <p>当前页面管理凭证签发、延期和撤销。Gateway Agent 使用凭证完成注册、凭证消费和人工审批的服务端链路尚未接入；签发凭证不会自动使网关入网。</p>
+      <div className="flex flex-col gap-3 rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex gap-3">
+          <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" />
+          <p>若凭证要求审批，Gateway 完成注册后会进入虚拟节点管理的待审批队列。批准后 HUB 会继续注册流程，网关随后重新进行身份认证。</p>
+        </div>
+        <Button variant="outline" size="sm" className="shrink-0" onClick={() => navigate('/nodes?approval=pending')}>
+          查看待审批网关
+        </Button>
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">

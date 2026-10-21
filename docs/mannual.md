@@ -18,7 +18,6 @@ sudo /usr/local/bin/gateway-agent keygen --dir /etc/velotrust/gateway
 ```json
 {
   "schema_version": 1,
-  "gateway_id": "gw-site-a",
   "tunnel": {
     "interface": "vtrust0",
     "address": "10.100.0.1/24",
@@ -57,6 +56,28 @@ sudo /usr/local/bin/gateway-agent validate --config /etc/velotrust/gateway/gatew
 
 配置文件应显示为 `600` 权限。若在 WSL 中配置位于 `/mnt/c` 等 Windows 挂载目录，且 `chmod` 后权限仍不变，请将 `gateway.json` 和它引用的私钥一并移到 WSL Linux 文件系统（例如 `/home/<user>/.config/velotrust/gateway/`），再对配置和私钥执行 `chmod 600`。
 
+首次接入 HUB 时，在配置文件中添加 `hub.endpoint`、`hub.server_name`、可选的 `hub.ca_file`，以及 Management 为预建网关签发的一次性 `hub.registration_token`。配置中不需要填写 `gateway_id`：首次注册时 HUB 通过 Token 定位预建节点，注册后通过本机 WireGuard 公钥定位节点。配置文件必须保持 `0600` 权限。启动 `run` 后，Agent 先尝试 X25519 身份认证；HUB 明确返回该公钥尚未注册时，Agent 才提交 Token。若需要审批，Agent 会保持运行并等待 HUB 返回审批结果，期间转发保持阻断；获批后 Agent 会重新认证，再应用隧道和规则。升级 Agent 前应先升级 HUB，使 HUB 返回包含规范节点编码的新认证挑战。
+
+注册完成后，从配置文件删除已消费的 `hub.registration_token`。程序会清除活动配置字段及注册客户端的临时凭证缓冲，但不会改写配置文件。已注册节点无需配置 Token。使用 HUB 管理配置时，还要在本机配置中加入 HUB 地址及 TLS 信任设置，例如：
+
+```json
+{
+  "schema_version": 1,
+  "hub": {
+    "endpoint": "hub.example.com:8081",
+    "server_name": "hub.example.com",
+    "ca_file": "hub-ca.pem"
+  },
+  "tunnel": {
+    "interface": "vtrust0",
+    "listen_port": 51820,
+    "private_key_file": "wireguard.key"
+  }
+}
+```
+
+HUB 模式下，本机配置只负责隧道接口名、WireGuard UDP 监听端口、私钥和 HUB 连接参数；隧道地址、Peer、关联站点网段和 NAT 由 HUB 从 IPAM、隧道、网络站点及 NAT 业务数据编译。Gateway 必须先分配 IPAM 隧道地址，且关联站点网络应有本机物理或静态路由。策略规则尚未接入 Gateway 编译，当前 ACL 默认拒绝。首个有效快照应用前转发保持阻断。业务数据修改后，HUB 在 Gateway 心跳或重连时重新编译并发送摘要不同的配置。
+
 以前台方式启动：
 
 ```sh
@@ -68,7 +89,7 @@ sudo /usr/local/bin/gateway-agent run \
 
 Gateway Agent 会在 `listen_port` 上启动 WireGuard UDP 监听，并应用 Peer、路由和防火墙规则。需在 Gateway 主机防火墙及云安全组放行 UDP `51820`。运行用户还需要创建隧道、配置路由、nftables 和 IP 转发的权限。空 `rules` 表示默认拒绝转发。
 
-`tunnel.mtu` 以字节为单位，省略时 Gateway 使用 1420；客户端省略时使用 1380。建议按实际链路显式设置两端 MTU。Gateway 顶层 `routes` 的每个网段还必须被某个 Peer 的 `allowed_ips` 覆盖。
+`tunnel.mtu` 以字节为单位，省略时 Gateway 使用 1420；客户端省略时使用 1380。HUB 快照省略 MTU 时 Gateway 保留本机配置值。关联网络 `routes` 是 Gateway 后方的本地目的网段；Gateway 根据主机当前路由选择出口接口和下一跳，并安装受管站点路由。出口不能是 VeloTrust 隧道或回环接口；系统默认路由可以提供下一跳。Peer 的 `allowed_ips` 则描述该 Peer 对应的隧道地址和远端路由网段。
 
 启动日志会打印 `gateway WireGuard public key`。将该公钥填入客户端对应 Gateway 的 `tunnel.peers[].public_key`。
 
@@ -100,8 +121,8 @@ curl http://127.0.0.1:8765/readyz
 
 - 客户端 Peer 的 `public_key` 必须是客户端 WireGuard 公钥，`allowed_ips` 至少包含该客户端的隧道地址，例如 `10.100.0.2/32`。
 - Gateway 对外 Endpoint 使用 Gateway 主机可达地址和监听端口，例如 `gateway.example.com:51820`。
-- Client `allowed_ips` 生成 Windows 隧道路由；Gateway 顶层 `routes` 则显式创建经 WireGuard 接口的 Linux 路由。Gateway 的每条 `routes` 必须被至少一个 Peer 的 `allowed_ips` 覆盖，否则配置校验会拒绝。
-- 若资源位于 Gateway 直连的 LAN，优先确保 LAN 有返回隧道网段的路由；无法配置回程路由时，可为指定流量配置 SNAT。经其他隧道可达的网段则需配置对应路由和 Peer。
+- Client `allowed_ips` 生成 Windows 隧道路由；Gateway Peer `allowed_ips` 生成 Linux WireGuard 路由。Gateway 顶层 `routes` 是其后方的站点网段，Agent 按主机路由查找结果安装到物理出口，不能经 WireGuard 或回环接口；系统默认路由可以提供下一跳。
+- 若资源位于 Gateway 直连的 LAN，优先确保 LAN 有返回隧道网段的路由；无法配置回程路由时，可为指定流量配置 SNAT。经其他 Gateway 可达的网段应放在对应 Peer 的 `allowed_ips` 中，由 Agent 安装到 WireGuard 接口。
 - `rules` 必须显式允许需要的流量；只配置 WireGuard Peer 不会自动授权访问资源。
 
 Client 与 Gateway 的字段定义、Endpoint 角色、AllowedIPs、路由与 MTU 约定见[网络配置契约](VeloTrust-网络配置契约.md)。
@@ -256,4 +277,4 @@ Resolve-DnsName www.example.com -DnsOnly
 
 ## 当前边界
 
-客户端使用本地静态 DNS 策略，尚未接入控制面策略下发和应用状态回报。DNS 接管通过 Windows DNS Client/NRPT 工作；自行发送 DNS、DoH 和 DoT 的应用不在本阶段拦截范围内。macOS/Linux DNS 接管、Windows 网络切换时的真实端到端验证、用户登录、设备注册、Windows 后台服务和休眠恢复尚未实现。Gateway Agent 尚未连接管理控制面。
+客户端使用本地静态 DNS 策略，尚未接入控制面策略下发和应用状态回报。DNS 接管通过 Windows DNS Client/NRPT 工作；自行发送 DNS、DoH 和 DoT 的应用不在本阶段拦截范围内。macOS/Linux DNS 接管、Windows 网络切换时的真实端到端验证、用户登录、设备注册、Windows 后台服务和休眠恢复尚未实现。Gateway Agent 已可连接 HUB 并接收由 IPAM、隧道 Peer、网络站点和 NAT 业务数据编译的配置；访问策略尚未编译为 Gateway ACL，因此数据面继续默认拒绝。

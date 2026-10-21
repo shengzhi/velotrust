@@ -78,6 +78,7 @@ type AgentMessage struct {
 	//	*AgentMessage_Heartbeat
 	//	*AgentMessage_ConfigApplied
 	//	*AgentMessage_RuntimeStatus
+	//	*AgentMessage_X25519AuthProof
 	Body          isAgentMessage_Body `protobuf_oneof:"body"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -156,6 +157,15 @@ func (x *AgentMessage) GetRuntimeStatus() *RuntimeStatus {
 	return nil
 }
 
+func (x *AgentMessage) GetX25519AuthProof() *X25519AuthProof {
+	if x != nil {
+		if x, ok := x.Body.(*AgentMessage_X25519AuthProof); ok {
+			return x.X25519AuthProof
+		}
+	}
+	return nil
+}
+
 type isAgentMessage_Body interface {
 	isAgentMessage_Body()
 }
@@ -176,6 +186,12 @@ type AgentMessage_RuntimeStatus struct {
 	RuntimeStatus *RuntimeStatus `protobuf:"bytes,4,opt,name=runtime_status,json=runtimeStatus,proto3,oneof"`
 }
 
+type AgentMessage_X25519AuthProof struct {
+	// Gateway must answer the first challenge before sending any other
+	// control-plane message on this stream.
+	X25519AuthProof *X25519AuthProof `protobuf:"bytes,5,opt,name=x25519_auth_proof,json=x25519AuthProof,proto3,oneof"`
+}
+
 func (*AgentMessage_Hello) isAgentMessage_Body() {}
 
 func (*AgentMessage_Heartbeat) isAgentMessage_Body() {}
@@ -184,14 +200,20 @@ func (*AgentMessage_ConfigApplied) isAgentMessage_Body() {}
 
 func (*AgentMessage_RuntimeStatus) isAgentMessage_Body() {}
 
+func (*AgentMessage_X25519AuthProof) isAgentMessage_Body() {}
+
 type Hello struct {
-	state              protoimpl.MessageState `protogen:"open.v1"`
-	NodeId             string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
-	NodeKind           NodeKind               `protobuf:"varint,2,opt,name=node_kind,json=nodeKind,proto3,enum=velotrust.hub.v1.NodeKind" json:"node_kind,omitempty"`
-	WireguardPublicKey string                 `protobuf:"bytes,3,opt,name=wireguard_public_key,json=wireguardPublicKey,proto3" json:"wireguard_public_key,omitempty"`
-	AppliedConfigHash  string                 `protobuf:"bytes,4,opt,name=applied_config_hash,json=appliedConfigHash,proto3" json:"applied_config_hash,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Deprecated: HUB resolves registered nodes by their X25519 public key and
+	// first-time enrollment targets from the unique registration token.
+	NodeId             string   `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	NodeKind           NodeKind `protobuf:"varint,2,opt,name=node_kind,json=nodeKind,proto3,enum=velotrust.hub.v1.NodeKind" json:"node_kind,omitempty"`
+	WireguardPublicKey string   `protobuf:"bytes,3,opt,name=wireguard_public_key,json=wireguardPublicKey,proto3" json:"wireguard_public_key,omitempty"`
+	AppliedConfigHash  string   `protobuf:"bytes,4,opt,name=applied_config_hash,json=appliedConfigHash,proto3" json:"applied_config_hash,omitempty"`
+	// Present only for the one-time Gateway enrollment exchange.
+	RegistrationToken string `protobuf:"bytes,5,opt,name=registration_token,json=registrationToken,proto3" json:"registration_token,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *Hello) Reset() {
@@ -252,6 +274,13 @@ func (x *Hello) GetAppliedConfigHash() string {
 	return ""
 }
 
+func (x *Hello) GetRegistrationToken() string {
+	if x != nil {
+		return x.RegistrationToken
+	}
+	return ""
+}
+
 type Heartbeat struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Sequence      uint64                 `protobuf:"varint,1,opt,name=sequence,proto3" json:"sequence,omitempty"`
@@ -301,6 +330,8 @@ type ConfigApplied struct {
 	ConfigHash    string                 `protobuf:"bytes,1,opt,name=config_hash,json=configHash,proto3" json:"config_hash,omitempty"`
 	Success       bool                   `protobuf:"varint,2,opt,name=success,proto3" json:"success,omitempty"`
 	ErrorCode     string                 `protobuf:"bytes,3,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`
+	TaskId        string                 `protobuf:"bytes,4,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	ErrorMessage  string                 `protobuf:"bytes,5,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -356,12 +387,35 @@ func (x *ConfigApplied) GetErrorCode() string {
 	return ""
 }
 
+func (x *ConfigApplied) GetTaskId() string {
+	if x != nil {
+		return x.TaskId
+	}
+	return ""
+}
+
+func (x *ConfigApplied) GetErrorMessage() string {
+	if x != nil {
+		return x.ErrorMessage
+	}
+	return ""
+}
+
 type RuntimeStatus struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
 	ConnectedPeerCount uint32                 `protobuf:"varint,1,opt,name=connected_peer_count,json=connectedPeerCount,proto3" json:"connected_peer_count,omitempty"`
 	AppliedConfigHash  string                 `protobuf:"bytes,2,opt,name=applied_config_hash,json=appliedConfigHash,proto3" json:"applied_config_hash,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	AgentVersion       string                 `protobuf:"bytes,3,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
+	WireguardStatus    string                 `protobuf:"bytes,4,opt,name=wireguard_status,json=wireguardStatus,proto3" json:"wireguard_status,omitempty"`
+	HealthStatus       string                 `protobuf:"bytes,5,opt,name=health_status,json=healthStatus,proto3" json:"health_status,omitempty"`
+	LastErrorCode      string                 `protobuf:"bytes,6,opt,name=last_error_code,json=lastErrorCode,proto3" json:"last_error_code,omitempty"`
+	Sequence           uint64                 `protobuf:"varint,7,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	// False means connected_peer_count is a storage placeholder and must not be
+	// interpreted as a measured zero. Gateways that cannot observe an exact
+	// current peer count report false.
+	ConnectedPeerCountKnown bool `protobuf:"varint,8,opt,name=connected_peer_count_known,json=connectedPeerCountKnown,proto3" json:"connected_peer_count_known,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
 }
 
 func (x *RuntimeStatus) Reset() {
@@ -408,6 +462,196 @@ func (x *RuntimeStatus) GetAppliedConfigHash() string {
 	return ""
 }
 
+func (x *RuntimeStatus) GetAgentVersion() string {
+	if x != nil {
+		return x.AgentVersion
+	}
+	return ""
+}
+
+func (x *RuntimeStatus) GetWireguardStatus() string {
+	if x != nil {
+		return x.WireguardStatus
+	}
+	return ""
+}
+
+func (x *RuntimeStatus) GetHealthStatus() string {
+	if x != nil {
+		return x.HealthStatus
+	}
+	return ""
+}
+
+func (x *RuntimeStatus) GetLastErrorCode() string {
+	if x != nil {
+		return x.LastErrorCode
+	}
+	return ""
+}
+
+func (x *RuntimeStatus) GetSequence() uint64 {
+	if x != nil {
+		return x.Sequence
+	}
+	return 0
+}
+
+func (x *RuntimeStatus) GetConnectedPeerCountKnown() bool {
+	if x != nil {
+		return x.ConnectedPeerCountKnown
+	}
+	return false
+}
+
+// X25519AuthChallenge is sent only after the HUB has loaded and approved the
+// Gateway's registered public key. It is bound to the current TLS connection
+// by the challenge-specific TLS exporter used to compute the proof.
+type X25519AuthChallenge struct {
+	state                 protoimpl.MessageState `protogen:"open.v1"`
+	ChallengeId           []byte                 `protobuf:"bytes,1,opt,name=challenge_id,json=challengeId,proto3" json:"challenge_id,omitempty"`
+	Nonce                 []byte                 `protobuf:"bytes,2,opt,name=nonce,proto3" json:"nonce,omitempty"`
+	HubEphemeralPublicKey []byte                 `protobuf:"bytes,3,opt,name=hub_ephemeral_public_key,json=hubEphemeralPublicKey,proto3" json:"hub_ephemeral_public_key,omitempty"`
+	ExpiresAtUnixMillis   int64                  `protobuf:"varint,4,opt,name=expires_at_unix_millis,json=expiresAtUnixMillis,proto3" json:"expires_at_unix_millis,omitempty"`
+	HubInstanceId         string                 `protobuf:"bytes,5,opt,name=hub_instance_id,json=hubInstanceId,proto3" json:"hub_instance_id,omitempty"`
+	RegistrationChallenge bool                   `protobuf:"varint,6,opt,name=registration_challenge,json=registrationChallenge,proto3" json:"registration_challenge,omitempty"`
+	// Canonical node_code resolved by HUB; included in the proof transcript.
+	NodeId        string `protobuf:"bytes,7,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *X25519AuthChallenge) Reset() {
+	*x = X25519AuthChallenge{}
+	mi := &file_shared_proto_v1_hub_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *X25519AuthChallenge) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*X25519AuthChallenge) ProtoMessage() {}
+
+func (x *X25519AuthChallenge) ProtoReflect() protoreflect.Message {
+	mi := &file_shared_proto_v1_hub_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use X25519AuthChallenge.ProtoReflect.Descriptor instead.
+func (*X25519AuthChallenge) Descriptor() ([]byte, []int) {
+	return file_shared_proto_v1_hub_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *X25519AuthChallenge) GetChallengeId() []byte {
+	if x != nil {
+		return x.ChallengeId
+	}
+	return nil
+}
+
+func (x *X25519AuthChallenge) GetNonce() []byte {
+	if x != nil {
+		return x.Nonce
+	}
+	return nil
+}
+
+func (x *X25519AuthChallenge) GetHubEphemeralPublicKey() []byte {
+	if x != nil {
+		return x.HubEphemeralPublicKey
+	}
+	return nil
+}
+
+func (x *X25519AuthChallenge) GetExpiresAtUnixMillis() int64 {
+	if x != nil {
+		return x.ExpiresAtUnixMillis
+	}
+	return 0
+}
+
+func (x *X25519AuthChallenge) GetHubInstanceId() string {
+	if x != nil {
+		return x.HubInstanceId
+	}
+	return ""
+}
+
+func (x *X25519AuthChallenge) GetRegistrationChallenge() bool {
+	if x != nil {
+		return x.RegistrationChallenge
+	}
+	return false
+}
+
+func (x *X25519AuthChallenge) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+type X25519AuthProof struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ChallengeId   []byte                 `protobuf:"bytes,1,opt,name=challenge_id,json=challengeId,proto3" json:"challenge_id,omitempty"`
+	Proof         []byte                 `protobuf:"bytes,2,opt,name=proof,proto3" json:"proof,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *X25519AuthProof) Reset() {
+	*x = X25519AuthProof{}
+	mi := &file_shared_proto_v1_hub_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *X25519AuthProof) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*X25519AuthProof) ProtoMessage() {}
+
+func (x *X25519AuthProof) ProtoReflect() protoreflect.Message {
+	mi := &file_shared_proto_v1_hub_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use X25519AuthProof.ProtoReflect.Descriptor instead.
+func (*X25519AuthProof) Descriptor() ([]byte, []int) {
+	return file_shared_proto_v1_hub_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *X25519AuthProof) GetChallengeId() []byte {
+	if x != nil {
+		return x.ChallengeId
+	}
+	return nil
+}
+
+func (x *X25519AuthProof) GetProof() []byte {
+	if x != nil {
+		return x.Proof
+	}
+	return nil
+}
+
 type HubMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Body:
@@ -416,6 +660,9 @@ type HubMessage struct {
 	//	*HubMessage_ConfigSnapshot
 	//	*HubMessage_HeartbeatAck
 	//	*HubMessage_Reauthenticate
+	//	*HubMessage_X25519AuthChallenge
+	//	*HubMessage_RuntimeStatusAck
+	//	*HubMessage_GatewayRegistrationResult
 	Body          isHubMessage_Body `protobuf_oneof:"body"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -423,7 +670,7 @@ type HubMessage struct {
 
 func (x *HubMessage) Reset() {
 	*x = HubMessage{}
-	mi := &file_shared_proto_v1_hub_proto_msgTypes[5]
+	mi := &file_shared_proto_v1_hub_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -435,7 +682,7 @@ func (x *HubMessage) String() string {
 func (*HubMessage) ProtoMessage() {}
 
 func (x *HubMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_shared_proto_v1_hub_proto_msgTypes[5]
+	mi := &file_shared_proto_v1_hub_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -448,7 +695,7 @@ func (x *HubMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HubMessage.ProtoReflect.Descriptor instead.
 func (*HubMessage) Descriptor() ([]byte, []int) {
-	return file_shared_proto_v1_hub_proto_rawDescGZIP(), []int{5}
+	return file_shared_proto_v1_hub_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *HubMessage) GetBody() isHubMessage_Body {
@@ -494,6 +741,33 @@ func (x *HubMessage) GetReauthenticate() *Reauthenticate {
 	return nil
 }
 
+func (x *HubMessage) GetX25519AuthChallenge() *X25519AuthChallenge {
+	if x != nil {
+		if x, ok := x.Body.(*HubMessage_X25519AuthChallenge); ok {
+			return x.X25519AuthChallenge
+		}
+	}
+	return nil
+}
+
+func (x *HubMessage) GetRuntimeStatusAck() *RuntimeStatusAck {
+	if x != nil {
+		if x, ok := x.Body.(*HubMessage_RuntimeStatusAck); ok {
+			return x.RuntimeStatusAck
+		}
+	}
+	return nil
+}
+
+func (x *HubMessage) GetGatewayRegistrationResult() *GatewayRegistrationResult {
+	if x != nil {
+		if x, ok := x.Body.(*HubMessage_GatewayRegistrationResult); ok {
+			return x.GatewayRegistrationResult
+		}
+	}
+	return nil
+}
+
 type isHubMessage_Body interface {
 	isHubMessage_Body()
 }
@@ -514,6 +788,18 @@ type HubMessage_Reauthenticate struct {
 	Reauthenticate *Reauthenticate `protobuf:"bytes,4,opt,name=reauthenticate,proto3,oneof"`
 }
 
+type HubMessage_X25519AuthChallenge struct {
+	X25519AuthChallenge *X25519AuthChallenge `protobuf:"bytes,5,opt,name=x25519_auth_challenge,json=x25519AuthChallenge,proto3,oneof"`
+}
+
+type HubMessage_RuntimeStatusAck struct {
+	RuntimeStatusAck *RuntimeStatusAck `protobuf:"bytes,6,opt,name=runtime_status_ack,json=runtimeStatusAck,proto3,oneof"`
+}
+
+type HubMessage_GatewayRegistrationResult struct {
+	GatewayRegistrationResult *GatewayRegistrationResult `protobuf:"bytes,7,opt,name=gateway_registration_result,json=gatewayRegistrationResult,proto3,oneof"`
+}
+
 func (*HubMessage_Welcome) isHubMessage_Body() {}
 
 func (*HubMessage_ConfigSnapshot) isHubMessage_Body() {}
@@ -522,17 +808,24 @@ func (*HubMessage_HeartbeatAck) isHubMessage_Body() {}
 
 func (*HubMessage_Reauthenticate) isHubMessage_Body() {}
 
+func (*HubMessage_X25519AuthChallenge) isHubMessage_Body() {}
+
+func (*HubMessage_RuntimeStatusAck) isHubMessage_Body() {}
+
+func (*HubMessage_GatewayRegistrationResult) isHubMessage_Body() {}
+
 type Welcome struct {
 	state                    protoimpl.MessageState `protogen:"open.v1"`
 	SessionId                string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	HeartbeatIntervalSeconds uint32                 `protobuf:"varint,2,opt,name=heartbeat_interval_seconds,json=heartbeatIntervalSeconds,proto3" json:"heartbeat_interval_seconds,omitempty"`
+	ConfigSnapshot           *ConfigSnapshot        `protobuf:"bytes,3,opt,name=config_snapshot,json=configSnapshot,proto3" json:"config_snapshot,omitempty"`
 	unknownFields            protoimpl.UnknownFields
 	sizeCache                protoimpl.SizeCache
 }
 
 func (x *Welcome) Reset() {
 	*x = Welcome{}
-	mi := &file_shared_proto_v1_hub_proto_msgTypes[6]
+	mi := &file_shared_proto_v1_hub_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -544,7 +837,7 @@ func (x *Welcome) String() string {
 func (*Welcome) ProtoMessage() {}
 
 func (x *Welcome) ProtoReflect() protoreflect.Message {
-	mi := &file_shared_proto_v1_hub_proto_msgTypes[6]
+	mi := &file_shared_proto_v1_hub_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -557,7 +850,7 @@ func (x *Welcome) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Welcome.ProtoReflect.Descriptor instead.
 func (*Welcome) Descriptor() ([]byte, []int) {
-	return file_shared_proto_v1_hub_proto_rawDescGZIP(), []int{6}
+	return file_shared_proto_v1_hub_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *Welcome) GetSessionId() string {
@@ -574,18 +867,26 @@ func (x *Welcome) GetHeartbeatIntervalSeconds() uint32 {
 	return 0
 }
 
+func (x *Welcome) GetConfigSnapshot() *ConfigSnapshot {
+	if x != nil {
+		return x.ConfigSnapshot
+	}
+	return nil
+}
+
 type ConfigSnapshot struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Identifies the content in the database's current desired configuration.
 	ConfigHash    string `protobuf:"bytes,1,opt,name=config_hash,json=configHash,proto3" json:"config_hash,omitempty"`
 	Payload       []byte `protobuf:"bytes,3,opt,name=payload,proto3" json:"payload,omitempty"`
+	TaskId        string `protobuf:"bytes,4,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ConfigSnapshot) Reset() {
 	*x = ConfigSnapshot{}
-	mi := &file_shared_proto_v1_hub_proto_msgTypes[7]
+	mi := &file_shared_proto_v1_hub_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -597,7 +898,7 @@ func (x *ConfigSnapshot) String() string {
 func (*ConfigSnapshot) ProtoMessage() {}
 
 func (x *ConfigSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_shared_proto_v1_hub_proto_msgTypes[7]
+	mi := &file_shared_proto_v1_hub_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -610,7 +911,7 @@ func (x *ConfigSnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigSnapshot.ProtoReflect.Descriptor instead.
 func (*ConfigSnapshot) Descriptor() ([]byte, []int) {
-	return file_shared_proto_v1_hub_proto_rawDescGZIP(), []int{7}
+	return file_shared_proto_v1_hub_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ConfigSnapshot) GetConfigHash() string {
@@ -627,6 +928,13 @@ func (x *ConfigSnapshot) GetPayload() []byte {
 	return nil
 }
 
+func (x *ConfigSnapshot) GetTaskId() string {
+	if x != nil {
+		return x.TaskId
+	}
+	return ""
+}
+
 type HeartbeatAck struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	Sequence       uint64                 `protobuf:"varint,1,opt,name=sequence,proto3" json:"sequence,omitempty"`
@@ -637,7 +945,7 @@ type HeartbeatAck struct {
 
 func (x *HeartbeatAck) Reset() {
 	*x = HeartbeatAck{}
-	mi := &file_shared_proto_v1_hub_proto_msgTypes[8]
+	mi := &file_shared_proto_v1_hub_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -649,7 +957,7 @@ func (x *HeartbeatAck) String() string {
 func (*HeartbeatAck) ProtoMessage() {}
 
 func (x *HeartbeatAck) ProtoReflect() protoreflect.Message {
-	mi := &file_shared_proto_v1_hub_proto_msgTypes[8]
+	mi := &file_shared_proto_v1_hub_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -662,7 +970,7 @@ func (x *HeartbeatAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatAck.ProtoReflect.Descriptor instead.
 func (*HeartbeatAck) Descriptor() ([]byte, []int) {
-	return file_shared_proto_v1_hub_proto_rawDescGZIP(), []int{8}
+	return file_shared_proto_v1_hub_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *HeartbeatAck) GetSequence() uint64 {
@@ -679,6 +987,128 @@ func (x *HeartbeatAck) GetServerTimeUnix() int64 {
 	return 0
 }
 
+type RuntimeStatusAck struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Sequence       uint64                 `protobuf:"varint,1,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	ServerTimeUnix int64                  `protobuf:"varint,2,opt,name=server_time_unix,json=serverTimeUnix,proto3" json:"server_time_unix,omitempty"`
+	ConfigSnapshot *ConfigSnapshot        `protobuf:"bytes,3,opt,name=config_snapshot,json=configSnapshot,proto3" json:"config_snapshot,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *RuntimeStatusAck) Reset() {
+	*x = RuntimeStatusAck{}
+	mi := &file_shared_proto_v1_hub_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RuntimeStatusAck) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RuntimeStatusAck) ProtoMessage() {}
+
+func (x *RuntimeStatusAck) ProtoReflect() protoreflect.Message {
+	mi := &file_shared_proto_v1_hub_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RuntimeStatusAck.ProtoReflect.Descriptor instead.
+func (*RuntimeStatusAck) Descriptor() ([]byte, []int) {
+	return file_shared_proto_v1_hub_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *RuntimeStatusAck) GetSequence() uint64 {
+	if x != nil {
+		return x.Sequence
+	}
+	return 0
+}
+
+func (x *RuntimeStatusAck) GetServerTimeUnix() int64 {
+	if x != nil {
+		return x.ServerTimeUnix
+	}
+	return 0
+}
+
+func (x *RuntimeStatusAck) GetConfigSnapshot() *ConfigSnapshot {
+	if x != nil {
+		return x.ConfigSnapshot
+	}
+	return nil
+}
+
+type GatewayRegistrationResult struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// When approval is required, HUB first sends a registered/pending result,
+	// keeps the stream open, then sends the final active result after approval.
+	Registered       bool   `protobuf:"varint,1,opt,name=registered,proto3" json:"registered,omitempty"`
+	ApprovalRequired bool   `protobuf:"varint,2,opt,name=approval_required,json=approvalRequired,proto3" json:"approval_required,omitempty"`
+	NodeStatus       string `protobuf:"bytes,3,opt,name=node_status,json=nodeStatus,proto3" json:"node_status,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *GatewayRegistrationResult) Reset() {
+	*x = GatewayRegistrationResult{}
+	mi := &file_shared_proto_v1_hub_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GatewayRegistrationResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GatewayRegistrationResult) ProtoMessage() {}
+
+func (x *GatewayRegistrationResult) ProtoReflect() protoreflect.Message {
+	mi := &file_shared_proto_v1_hub_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GatewayRegistrationResult.ProtoReflect.Descriptor instead.
+func (*GatewayRegistrationResult) Descriptor() ([]byte, []int) {
+	return file_shared_proto_v1_hub_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *GatewayRegistrationResult) GetRegistered() bool {
+	if x != nil {
+		return x.Registered
+	}
+	return false
+}
+
+func (x *GatewayRegistrationResult) GetApprovalRequired() bool {
+	if x != nil {
+		return x.ApprovalRequired
+	}
+	return false
+}
+
+func (x *GatewayRegistrationResult) GetNodeStatus() string {
+	if x != nil {
+		return x.NodeStatus
+	}
+	return ""
+}
+
 type Reauthenticate struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ReasonCode    string                 `protobuf:"bytes,1,opt,name=reason_code,json=reasonCode,proto3" json:"reason_code,omitempty"`
@@ -688,7 +1118,7 @@ type Reauthenticate struct {
 
 func (x *Reauthenticate) Reset() {
 	*x = Reauthenticate{}
-	mi := &file_shared_proto_v1_hub_proto_msgTypes[9]
+	mi := &file_shared_proto_v1_hub_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -700,7 +1130,7 @@ func (x *Reauthenticate) String() string {
 func (*Reauthenticate) ProtoMessage() {}
 
 func (x *Reauthenticate) ProtoReflect() protoreflect.Message {
-	mi := &file_shared_proto_v1_hub_proto_msgTypes[9]
+	mi := &file_shared_proto_v1_hub_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -713,7 +1143,7 @@ func (x *Reauthenticate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Reauthenticate.ProtoReflect.Descriptor instead.
 func (*Reauthenticate) Descriptor() ([]byte, []int) {
-	return file_shared_proto_v1_hub_proto_rawDescGZIP(), []int{9}
+	return file_shared_proto_v1_hub_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *Reauthenticate) GetReasonCode() string {
@@ -727,47 +1157,84 @@ var File_shared_proto_v1_hub_proto protoreflect.FileDescriptor
 
 const file_shared_proto_v1_hub_proto_rawDesc = "" +
 	"\n" +
-	"\x19shared/proto/v1/hub.proto\x12\x10velotrust.hub.v1\"\x98\x02\n" +
+	"\x19shared/proto/v1/hub.proto\x12\x10velotrust.hub.v1\"\xe9\x02\n" +
 	"\fAgentMessage\x12/\n" +
 	"\x05hello\x18\x01 \x01(\v2\x17.velotrust.hub.v1.HelloH\x00R\x05hello\x12;\n" +
 	"\theartbeat\x18\x02 \x01(\v2\x1b.velotrust.hub.v1.HeartbeatH\x00R\theartbeat\x12H\n" +
 	"\x0econfig_applied\x18\x03 \x01(\v2\x1f.velotrust.hub.v1.ConfigAppliedH\x00R\rconfigApplied\x12H\n" +
-	"\x0eruntime_status\x18\x04 \x01(\v2\x1f.velotrust.hub.v1.RuntimeStatusH\x00R\rruntimeStatusB\x06\n" +
-	"\x04body\"\xbb\x01\n" +
+	"\x0eruntime_status\x18\x04 \x01(\v2\x1f.velotrust.hub.v1.RuntimeStatusH\x00R\rruntimeStatus\x12O\n" +
+	"\x11x25519_auth_proof\x18\x05 \x01(\v2!.velotrust.hub.v1.X25519AuthProofH\x00R\x0fx25519AuthProofB\x06\n" +
+	"\x04body\"\xea\x01\n" +
 	"\x05Hello\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x127\n" +
 	"\tnode_kind\x18\x02 \x01(\x0e2\x1a.velotrust.hub.v1.NodeKindR\bnodeKind\x120\n" +
 	"\x14wireguard_public_key\x18\x03 \x01(\tR\x12wireguardPublicKey\x12.\n" +
-	"\x13applied_config_hash\x18\x04 \x01(\tR\x11appliedConfigHash\"'\n" +
+	"\x13applied_config_hash\x18\x04 \x01(\tR\x11appliedConfigHash\x12-\n" +
+	"\x12registration_token\x18\x05 \x01(\tR\x11registrationToken\"'\n" +
 	"\tHeartbeat\x12\x1a\n" +
-	"\bsequence\x18\x01 \x01(\x04R\bsequence\"i\n" +
+	"\bsequence\x18\x01 \x01(\x04R\bsequence\"\xa7\x01\n" +
 	"\rConfigApplied\x12\x1f\n" +
 	"\vconfig_hash\x18\x01 \x01(\tR\n" +
 	"configHash\x12\x18\n" +
 	"\asuccess\x18\x02 \x01(\bR\asuccess\x12\x1d\n" +
 	"\n" +
-	"error_code\x18\x03 \x01(\tR\terrorCode\"q\n" +
+	"error_code\x18\x03 \x01(\tR\terrorCode\x12\x17\n" +
+	"\atask_id\x18\x04 \x01(\tR\x06taskId\x12#\n" +
+	"\rerror_message\x18\x05 \x01(\tR\ferrorMessage\"\xe7\x02\n" +
 	"\rRuntimeStatus\x120\n" +
 	"\x14connected_peer_count\x18\x01 \x01(\rR\x12connectedPeerCount\x12.\n" +
-	"\x13applied_config_hash\x18\x02 \x01(\tR\x11appliedConfigHash\"\xab\x02\n" +
+	"\x13applied_config_hash\x18\x02 \x01(\tR\x11appliedConfigHash\x12#\n" +
+	"\ragent_version\x18\x03 \x01(\tR\fagentVersion\x12)\n" +
+	"\x10wireguard_status\x18\x04 \x01(\tR\x0fwireguardStatus\x12#\n" +
+	"\rhealth_status\x18\x05 \x01(\tR\fhealthStatus\x12&\n" +
+	"\x0flast_error_code\x18\x06 \x01(\tR\rlastErrorCode\x12\x1a\n" +
+	"\bsequence\x18\a \x01(\x04R\bsequence\x12;\n" +
+	"\x1aconnected_peer_count_known\x18\b \x01(\bR\x17connectedPeerCountKnown\"\xb4\x02\n" +
+	"\x13X25519AuthChallenge\x12!\n" +
+	"\fchallenge_id\x18\x01 \x01(\fR\vchallengeId\x12\x14\n" +
+	"\x05nonce\x18\x02 \x01(\fR\x05nonce\x127\n" +
+	"\x18hub_ephemeral_public_key\x18\x03 \x01(\fR\x15hubEphemeralPublicKey\x123\n" +
+	"\x16expires_at_unix_millis\x18\x04 \x01(\x03R\x13expiresAtUnixMillis\x12&\n" +
+	"\x0fhub_instance_id\x18\x05 \x01(\tR\rhubInstanceId\x125\n" +
+	"\x16registration_challenge\x18\x06 \x01(\bR\x15registrationChallenge\x12\x17\n" +
+	"\anode_id\x18\a \x01(\tR\x06nodeId\"J\n" +
+	"\x0fX25519AuthProof\x12!\n" +
+	"\fchallenge_id\x18\x01 \x01(\fR\vchallengeId\x12\x14\n" +
+	"\x05proof\x18\x02 \x01(\fR\x05proof\"\xcb\x04\n" +
 	"\n" +
 	"HubMessage\x125\n" +
 	"\awelcome\x18\x01 \x01(\v2\x19.velotrust.hub.v1.WelcomeH\x00R\awelcome\x12K\n" +
 	"\x0fconfig_snapshot\x18\x02 \x01(\v2 .velotrust.hub.v1.ConfigSnapshotH\x00R\x0econfigSnapshot\x12E\n" +
 	"\rheartbeat_ack\x18\x03 \x01(\v2\x1e.velotrust.hub.v1.HeartbeatAckH\x00R\fheartbeatAck\x12J\n" +
-	"\x0ereauthenticate\x18\x04 \x01(\v2 .velotrust.hub.v1.ReauthenticateH\x00R\x0ereauthenticateB\x06\n" +
-	"\x04body\"f\n" +
+	"\x0ereauthenticate\x18\x04 \x01(\v2 .velotrust.hub.v1.ReauthenticateH\x00R\x0ereauthenticate\x12[\n" +
+	"\x15x25519_auth_challenge\x18\x05 \x01(\v2%.velotrust.hub.v1.X25519AuthChallengeH\x00R\x13x25519AuthChallenge\x12R\n" +
+	"\x12runtime_status_ack\x18\x06 \x01(\v2\".velotrust.hub.v1.RuntimeStatusAckH\x00R\x10runtimeStatusAck\x12m\n" +
+	"\x1bgateway_registration_result\x18\a \x01(\v2+.velotrust.hub.v1.GatewayRegistrationResultH\x00R\x19gatewayRegistrationResultB\x06\n" +
+	"\x04body\"\xb1\x01\n" +
 	"\aWelcome\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12<\n" +
-	"\x1aheartbeat_interval_seconds\x18\x02 \x01(\rR\x18heartbeatIntervalSeconds\"Y\n" +
+	"\x1aheartbeat_interval_seconds\x18\x02 \x01(\rR\x18heartbeatIntervalSeconds\x12I\n" +
+	"\x0fconfig_snapshot\x18\x03 \x01(\v2 .velotrust.hub.v1.ConfigSnapshotR\x0econfigSnapshot\"r\n" +
 	"\x0eConfigSnapshot\x12\x1f\n" +
 	"\vconfig_hash\x18\x01 \x01(\tR\n" +
 	"configHash\x12\x18\n" +
-	"\apayload\x18\x03 \x01(\fR\apayloadJ\x04\b\x02\x10\x03R\x06sha256\"T\n" +
+	"\apayload\x18\x03 \x01(\fR\apayload\x12\x17\n" +
+	"\atask_id\x18\x04 \x01(\tR\x06taskIdJ\x04\b\x02\x10\x03R\x06sha256\"T\n" +
 	"\fHeartbeatAck\x12\x1a\n" +
 	"\bsequence\x18\x01 \x01(\x04R\bsequence\x12(\n" +
-	"\x10server_time_unix\x18\x02 \x01(\x03R\x0eserverTimeUnix\"1\n" +
+	"\x10server_time_unix\x18\x02 \x01(\x03R\x0eserverTimeUnix\"\xa3\x01\n" +
+	"\x10RuntimeStatusAck\x12\x1a\n" +
+	"\bsequence\x18\x01 \x01(\x04R\bsequence\x12(\n" +
+	"\x10server_time_unix\x18\x02 \x01(\x03R\x0eserverTimeUnix\x12I\n" +
+	"\x0fconfig_snapshot\x18\x03 \x01(\v2 .velotrust.hub.v1.ConfigSnapshotR\x0econfigSnapshot\"\x89\x01\n" +
+	"\x19GatewayRegistrationResult\x12\x1e\n" +
+	"\n" +
+	"registered\x18\x01 \x01(\bR\n" +
+	"registered\x12+\n" +
+	"\x11approval_required\x18\x02 \x01(\bR\x10approvalRequired\x12\x1f\n" +
+	"\vnode_status\x18\x03 \x01(\tR\n" +
+	"nodeStatus\"1\n" +
 	"\x0eReauthenticate\x12\x1f\n" +
 	"\vreason_code\x18\x01 \x01(\tR\n" +
 	"reasonCode*R\n" +
@@ -792,37 +1259,47 @@ func file_shared_proto_v1_hub_proto_rawDescGZIP() []byte {
 }
 
 var file_shared_proto_v1_hub_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_shared_proto_v1_hub_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_shared_proto_v1_hub_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_shared_proto_v1_hub_proto_goTypes = []any{
-	(NodeKind)(0),          // 0: velotrust.hub.v1.NodeKind
-	(*AgentMessage)(nil),   // 1: velotrust.hub.v1.AgentMessage
-	(*Hello)(nil),          // 2: velotrust.hub.v1.Hello
-	(*Heartbeat)(nil),      // 3: velotrust.hub.v1.Heartbeat
-	(*ConfigApplied)(nil),  // 4: velotrust.hub.v1.ConfigApplied
-	(*RuntimeStatus)(nil),  // 5: velotrust.hub.v1.RuntimeStatus
-	(*HubMessage)(nil),     // 6: velotrust.hub.v1.HubMessage
-	(*Welcome)(nil),        // 7: velotrust.hub.v1.Welcome
-	(*ConfigSnapshot)(nil), // 8: velotrust.hub.v1.ConfigSnapshot
-	(*HeartbeatAck)(nil),   // 9: velotrust.hub.v1.HeartbeatAck
-	(*Reauthenticate)(nil), // 10: velotrust.hub.v1.Reauthenticate
+	(NodeKind)(0),                     // 0: velotrust.hub.v1.NodeKind
+	(*AgentMessage)(nil),              // 1: velotrust.hub.v1.AgentMessage
+	(*Hello)(nil),                     // 2: velotrust.hub.v1.Hello
+	(*Heartbeat)(nil),                 // 3: velotrust.hub.v1.Heartbeat
+	(*ConfigApplied)(nil),             // 4: velotrust.hub.v1.ConfigApplied
+	(*RuntimeStatus)(nil),             // 5: velotrust.hub.v1.RuntimeStatus
+	(*X25519AuthChallenge)(nil),       // 6: velotrust.hub.v1.X25519AuthChallenge
+	(*X25519AuthProof)(nil),           // 7: velotrust.hub.v1.X25519AuthProof
+	(*HubMessage)(nil),                // 8: velotrust.hub.v1.HubMessage
+	(*Welcome)(nil),                   // 9: velotrust.hub.v1.Welcome
+	(*ConfigSnapshot)(nil),            // 10: velotrust.hub.v1.ConfigSnapshot
+	(*HeartbeatAck)(nil),              // 11: velotrust.hub.v1.HeartbeatAck
+	(*RuntimeStatusAck)(nil),          // 12: velotrust.hub.v1.RuntimeStatusAck
+	(*GatewayRegistrationResult)(nil), // 13: velotrust.hub.v1.GatewayRegistrationResult
+	(*Reauthenticate)(nil),            // 14: velotrust.hub.v1.Reauthenticate
 }
 var file_shared_proto_v1_hub_proto_depIdxs = []int32{
 	2,  // 0: velotrust.hub.v1.AgentMessage.hello:type_name -> velotrust.hub.v1.Hello
 	3,  // 1: velotrust.hub.v1.AgentMessage.heartbeat:type_name -> velotrust.hub.v1.Heartbeat
 	4,  // 2: velotrust.hub.v1.AgentMessage.config_applied:type_name -> velotrust.hub.v1.ConfigApplied
 	5,  // 3: velotrust.hub.v1.AgentMessage.runtime_status:type_name -> velotrust.hub.v1.RuntimeStatus
-	0,  // 4: velotrust.hub.v1.Hello.node_kind:type_name -> velotrust.hub.v1.NodeKind
-	7,  // 5: velotrust.hub.v1.HubMessage.welcome:type_name -> velotrust.hub.v1.Welcome
-	8,  // 6: velotrust.hub.v1.HubMessage.config_snapshot:type_name -> velotrust.hub.v1.ConfigSnapshot
-	9,  // 7: velotrust.hub.v1.HubMessage.heartbeat_ack:type_name -> velotrust.hub.v1.HeartbeatAck
-	10, // 8: velotrust.hub.v1.HubMessage.reauthenticate:type_name -> velotrust.hub.v1.Reauthenticate
-	1,  // 9: velotrust.hub.v1.HubControl.Connect:input_type -> velotrust.hub.v1.AgentMessage
-	6,  // 10: velotrust.hub.v1.HubControl.Connect:output_type -> velotrust.hub.v1.HubMessage
-	10, // [10:11] is the sub-list for method output_type
-	9,  // [9:10] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	7,  // 4: velotrust.hub.v1.AgentMessage.x25519_auth_proof:type_name -> velotrust.hub.v1.X25519AuthProof
+	0,  // 5: velotrust.hub.v1.Hello.node_kind:type_name -> velotrust.hub.v1.NodeKind
+	9,  // 6: velotrust.hub.v1.HubMessage.welcome:type_name -> velotrust.hub.v1.Welcome
+	10, // 7: velotrust.hub.v1.HubMessage.config_snapshot:type_name -> velotrust.hub.v1.ConfigSnapshot
+	11, // 8: velotrust.hub.v1.HubMessage.heartbeat_ack:type_name -> velotrust.hub.v1.HeartbeatAck
+	14, // 9: velotrust.hub.v1.HubMessage.reauthenticate:type_name -> velotrust.hub.v1.Reauthenticate
+	6,  // 10: velotrust.hub.v1.HubMessage.x25519_auth_challenge:type_name -> velotrust.hub.v1.X25519AuthChallenge
+	12, // 11: velotrust.hub.v1.HubMessage.runtime_status_ack:type_name -> velotrust.hub.v1.RuntimeStatusAck
+	13, // 12: velotrust.hub.v1.HubMessage.gateway_registration_result:type_name -> velotrust.hub.v1.GatewayRegistrationResult
+	10, // 13: velotrust.hub.v1.Welcome.config_snapshot:type_name -> velotrust.hub.v1.ConfigSnapshot
+	10, // 14: velotrust.hub.v1.RuntimeStatusAck.config_snapshot:type_name -> velotrust.hub.v1.ConfigSnapshot
+	1,  // 15: velotrust.hub.v1.HubControl.Connect:input_type -> velotrust.hub.v1.AgentMessage
+	8,  // 16: velotrust.hub.v1.HubControl.Connect:output_type -> velotrust.hub.v1.HubMessage
+	16, // [16:17] is the sub-list for method output_type
+	15, // [15:16] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_shared_proto_v1_hub_proto_init() }
@@ -835,12 +1312,16 @@ func file_shared_proto_v1_hub_proto_init() {
 		(*AgentMessage_Heartbeat)(nil),
 		(*AgentMessage_ConfigApplied)(nil),
 		(*AgentMessage_RuntimeStatus)(nil),
+		(*AgentMessage_X25519AuthProof)(nil),
 	}
-	file_shared_proto_v1_hub_proto_msgTypes[5].OneofWrappers = []any{
+	file_shared_proto_v1_hub_proto_msgTypes[7].OneofWrappers = []any{
 		(*HubMessage_Welcome)(nil),
 		(*HubMessage_ConfigSnapshot)(nil),
 		(*HubMessage_HeartbeatAck)(nil),
 		(*HubMessage_Reauthenticate)(nil),
+		(*HubMessage_X25519AuthChallenge)(nil),
+		(*HubMessage_RuntimeStatusAck)(nil),
+		(*HubMessage_GatewayRegistrationResult)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -848,7 +1329,7 @@ func file_shared_proto_v1_hub_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_shared_proto_v1_hub_proto_rawDesc), len(file_shared_proto_v1_hub_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   10,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

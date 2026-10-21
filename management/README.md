@@ -51,7 +51,7 @@ IAM 的 JRPC 方法使用 `IAM_Method` 命名。登录、Passkey 登录是公开
 
 Gateway inventory 和凭证表通过 `006_gateway_enrollment.sql` 创建，权限通过 `007_gateway_registration_permissions.sql` 加入，并授予活动的 `platform_admin` 角色。网关注册凭证页面已接入这些 JRPC 接口。Gateway Agent 端的凭证消费、节点身份认证、注册审批和注册后配置下发尚未实现；创建网关并签发凭证目前只完成凭证管理，不代表 Gateway 已完成入网。
 
-网络站点直接保存为 `t_ztna_network` 中 `network_type='site'` 的记录；站点 ID、名称、CIDR、可选网关、状态和逻辑删除标记都由同一行维护。迁移 013 为网络目录增加站点字段和站点权限，不创建单独的站点表。已关联网关或节点的站点不能停用、删除或修改 CIDR；停用或删除站点会同时停用关联 NAT。站点 NAT 通过 `SITE_SaveNATMapping` 和 `ztna.site.write` 管理，并继续写入 `t_ztna_nat_mapping`；它目前只是配置台账，尚未同步至 Gateway Agent 数据面。
+网络站点直接保存为 `t_ztna_network` 中 `network_type='site'` 的记录；站点 ID、名称、CIDR、可选网关、状态和逻辑删除标记都由同一行维护。迁移 013 为网络目录增加站点字段和站点权限，不创建单独的站点表。站点创建后名称和 CIDR 固定，编辑只修改 Gateway 关联和状态；停用或删除站点会同时停用关联 NAT，删除还会清空 Gateway 关联并逻辑删除站点。站点 NAT 通过 `SITE_SaveNATMapping` 和 `ztna.site.write` 管理，持久化于 `t_ztna_nat_mapping`，启用映射由 HUB 编译并同步至 Gateway Agent 数据面。
 
 `t_ztna_overlay_network` 保存单例 Overlay 全局网段，管理员须先在 IPAM 页面初始化其 `10.0.0.0/8` 私有 Class A 地址空间中的 CIDR，之后才能创建地址池；`t_ztna_address_pool` 和 `t_ztna_address_lease` 管理该范围内的 IPv4 Overlay 地址池、分配和释放历史。
 

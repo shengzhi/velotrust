@@ -21,7 +21,6 @@ const (
 	TableAuthorizationGrant       = "t_ztna_authorization_grant"
 	TableTunnel                   = "t_ztna_tunnel"
 	TableTunnelPeer               = "t_ztna_tunnel_peer"
-	TableConfig                   = "t_ztna_config"
 	TableNodeConfigTask           = "t_ztna_node_config_task"
 	TableNodeConfigTaskEvent      = "t_ztna_node_config_task_event"
 	TableNodeStatusReport         = "t_ztna_node_status_report"
@@ -233,21 +232,6 @@ type TunnelPeer struct {
 
 func (TunnelPeer) TableName() string { return TableTunnelPeer }
 
-// Config stores the one current expected config per target. ConfigHash tracks
-// content convergence; BaseModel.VersionNo is only a persistence token.
-type Config struct {
-	database.BaseModel `xorm:"extends"`
-	ID                 int64   `xorm:"pk autoincr 'id'"`
-	TargetType         string  `xorm:"'target_type'"`
-	TargetID           int64   `xorm:"'target_id'"`
-	ConfigHash         string  `xorm:"'config_hash'"`
-	ConfigJSON         []byte  `xorm:"'config_json'"`
-	ConfigBlobRef      *string `xorm:"'config_blob_ref'"`
-	Reason             *string `xorm:"'reason'"`
-}
-
-func (Config) TableName() string { return TableConfig }
-
 type NodeConfigTask struct {
 	database.BaseModel `xorm:"extends"`
 	ID                 int64      `xorm:"pk autoincr 'id'"`
@@ -359,7 +343,6 @@ var (
 	_ database.IModel = (*AuthorizationGrant)(nil)
 	_ database.IModel = (*Tunnel)(nil)
 	_ database.IModel = (*TunnelPeer)(nil)
-	_ database.IModel = (*Config)(nil)
 	_ database.IModel = (*NodeConfigTask)(nil)
 	_ database.IModel = (*NodeConfigTaskEvent)(nil)
 	_ database.IModel = (*NodeStatusReport)(nil)

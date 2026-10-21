@@ -21,11 +21,16 @@ type Server struct {
 	health *health.Server
 }
 
-// NewServer creates a TLS-enabled gRPC server with the standard health API.
+// NewServer creates a gRPC server with the standard health API. A nil TLS
+// config explicitly selects plaintext HTTP/2 transport.
 func NewServer(tlsConfig *tls.Config) *Server {
 	healthServer := health.NewServer()
 	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
-	server := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsConfig)))
+	options := make([]grpc.ServerOption, 0, 1)
+	if tlsConfig != nil {
+		options = append(options, grpc.Creds(credentials.NewTLS(tlsConfig)))
+	}
+	server := grpc.NewServer(options...)
 	healthpb.RegisterHealthServer(server, healthServer)
 	return &Server{server: server, health: healthServer}
 }

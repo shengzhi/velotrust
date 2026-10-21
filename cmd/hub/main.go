@@ -8,8 +8,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	"velotrust/hub/app"
 	"velotrust/hub/config"
-	hubruntime "velotrust/hub/runtime"
 )
 
 func main() {
@@ -21,11 +21,12 @@ func main() {
 		slog.Error("load HUB config", "error", err)
 		os.Exit(1)
 	}
-	server, err := hubruntime.New(cfg)
+	server, cleanup, err := app.Build(cfg)
 	if err != nil {
 		slog.Error("initialize HUB", "error", err)
 		os.Exit(1)
 	}
+	defer cleanup()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

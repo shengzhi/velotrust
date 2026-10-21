@@ -9,14 +9,16 @@ VERSION ?= dev
 WINTUN_DLL ?=
 PROTOC ?= protoc
 
-.PHONY: help build-gateway-agent build-client-cli-windows build-hub build-management generate-hub-proto
+.PHONY: help build build-gateway-agent build-client-cli-windows build-hub build-management generate-hub-proto
 
 help:
-	@printf '%s\n' 'VeloTrust monorepo' '  make build-gateway-agent      Build a static gateway-agent into $(GATEWAY_AGENT)' '  make build-client-cli-windows Build Windows amd64 client CLI into $(CLIENT_CLI_WINDOWS)' '    Optional: WINTUN_DLL=/path/to/wintun.dll copies the runtime beside the CLI.' '  make generate-hub-proto       Generate HUB gRPC Go contracts' '  make build-hub               Build the HUB server into $(HUB)' '  make build-management        Build the Management JRPC server into $(MANAGEMENT)' 'See docs/ARCHITECTURE.md for package boundaries.'
+	@printf '%s\n' 'VeloTrust monorepo' '  make build                   Build HUB, Gateway Agent, and Management' '  make build-gateway-agent      Build a static gateway-agent into $(GATEWAY_AGENT)' '  make build-client-cli-windows Build Windows amd64 client CLI into $(CLIENT_CLI_WINDOWS)' '    Optional: WINTUN_DLL=/path/to/wintun.dll copies the runtime beside the CLI.' '  make generate-hub-proto       Generate HUB gRPC Go contracts' '  make build-hub               Build the HUB server into $(HUB)' '  make build-management        Build the Management JRPC server into $(MANAGEMENT)' 'See docs/ARCHITECTURE.md for package boundaries.'
+
+build: build-hub build-gateway-agent build-management
 
 build-gateway-agent:
 	@mkdir -p "$(BIN_DIR)"
-	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -o "$(GATEWAY_AGENT)" ./cmd/gateway-agent
+	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -ldflags "-X velotrust/gateway/internal/buildinfo.Version=$(VERSION)" -o "$(GATEWAY_AGENT)" ./cmd/gateway-agent
 
 build-client-cli-windows:
 	@mkdir -p "$(BIN_DIR)"
