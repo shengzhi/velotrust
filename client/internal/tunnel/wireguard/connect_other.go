@@ -15,3 +15,7 @@ import (
 func Connect(context.Context, string, string, clientconfig.Tunnel, io.Writer) error {
 	return errors.New("live client tunnel connection is supported on Windows only")
 }
+
+func ConnectWithReady(context.Context, string, string, clientconfig.Tunnel, io.Writer, chan<- error) error {
+	return errors.New("live client tunnel connection is supported on Windows only")
+}

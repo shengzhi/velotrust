@@ -22,21 +22,28 @@ message AgentMessage {
     Heartbeat heartbeat = 2;
     ConfigApplied config_applied = 3;
     RuntimeStatus runtime_status = 4;
-    // Gateway must answer the first challenge before sending any other
+    // An Agent must answer the first challenge before sending any other
     // control-plane message on this stream.
     X25519AuthProof x25519_auth_proof = 5;
   }
 }
 
 message Hello {
-  // Deprecated: HUB resolves registered nodes by their X25519 public key and
-  // first-time enrollment targets from the unique registration token.
+  // Deprecated; node identity is resolved from the proved X25519 public key.
   string node_id = 1;
   NodeKind node_kind = 2;
   string wireguard_public_key = 3;
   string applied_config_hash = 4;
   // Present only for the one-time Gateway enrollment exchange.
   string registration_token = 5;
+  // Client credentials are required for each Client control connection.
+  // HUB accepts them only over TLS. A first successful login also registers
+  // the supplied device identity and its X25519 public key.
+  string client_username = 6;
+  string client_password = 7;
+  string client_device_name = 8;
+  string client_platform = 9;
+  string agent_version = 10;
 }
 
 message Heartbeat {
@@ -65,9 +72,9 @@ message RuntimeStatus {
   bool connected_peer_count_known = 8;
 }
 
-// X25519AuthChallenge is sent only after the HUB has loaded and approved the
-// Gateway's registered public key. It is bound to the current TLS connection
-// by the challenge-specific TLS exporter used to compute the proof.
+// X25519AuthChallenge is sent after the HUB has loaded and approved the
+// Gateway or Client registered public key. It is bound to the current TLS
+// connection by the challenge-specific TLS exporter used to compute the proof.
 message X25519AuthChallenge {
   bytes challenge_id = 1;
   bytes nonce = 2;
@@ -93,6 +100,7 @@ message HubMessage {
     X25519AuthChallenge x25519_auth_challenge = 5;
     RuntimeStatusAck runtime_status_ack = 6;
     GatewayRegistrationResult gateway_registration_result = 7;
+    ClientRegistrationResult client_registration_result = 8;
   }
 }
 
@@ -125,6 +133,13 @@ message RuntimeStatusAck {
 message GatewayRegistrationResult {
   // When approval is required, HUB first sends a registered/pending result,
   // keeps the stream open, then sends the final active result after approval.
+  bool registered = 1;
+  bool approval_required = 2;
+  string node_status = 3;
+}
+
+message ClientRegistrationResult {
+  // Sent when employee login creates the Client device for the first time.
   bool registered = 1;
   bool approval_required = 2;
   string node_status = 3;

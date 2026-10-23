@@ -24,6 +24,7 @@ var methodPolicies = map[string]middleware.IAMMethodPolicy{
 	"UpdatePool":             {Authenticated: true, Permission: "ipam.network.write"},
 	"SetPoolStatus":          {Authenticated: true, Permission: "ipam.network.write"},
 	"ListLeases":             {Authenticated: true, Permission: "ipam.network.read"},
+	"ListEmployeeGroups":     {Authenticated: true, Permission: "ipam.network.read"},
 	"AllocateAddress":        {Authenticated: true, Permission: "ipam.network.write"},
 	"ReleaseLease":           {Authenticated: true, Permission: "ipam.network.write"},
 	"CheckPrefix":            {Authenticated: true, Permission: "ipam.network.read"},
@@ -110,6 +111,7 @@ type PoolArgs struct {
 	PoolType       string  `json:"pool_type" validate:"required,oneof=Gateway User-Device Service-VIP"`
 	AllocationMode string  `json:"allocation_mode" validate:"required,oneof=static dynamic"`
 	IDPGroup       *string `json:"idp_group" validate:"omitempty,max=128"`
+	ClientGroupID  *int64  `json:"client_group_id" validate:"omitempty,gt=0"`
 	GatewayBinding *string `json:"gateway_binding" validate:"omitempty,max=128"`
 	Color          string  `json:"color" validate:"omitempty,len=7"`
 	Description    *string `json:"description" validate:"omitempty,max=512"`
@@ -120,7 +122,7 @@ func (h *Handler) CreatePool(ctx *jrpc.Context, args *CreatePoolArgs) (*model.Po
 	if args == nil {
 		return nil, errors.New("IPAM pool arguments are required")
 	}
-	return h.service.CreatePool(middleware.ServiceContext(ctx), model.Pool{PoolName: args.PoolName, NetworkCIDR: args.CIDR, Type: args.PoolType, AllocationMode: args.AllocationMode, IDPGroup: args.IDPGroup, GatewayBinding: args.GatewayBinding, Color: args.Color, Description: args.Description})
+	return h.service.CreatePool(middleware.ServiceContext(ctx), model.Pool{PoolName: args.PoolName, NetworkCIDR: args.CIDR, Type: args.PoolType, AllocationMode: args.AllocationMode, IDPGroup: args.IDPGroup, ClientGroupID: args.ClientGroupID, GatewayBinding: args.GatewayBinding, Color: args.Color, Description: args.Description})
 }
 
 type UpdatePoolArgs struct {
@@ -133,7 +135,7 @@ func (h *Handler) UpdatePool(ctx *jrpc.Context, args *UpdatePoolArgs) (*model.Po
 	if args == nil {
 		return nil, errors.New("IPAM pool arguments are required")
 	}
-	pool := model.Pool{ID: args.PoolID, PoolName: args.PoolName, NetworkCIDR: args.CIDR, Type: args.PoolType, AllocationMode: args.AllocationMode, IDPGroup: args.IDPGroup, GatewayBinding: args.GatewayBinding, Color: args.Color, Description: args.Description}
+	pool := model.Pool{ID: args.PoolID, PoolName: args.PoolName, NetworkCIDR: args.CIDR, Type: args.PoolType, AllocationMode: args.AllocationMode, IDPGroup: args.IDPGroup, ClientGroupID: args.ClientGroupID, GatewayBinding: args.GatewayBinding, Color: args.Color, Description: args.Description}
 	pool.VersionNo = args.ExpectedVersion
 	return h.service.UpdatePool(middleware.ServiceContext(ctx), pool)
 }
@@ -156,6 +158,18 @@ func (h *Handler) SetPoolStatus(ctx *jrpc.Context, args *SetPoolStatusArgs) (*Mu
 
 type ListLeasesReply struct {
 	Items []model.Lease `json:"items"`
+}
+
+type ListEmployeeGroupsReply struct {
+	Items []model.PoolGroupOption `json:"items"`
+}
+
+func (h *Handler) ListEmployeeGroups(ctx *jrpc.Context, _ *struct{}) (*ListEmployeeGroupsReply, error) {
+	items, err := h.service.ListEmployeeGroups(middleware.ServiceContext(ctx))
+	if err != nil {
+		return nil, err
+	}
+	return &ListEmployeeGroupsReply{Items: items}, nil
 }
 
 func (h *Handler) ListLeases(ctx *jrpc.Context, _ *struct{}) (*ListLeasesReply, error) {

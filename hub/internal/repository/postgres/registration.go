@@ -19,8 +19,7 @@ import (
 // GatewayRegistrationRepository checks and atomically consumes first-time
 // Gateway credentials while binding the proved X25519 public key.
 type GatewayRegistrationRepository struct {
-	db    *database.Database
-	actor string
+	db *database.Database
 }
 
 func NewGatewayRegistrationRepository(db *database.Database, instanceID string) (*GatewayRegistrationRepository, error) {
@@ -30,7 +29,7 @@ func NewGatewayRegistrationRepository(db *database.Database, instanceID string) 
 	if strings.TrimSpace(instanceID) == "" {
 		return nil, errors.New("HUB instance ID is required")
 	}
-	return &GatewayRegistrationRepository{db: db, actor: auditActor(instanceID)}, nil
+	return &GatewayRegistrationRepository{db: db}, nil
 }
 
 // CheckCredential resolves the target Gateway from its unique one-time token.
@@ -95,6 +94,10 @@ func (r *GatewayRegistrationRepository) RegisterGateway(ctx context.Context, nod
 		if !found || node.NodeStatus != "pending" || node.PublicKey != nil || node.RegisteredAt != nil {
 			return auth.ErrRegistrationNotAllowed
 		}
+		actor := nodeAuditActor(node.NodeType, node.NodeCode)
+		if actor == "" {
+			return auth.ErrRegistrationNotAllowed
+		}
 
 		var credential model.GatewayRegistrationToken
 		found, err = tx.SQL(`
@@ -131,7 +134,7 @@ func (r *GatewayRegistrationRepository) RegisterGateway(ctx context.Context, nod
 		if !requireApproval {
 			node.NodeStatus = "active"
 		}
-		node.Update(r.actor)
+		node.Update(actor)
 		node.Cols("public_key", "registered_at", "node_status")
 		node.AddSaveCondition("node_type='gateway'")
 		node.AddSaveCondition("node_status='pending'")
@@ -149,7 +152,7 @@ func (r *GatewayRegistrationRepository) RegisterGateway(ctx context.Context, nod
 		credential.UsedCount = 1
 		credential.UsedAt = &registeredAt
 		credential.UsedIP = usedIP
-		credential.Update(r.actor)
+		credential.Update(actor)
 		credential.Cols("status", "used_count", "used_at", "used_ip")
 		credential.AddSaveCondition("status='pending'")
 		credential.AddSaveCondition("used_count=0")

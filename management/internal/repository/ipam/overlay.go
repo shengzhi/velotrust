@@ -134,26 +134,29 @@ func assertOverlayCIDRCompatible(s *xorm.Session, cidr string) error {
 }
 
 func (r *Repository) ListPools(ctx *servicecontext.Context) ([]model.Pool, error) {
-	query := "SELECT p.id, p.pool_name, p.network_cidr::text AS network_cidr, p.pool_type, p.allocation_mode, p.idp_group, p.gateway_binding, p.color, p.description, p.status, " +
+	query := "SELECT p.id, p.pool_name, p.network_cidr::text AS network_cidr, p.pool_type, p.allocation_mode, p.idp_group, p.client_group_id, group_row.group_name AS client_group_name, p.gateway_binding, p.color, p.description, p.status, " +
 		"COUNT(l.id) FILTER (WHERE l.status IN ('active','reserved')) AS used, p.created_at, p.updated_at, p.version_no " +
-		"FROM t_ztna_address_pool p LEFT JOIN t_ztna_address_lease l ON l.pool_id=p.id GROUP BY p.id ORDER BY p.pool_name, p.id"
+		"FROM t_ztna_address_pool p LEFT JOIN t_ztna_address_lease l ON l.pool_id=p.id " +
+		"LEFT JOIN t_iam_group group_row ON group_row.id=p.client_group_id GROUP BY p.id, group_row.group_name ORDER BY p.pool_name, p.id"
 	s := r.db.Engine().NewSession().Context(ctx)
 	defer s.Close()
 	type poolRow struct {
-		ID             int64     `xorm:"'id'"`
-		PoolName       string    `xorm:"'pool_name'"`
-		NetworkCIDR    string    `xorm:"'network_cidr'"`
-		Type           string    `xorm:"'pool_type'"`
-		AllocationMode string    `xorm:"'allocation_mode'"`
-		IDPGroup       *string   `xorm:"'idp_group'"`
-		GatewayBinding *string   `xorm:"'gateway_binding'"`
-		Color          string    `xorm:"'color'"`
-		Description    *string   `xorm:"'description'"`
-		Status         string    `xorm:"'status'"`
-		Used           int64     `xorm:"'used'"`
-		CreatedAt      time.Time `xorm:"'created_at'"`
-		UpdatedAt      time.Time `xorm:"'updated_at'"`
-		VersionNo      int64     `xorm:"'version_no'"`
+		ID              int64     `xorm:"'id'"`
+		PoolName        string    `xorm:"'pool_name'"`
+		NetworkCIDR     string    `xorm:"'network_cidr'"`
+		Type            string    `xorm:"'pool_type'"`
+		AllocationMode  string    `xorm:"'allocation_mode'"`
+		IDPGroup        *string   `xorm:"'idp_group'"`
+		ClientGroupID   *int64    `xorm:"'client_group_id'"`
+		ClientGroupName string    `xorm:"'client_group_name'"`
+		GatewayBinding  *string   `xorm:"'gateway_binding'"`
+		Color           string    `xorm:"'color'"`
+		Description     *string   `xorm:"'description'"`
+		Status          string    `xorm:"'status'"`
+		Used            int64     `xorm:"'used'"`
+		CreatedAt       time.Time `xorm:"'created_at'"`
+		UpdatedAt       time.Time `xorm:"'updated_at'"`
+		VersionNo       int64     `xorm:"'version_no'"`
 	}
 	var rows []poolRow
 	if err := s.SQL(query).Find(&rows); err != nil {
@@ -163,7 +166,8 @@ func (r *Repository) ListPools(ctx *servicecontext.Context) ([]model.Pool, error
 	for i, row := range rows {
 		pools[i] = model.Pool{
 			ID: row.ID, PoolName: row.PoolName, NetworkCIDR: row.NetworkCIDR, Type: row.Type,
-			AllocationMode: row.AllocationMode, IDPGroup: row.IDPGroup, GatewayBinding: row.GatewayBinding,
+			AllocationMode: row.AllocationMode, IDPGroup: row.IDPGroup, ClientGroupID: row.ClientGroupID,
+			ClientGroupName: row.ClientGroupName, GatewayBinding: row.GatewayBinding,
 			Color: row.Color, Description: row.Description, Status: row.Status, Used: row.Used,
 		}
 		pools[i].VersionNo, pools[i].CreatedAt, pools[i].UpdatedAt = row.VersionNo, row.CreatedAt, row.UpdatedAt
@@ -184,6 +188,9 @@ func (r *Repository) CreatePool(ctx *servicecontext.Context, actorID int64, pool
 			return err
 		}
 		if err := assertPoolCIDRAvailable(s, pool.NetworkCIDR, 0); err != nil {
+			return err
+		}
+		if err := validatePoolClientGroup(s, pool, 0); err != nil {
 			return err
 		}
 		pool.Status = model.StatusActive
@@ -235,8 +242,11 @@ func (r *Repository) UpdatePool(ctx *servicecontext.Context, actorID int64, pool
 				return err
 			}
 		}
+		if err := validatePoolClientGroup(s, pool, pool.ID); err != nil {
+			return err
+		}
 		pool.Update(ctx.UserName())
-		pool.Cols("pool_name", "network_cidr", "pool_type", "allocation_mode", "idp_group", "gateway_binding", "color", "description")
+		pool.Cols("pool_name", "network_cidr", "pool_type", "allocation_mode", "idp_group", "client_group_id", "gateway_binding", "color", "description")
 		if _, err := tx.Save(pool); err != nil {
 			return fmt.Errorf("update overlay address pool: %w", err)
 		}
@@ -248,6 +258,37 @@ func (r *Repository) UpdatePool(ctx *servicecontext.Context, actorID int64, pool
 		}
 		return nil
 	})
+}
+
+func validatePoolClientGroup(session *xorm.Session, pool *model.Pool, currentPoolID int64) error {
+	if pool == nil || pool.ClientGroupID == nil {
+		return nil
+	}
+	groupID := *pool.ClientGroupID
+	if groupID <= 0 || pool.Type != "User-Device" || pool.AllocationMode != "dynamic" {
+		return errors.New("Client automatic address assignment requires an active employee group and a dynamic User-Device pool")
+	}
+	var group struct {
+		ID int64 `xorm:"'id'"`
+	}
+	found, err := session.SQL("SELECT id FROM t_iam_group WHERE id=? AND status='active' FOR SHARE", groupID).Get(&group)
+	if err != nil {
+		return fmt.Errorf("validate active employee group for address pool: %w", err)
+	}
+	if !found {
+		return errors.New("selected employee group is missing or disabled")
+	}
+	var other struct {
+		PoolName string `xorm:"'pool_name'"`
+	}
+	found, err = session.SQL("SELECT pool_name FROM t_ztna_address_pool WHERE client_group_id=? AND id<>? LIMIT 1", groupID, currentPoolID).Get(&other)
+	if err != nil {
+		return fmt.Errorf("check employee group address pool uniqueness: %w", err)
+	}
+	if found {
+		return fmt.Errorf("employee group is already associated with address pool %q", other.PoolName)
+	}
+	return nil
 }
 
 func (r *Repository) SetPoolStatus(ctx *servicecontext.Context, actorID, poolID int64, status string, expectedVersion int64, audit *model.AuditEvent) error {
@@ -522,6 +563,9 @@ func (r *Repository) saveNATMapping(ctx *servicecontext.Context, actorID int64, 
 	if actorID <= 0 || mapping == nil || mapping.NetworkID <= 0 || audit == nil {
 		return errors.New("IPAM NAT mapping and audit event are required")
 	}
+	if mapping.NATType != "DNAT_VirtualIP" {
+		return errors.New("only DNAT_VirtualIP is supported for optional shadow mappings; site SNAT is generated automatically")
+	}
 	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
 		s := tx.Session
 		if err := lockIPAMCatalog(s); err != nil {
@@ -557,8 +601,9 @@ func (r *Repository) saveNATMapping(ctx *servicecontext.Context, actorID int64, 
 				return errors.New("NAT virtual CIDR must be a valid non-default network prefix")
 			}
 			*mapping.VirtualCIDR = virtual.Masked().String()
-			if mapping.NATType == "1:1_Bidirectional" && virtual.Bits() != mustPrefixBits(network.CIDR) {
-				return errors.New("1:1 bidirectional NAT requires real and virtual CIDRs with the same prefix length")
+			realPrefix, _ := netip.ParsePrefix(network.CIDR)
+			if virtual.Addr().Is4() != realPrefix.Addr().Is4() || virtual.Bits() != realPrefix.Bits() {
+				return errors.New("prefix DNAT requires matching address families and prefix lengths")
 			}
 			if err := assertNATShadowAvailable(s, *mapping.VirtualCIDR, mapping.ID); err != nil {
 				return err
@@ -682,14 +727,6 @@ func assertNATShadowAvailable(s *xorm.Session, cidr string, mappingID int64) err
 		}
 	}
 	return nil
-}
-
-func mustPrefixBits(cidr string) int {
-	prefix, err := netip.ParsePrefix(cidr)
-	if err != nil {
-		return -1
-	}
-	return prefix.Bits()
 }
 
 func lockIPAMCatalog(s *xorm.Session) error {

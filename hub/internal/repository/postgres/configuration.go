@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"sort"
 	"strings"
@@ -25,8 +26,9 @@ const maxGatewayConfigPayload = 2 << 20
 // current ZTNA, tunnel, and IPAM tables. Configuration tasks retain delivery
 // state; they do not store a second copy of desired configuration.
 type GatewayConfigurationSource struct {
-	db    *database.Database
-	actor string
+	db         *database.Database
+	actor      string
+	instanceID string
 }
 
 func NewGatewayConfigurationSource(db *database.Database, instanceID string) (*GatewayConfigurationSource, error) {
@@ -39,7 +41,7 @@ func NewGatewayConfigurationSource(db *database.Database, instanceID string) (*G
 	if strings.TrimSpace(instanceID) == "" {
 		return nil, errors.New("HUB instance ID is required")
 	}
-	return &GatewayConfigurationSource{db: db, actor: auditActor(instanceID)}, nil
+	return &GatewayConfigurationSource{db: db, actor: auditActor(instanceID), instanceID: instanceID}, nil
 }
 
 type gatewaySnapshotRow struct {
@@ -88,17 +90,28 @@ type gatewayRulePayload struct{}
 
 func (r *GatewayConfigurationSource) Current(ctx context.Context, nodeCode, appliedHash string) (configsync.Snapshot, bool, error) {
 	if ctx == nil || strings.TrimSpace(nodeCode) == "" {
-		return configsync.Snapshot{}, false, errors.New("request context and Gateway node code are required")
+		return configsync.Snapshot{}, false, errors.New("request context and node code are required")
+	}
+	if err := r.reconcileClientAddress(ctx, nodeCode); err != nil {
+		return configsync.Snapshot{}, false, fmt.Errorf("reconcile Client Overlay address before configuration: %w", err)
 	}
 	s := r.db.Engine().NewSession().Context(ctx)
 	defer s.Close()
-	payload, nodeID, err := compileGatewaySnapshot(s, nodeCode)
+	payload, nodeID, err := compileNodeSnapshot(s, nodeCode)
+	if errors.Is(err, configsync.ErrClientAddressNotAssigned) {
+		slog.Info("HUB is withholding Client tunnel configuration because automatic Overlay address assignment is pending", "node_id", nodeCode, "reason", err)
+		return configsync.Snapshot{}, false, nil
+	}
+	if errors.Is(err, configsync.ErrClientConfigurationNotReady) {
+		slog.Info("HUB is withholding Client tunnel configuration because no policy-authorized Gateway configuration is available", "node_id", nodeCode, "reason", err)
+		return configsync.Snapshot{}, false, nil
+	}
 	if err != nil {
 		return configsync.Snapshot{}, false, err
 	}
 	hash, err := configpayload.Hash(payload)
 	if err != nil {
-		return configsync.Snapshot{}, false, fmt.Errorf("hash compiled Gateway configuration: %w", err)
+		return configsync.Snapshot{}, false, fmt.Errorf("hash compiled node configuration: %w", err)
 	}
 	snapshot := configsync.Snapshot{Revision: hash, Payload: payload}
 	if strings.EqualFold(hash, appliedHash) {
@@ -109,6 +122,41 @@ func (r *GatewayConfigurationSource) Current(ctx context.Context, nodeCode, appl
 		return configsync.Snapshot{}, false, err
 	}
 	return snapshot, true, nil
+}
+
+func compileNodeSnapshot(s *xorm.Session, nodeCode string) ([]byte, int64, error) {
+	var nodeType string
+	found, err := s.SQL(`SELECT node_type FROM public.t_ztna_node WHERE node_code=? AND node_status='active'`, nodeCode).Get(&nodeType)
+	if err != nil {
+		return nil, 0, fmt.Errorf("resolve configuration node type: %w", err)
+	}
+	if !found {
+		return nil, 0, fmt.Errorf("%w: active node was not found", configsync.ErrTargetUnavailable)
+	}
+	switch nodeType {
+	case "gateway":
+		return compileGatewaySnapshot(s, nodeCode)
+	case "client_agent":
+		return compileClientSnapshot(s, nodeCode)
+	default:
+		return nil, 0, fmt.Errorf("%w: node type %q does not receive configuration", configsync.ErrTargetUnavailable, nodeType)
+	}
+}
+
+func (r *GatewayConfigurationSource) AcknowledgeCurrentConfig(ctx context.Context, nodeCode string) error {
+	repository, err := NewAccessChangeRepository(r.db, r.instanceID)
+	if err != nil {
+		return err
+	}
+	return repository.AcknowledgeCurrentConfig(ctx, nodeCode)
+}
+
+func (r *GatewayConfigurationSource) RecordAccessChangeFailure(ctx context.Context, nodeCode, message string) error {
+	repository, err := NewAccessChangeRepository(r.db, r.instanceID)
+	if err != nil {
+		return err
+	}
+	return repository.RecordFailure(ctx, nodeCode, message)
 }
 
 // compileGatewaySnapshot reads all configuration inputs in one SQL statement
@@ -141,7 +189,33 @@ func compileGatewaySnapshot(s *xorm.Session, nodeCode string) ([]byte, int64, er
 			  ON peer.tunnel_id=tunnel.id AND peer.status='active' AND peer.node_id<>node.id
 			JOIN public.t_ztna_node AS peer_node
 			  ON peer_node.id=peer.node_id AND peer_node.node_status='active'
+			LEFT JOIN LATERAL (
+				SELECT device.id, device.status, device.owner_user_id,
+				       EXISTS (
+						SELECT 1 FROM public.t_ztna_device_credential AS credential
+						WHERE credential.device_id=device.id AND credential.public_key=peer_node.public_key
+						  AND credential.status='active' AND credential.not_before <= CURRENT_TIMESTAMP
+						  AND (credential.expires_at IS NULL OR credential.expires_at > CURRENT_TIMESTAMP)
+				       ) AS has_active_credential,
+				       COUNT(*) OVER () AS device_match_count
+				FROM public.t_ztna_device AS device
+				WHERE device.id=peer.device_id OR device.node_id=peer_node.id OR EXISTS (
+					SELECT 1 FROM public.t_ztna_device_credential AS credential
+					WHERE credential.device_id=device.id AND credential.public_key=peer_node.public_key
+				)
+				ORDER BY CASE WHEN device.id=peer.device_id THEN 0 WHEN device.node_id=peer_node.id THEN 1 ELSE 2 END,
+				         device.id
+				LIMIT 1
+			) AS linked_device ON TRUE
+			LEFT JOIN public.t_iam_user AS device_owner ON device_owner.id=linked_device.owner_user_id
 			WHERE membership.node_id=node.id AND membership.status='active'
+			  AND (
+				peer_node.node_type <> 'client_agent'
+				OR (linked_device.id IS NOT NULL AND linked_device.device_match_count=1
+				    AND linked_device.status='active'
+				    AND linked_device.has_active_credential
+				    AND (linked_device.owner_user_id IS NULL OR device_owner.user_status='active'))
+			  )
 		), '[]'::jsonb) AS peers_json,
 	       COALESCE((
 			SELECT jsonb_agg(network.cidr::text ORDER BY network.id)
@@ -242,6 +316,40 @@ func compileGatewaySnapshot(s *xorm.Session, nodeCode string) ([]byte, int64, er
 		payload.Routes = append(payload.Routes, prefix)
 	}
 	sort.Strings(payload.Routes)
+	if len(payload.Routes) > 1 {
+		uniqueRoutes := payload.Routes[:1]
+		for _, route := range payload.Routes[1:] {
+			if route != uniqueRoutes[len(uniqueRoutes)-1] {
+				uniqueRoutes = append(uniqueRoutes, route)
+			}
+		}
+		payload.Routes = uniqueRoutes
+	}
+
+	// For every active network associated with this Gateway, Masquerade client
+	// Overlay addresses as traffic leaves the Gateway for the private site. This
+	// lets the site return traffic without requiring a route back to the Overlay
+	// range. The current IPAM Overlay range is IPv4-only, so IPv6 sites cannot be
+	// safely published until IPv6 Overlay addressing is implemented.
+	if len(payload.Routes) > 0 {
+		if row.OverlayCIDR == nil || strings.TrimSpace(*row.OverlayCIDR) == "" {
+			return nil, 0, fmt.Errorf("%w: automatic site SNAT requires the global Overlay network", configsync.ErrInvalidConfiguration)
+		}
+		overlay, err := canonicalPrefix(*row.OverlayCIDR)
+		if err != nil {
+			return nil, 0, fmt.Errorf("%w: invalid global Overlay network: %v", configsync.ErrInvalidConfiguration, err)
+		}
+		for _, route := range payload.Routes {
+			sitePrefix, _ := netip.ParsePrefix(route)
+			if !sitePrefix.Addr().Is4() {
+				return nil, 0, fmt.Errorf("%w: automatic site SNAT currently requires IPv4 Overlay and IPv4 associated networks", configsync.ErrInvalidConfiguration)
+			}
+			payload.NAT = append(payload.NAT, gatewayNATPayload{
+				Type: "masquerade", SourcePrefix: overlay,
+				DestinationPrefix: sitePrefix.Masked().String(),
+			})
+		}
+	}
 
 	var natRows []struct {
 		Type        string  `json:"nat_type"`
@@ -265,16 +373,16 @@ func compileGatewaySnapshot(s *xorm.Session, nodeCode string) ([]byte, int64, er
 			if err != nil {
 				return nil, 0, fmt.Errorf("%w: invalid NAT virtual network %q: %v", configsync.ErrInvalidConfiguration, *mapping.VirtualCIDR, err)
 			}
+			realPrefix, _ := netip.ParsePrefix(real)
+			virtualPrefix, _ := netip.ParsePrefix(virtual)
+			if realPrefix.Addr().Is4() != virtualPrefix.Addr().Is4() || realPrefix.Bits() != virtualPrefix.Bits() {
+				return nil, 0, fmt.Errorf("%w: NAT real and virtual prefixes must have matching address families and prefix lengths", configsync.ErrInvalidConfiguration)
+			}
 			payload.NAT = append(payload.NAT, gatewayNATPayload{Type: "dnat", ShadowPrefix: virtual, RealPrefix: real})
 		case "SNAT_Masquerade":
-			if row.OverlayCIDR == nil || strings.TrimSpace(*row.OverlayCIDR) == "" {
-				return nil, 0, fmt.Errorf("%w: SNAT masquerade requires the global overlay network", configsync.ErrInvalidConfiguration)
-			}
-			overlay, err := canonicalPrefix(*row.OverlayCIDR)
-			if err != nil {
-				return nil, 0, fmt.Errorf("%w: invalid global overlay network: %v", configsync.ErrInvalidConfiguration, err)
-			}
-			payload.NAT = append(payload.NAT, gatewayNATPayload{Type: "masquerade", SourcePrefix: overlay, DestinationPrefix: real})
+			// Legacy mapping rows used to request per-site SNAT. SNAT is now
+			// generated from every active Gateway-associated site above, so this
+			// record adds no second or duplicate rule.
 		default:
 			return nil, 0, fmt.Errorf("%w: unsupported NAT type %q", configsync.ErrInvalidConfiguration, mapping.Type)
 		}
@@ -301,23 +409,23 @@ func canonicalPrefix(raw string) (string, error) {
 func (r *GatewayConfigurationSource) ensureTask(ctx context.Context, nodeCode string, nodeID int64, configHash, appliedHash string) (string, error) {
 	var taskID string
 	err := r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
-		node, err := lockActiveGateway(tx, nodeCode)
+		node, err := lockActiveNode(tx, nodeCode)
 		if err != nil {
 			return err
 		}
 		if node.ID != nodeID {
-			return errors.New("Gateway target changed while compiling configuration")
+			return errors.New("node target changed while compiling configuration")
 		}
-		currentPayload, _, err := compileGatewaySnapshot(tx.Session, nodeCode)
+		currentPayload, _, err := compileNodeSnapshot(tx.Session, nodeCode)
 		if err != nil {
 			return err
 		}
 		currentHash, err := configpayload.Hash(currentPayload)
 		if err != nil {
-			return fmt.Errorf("hash Gateway configuration in task transaction: %w", err)
+			return fmt.Errorf("hash node configuration in task transaction: %w", err)
 		}
 		if !strings.EqualFold(currentHash, configHash) {
-			return errors.New("Gateway business configuration changed while creating its delivery task")
+			return errors.New("node business configuration changed while creating its delivery task")
 		}
 		var existing model.NodeConfigTask
 		found, err := tx.SQL(`
@@ -376,17 +484,17 @@ func (r *GatewayConfigurationSource) MarkApplied(ctx context.Context, nodeCode, 
 		return errors.New("context, Gateway node code, and applied configuration hash are required")
 	}
 	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
-		node, err := lockActiveGateway(tx, nodeCode)
+		node, err := lockActiveNode(tx, nodeCode)
 		if err != nil {
 			return err
 		}
-		payload, _, err := compileGatewaySnapshot(tx.Session, nodeCode)
+		payload, _, err := compileNodeSnapshot(tx.Session, nodeCode)
 		if err != nil {
 			return err
 		}
 		currentHash, err := configpayload.Hash(payload)
 		if err != nil {
-			return fmt.Errorf("hash current Gateway business configuration: %w", err)
+			return fmt.Errorf("hash current node business configuration: %w", err)
 		}
 		if !strings.EqualFold(currentHash, configHash) {
 			return nil
@@ -407,7 +515,11 @@ func (r *GatewayConfigurationSource) MarkApplied(ctx context.Context, nodeCode, 
 		task.FinishedAt = &now
 		task.LastErrorCode = nil
 		task.LastErrorMessage = nil
-		return r.saveTaskStatus(tx, &task, "applied", "", "", "config.applied", map[string]string{"config_hash": currentHash})
+		actor := nodeAuditActor(node.NodeType, node.NodeCode)
+		if actor == "" {
+			return errors.New("unsupported node configuration audit principal")
+		}
+		return r.saveTaskStatus(tx, &task, "applied", "", "", "config.applied", map[string]string{"config_hash": currentHash}, actor)
 	})
 }
 
@@ -432,17 +544,24 @@ func (r *GatewayConfigurationSource) transitionTask(ctx context.Context, nodeCod
 		return errors.New("context, Gateway identity, task ID, and configuration hash are required")
 	}
 	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
-		node, err := lockActiveGateway(tx, nodeCode)
+		node, err := lockActiveNode(tx, nodeCode)
 		if err != nil {
 			return err
 		}
-		payload, _, err := compileGatewaySnapshot(tx.Session, nodeCode)
+		actor := r.actor
+		if receipt {
+			actor = nodeAuditActor(node.NodeType, node.NodeCode)
+			if actor == "" {
+				return errors.New("unsupported node configuration audit principal")
+			}
+		}
+		payload, _, err := compileNodeSnapshot(tx.Session, nodeCode)
 		if err != nil {
 			return err
 		}
 		currentHash, err := configpayload.Hash(payload)
 		if err != nil {
-			return fmt.Errorf("hash current Gateway business configuration: %w", err)
+			return fmt.Errorf("hash current node business configuration: %w", err)
 		}
 		if !strings.EqualFold(currentHash, configHash) {
 			return errors.New("Gateway configuration receipt is stale")
@@ -514,14 +633,14 @@ func (r *GatewayConfigurationSource) transitionTask(ctx context.Context, nodeCod
 		return r.saveTaskStatus(tx, &task, nextStatus, errorCode, errorMessage, eventType, map[string]string{
 			"config_hash": configHash,
 			"error_code":  errorCode,
-		})
+		}, actor)
 	})
 }
 
-func (r *GatewayConfigurationSource) saveTaskStatus(tx *database.DBTransaction, task *model.NodeConfigTask, status, errorCode, errorMessage, eventType string, detail any) error {
+func (r *GatewayConfigurationSource) saveTaskStatus(tx *database.DBTransaction, task *model.NodeConfigTask, status, errorCode, errorMessage, eventType string, detail any, actor string) error {
 	before := task.Status
 	task.Status = status
-	task.Update(r.actor)
+	task.Update(actor)
 	task.Cols("status", "retry_count", "next_retry_at", "last_error_code", "last_error_message", "started_at", "finished_at")
 	if _, err := tx.Save(task); err != nil {
 		return fmt.Errorf("save Gateway configuration task status: %w", err)
@@ -536,26 +655,26 @@ func (r *GatewayConfigurationSource) saveTaskStatus(tx *database.DBTransaction, 
 		FromStatus: &fromStatus, ToStatus: &toStatus, DetailJSON: detailJSON,
 		OccurredAt: time.Now().UTC(),
 	}
-	event.CreateNew(r.actor)
+	event.CreateNew(actor)
 	if _, err := tx.Save(&event); err != nil {
 		return fmt.Errorf("save Gateway configuration task event: %w", err)
 	}
 	return nil
 }
 
-func lockActiveGateway(tx *database.DBTransaction, nodeCode string) (model.Node, error) {
+func lockActiveNode(tx *database.DBTransaction, nodeCode string) (model.Node, error) {
 	var node model.Node
 	found, err := tx.SQL(`
 		SELECT id, node_code, node_type, node_status, last_config_hash
 		FROM public.t_ztna_node
-		WHERE node_code=? AND node_type='gateway' AND node_status='active'
+		WHERE node_code=? AND node_type IN ('gateway','client_agent') AND node_status='active'
 		FOR UPDATE
 	`, nodeCode).Get(&node)
 	if err != nil {
-		return model.Node{}, fmt.Errorf("lock Gateway configuration target: %w", err)
+		return model.Node{}, fmt.Errorf("lock node configuration target: %w", err)
 	}
 	if !found {
-		return model.Node{}, errors.New("Gateway configuration target is not active")
+		return model.Node{}, errors.New("node configuration target is not active")
 	}
 	return node, nil
 }

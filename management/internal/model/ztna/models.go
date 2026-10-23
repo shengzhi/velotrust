@@ -26,6 +26,8 @@ const (
 	TableNodeStatusReport         = "t_ztna_node_status_report"
 	TableRelay                    = "t_ztna_relay"
 	TableSecurityEvent            = "t_ztna_security_event"
+	TableAccessChangeEvent        = "t_ztna_access_change_event"
+	TableAccessChangeDelivery     = "t_ztna_access_change_delivery"
 )
 
 type Device struct {
@@ -38,6 +40,7 @@ type Device struct {
 	PlatformVersion    *string    `xorm:"'platform_version'"`
 	AgentVersion       *string    `xorm:"'agent_version'"`
 	OwnerUserID        *int64     `xorm:"'owner_user_id'"`
+	NodeID             *int64     `xorm:"'node_id'"`
 	Status             string     `xorm:"'status'"`
 	TrustStatus        string     `xorm:"'trust_status'"`
 	LastSeenAt         *time.Time `xorm:"'last_seen_at'"`
@@ -48,6 +51,47 @@ type Device struct {
 }
 
 func (Device) TableName() string { return TableDevice }
+
+// AccessChangeEvent is a durable request to refresh authorization state on
+// connected Gateways. HUB owns delivery and acknowledgement state.
+type AccessChangeEvent struct {
+	database.BaseModel `xorm:"extends"`
+	ID                 int64  `xorm:"pk autoincr 'id'"`
+	SubjectType        string `xorm:"'subject_type'"`
+	SubjectID          int64  `xorm:"'subject_id'"`
+	ChangeType         string `xorm:"'change_type'"`
+	Status             string `xorm:"'status'"`
+	TargetsInitialized bool   `xorm:"'targets_initialized'"`
+}
+
+func (AccessChangeEvent) TableName() string { return TableAccessChangeEvent }
+
+// AccessChangeDelivery tracks one Gateway's application of a current
+// authorization snapshot for an event.
+type AccessChangeDelivery struct {
+	database.BaseModel `xorm:"extends"`
+	ID                 int64      `xorm:"pk autoincr 'id'"`
+	EventID            int64      `xorm:"'event_id'"`
+	GatewayNodeID      int64      `xorm:"'gateway_node_id'"`
+	Status             string     `xorm:"'status'"`
+	LastNotifiedAt     *time.Time `xorm:"'last_notified_at'"`
+	AcknowledgedAt     *time.Time `xorm:"'acknowledged_at'"`
+	LastError          *string    `xorm:"'last_error'"`
+}
+
+func (AccessChangeDelivery) TableName() string { return TableAccessChangeDelivery }
+
+type AccessChangeStatusView struct {
+	EventID            int64      `json:"event_id"`
+	SubjectType        string     `json:"subject_type"`
+	SubjectID          int64      `json:"subject_id"`
+	Status             string     `json:"status"`
+	TargetCount        int64      `json:"target_count"`
+	AcknowledgedCount  int64      `json:"acknowledged_count"`
+	LastError          *string    `json:"last_error,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	LastAcknowledgedAt *time.Time `json:"last_acknowledged_at,omitempty"`
+}
 
 type DeviceCredential struct {
 	database.BaseModel `xorm:"extends"`

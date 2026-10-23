@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/vishvananda/netlink"
-	"golang.org/x/sys/unix"
 	"golang.zx2c4.com/wireguard/conn"
 	wgdevice "golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
@@ -148,9 +147,9 @@ func (d *Driver) ApplyRoutes(ctx context.Context, prefixes []string) error {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	link, err := netlink.LinkByName(d.interfaceName)
+	tunnelLink, err := netlink.LinkByName(d.interfaceName)
 	if err != nil {
-		return fmt.Errorf("find managed tunnel for routes: %w", err)
+		return fmt.Errorf("find managed tunnel for associated networks: %w", err)
 	}
 	parsed := make([]netip.Prefix, 0, len(prefixes))
 	for _, raw := range prefixes {
@@ -161,7 +160,7 @@ func (d *Driver) ApplyRoutes(ctx context.Context, prefixes []string) error {
 		parsed = append(parsed, prefix.Masked())
 	}
 	if err := removeManagedSiteRoutes(d.routeRealm); err != nil {
-		return fmt.Errorf("remove previous managed site routes: %w", err)
+		return fmt.Errorf("remove legacy managed site routes: %w", err)
 	}
 	for _, prefix := range parsed {
 		probe := prefix.Addr()
@@ -171,11 +170,11 @@ func (d *Driver) ApplyRoutes(ctx context.Context, prefixes []string) error {
 				probe = prefix.Addr()
 			}
 		}
-		// Use the host's normal route lookup. FIBMatch is not supported by
-		// every kernel/netlink combination and can fail with EINVAL. RouteGet
-		// may return a synthetic /32 or /128 destination; that is the lookup
-		// result, not the prefix of the underlying route, so validate the
-		// selected egress interface instead of comparing route prefixes.
+		// A site association identifies a forwarding destination; it does not
+		// require installing a duplicate host route. Use the host's normal route
+		// lookup to verify the existing FIB path and reject forwarding back into
+		// the managed WireGuard tunnel. RouteGet may return a synthetic /32 or
+		// /128 destination, which is fine because only the selected egress matters.
 		resolved, err := netlink.RouteGet(net.IP(probe.AsSlice()))
 		if err != nil {
 			return fmt.Errorf("resolve route for associated network %s: %w", prefix, err)
@@ -184,7 +183,7 @@ func (d *Driver) ApplyRoutes(ctx context.Context, prefixes []string) error {
 			return fmt.Errorf("associated network %s has no host route", prefix)
 		}
 		selected := resolved[0]
-		if selected.LinkIndex == link.Attrs().Index {
+		if selected.LinkIndex == tunnelLink.Attrs().Index {
 			return fmt.Errorf("associated network %s resolves through managed WireGuard interface %q", prefix, d.interfaceName)
 		}
 		if selected.LinkIndex <= 0 {
@@ -199,42 +198,10 @@ func (d *Driver) ApplyRoutes(ctx context.Context, prefixes []string) error {
 		}
 
 		nextHop := "direct"
-		scope := netlink.SCOPE_LINK
-		var gateway net.IP
 		if selected.Gw != nil {
 			nextHop = selected.Gw.String()
-			scope = netlink.SCOPE_UNIVERSE
-			gateway = append(net.IP(nil), selected.Gw...)
 		}
-		table := selected.Table
-		if table == unix.RT_TABLE_UNSPEC {
-			table = unix.RT_TABLE_MAIN
-		}
-		route := &netlink.Route{
-			LinkIndex: selected.LinkIndex,
-			Scope:     scope,
-			Dst: &net.IPNet{
-				IP:   net.IP(prefix.Addr().AsSlice()),
-				Mask: net.CIDRMask(prefix.Bits(), prefix.Addr().BitLen()),
-			},
-			Gw:       gateway,
-			Priority: selected.Priority,
-			Table:    table,
-			Protocol: netlink.RouteProtocol(managedRouteProto),
-			Realm:    d.routeRealm,
-		}
-		if err := netlink.RouteAdd(route); err != nil {
-			if !errors.Is(err, syscall.EEXIST) {
-				return fmt.Errorf("install associated network route %s via %s dev %s: %w", prefix, nextHop, egress.Attrs().Name, err)
-			}
-			// An identical route may already be owned by the host. Accept it
-			// only when the kernel resolves the probe through the same path.
-			current, lookupErr := netlink.RouteGet(net.IP(probe.AsSlice()))
-			if lookupErr != nil || len(current) == 0 || current[0].LinkIndex != selected.LinkIndex || !current[0].Gw.Equal(selected.Gw) {
-				return fmt.Errorf("associated network route %s already exists through a different path", prefix)
-			}
-		}
-		slog.Debug("gateway associated network route installed", "network", prefix, "interface", egress.Attrs().Name, "next_hop", nextHop, "table", table)
+		slog.Debug("gateway associated network uses existing host route", "network", prefix, "interface", egress.Attrs().Name, "next_hop", nextHop)
 		if prefix.Addr().Is4() {
 			d.needsIPv4 = true
 		} else {
@@ -244,9 +211,8 @@ func (d *Driver) ApplyRoutes(ctx context.Context, prefixes []string) error {
 	return nil
 }
 
-// removeManagedSiteRoutes removes only non-tunnel routes marked with the
-// Gateway's reserved route protocol. Peer AllowedIPs routes are attached to
-// the managed tunnel and are handled separately.
+// removeManagedSiteRoutes removes legacy site routes installed by earlier
+// Gateway Agent versions. Current site associations never add host routes.
 func removeManagedSiteRoutes(routeRealm int) error {
 	routes, err := netlink.RouteListFiltered(netlink.FAMILY_ALL, &netlink.Route{
 		Protocol: netlink.RouteProtocol(managedRouteProto),
@@ -266,8 +232,9 @@ func removeManagedSiteRoutes(routeRealm int) error {
 }
 
 // ApplyPeerRoutes installs routes to peer-owned networks over WireGuard. These
-// prefixes come from tunnel.peers[].allowed_ips; Gateway's top-level routes
-// are installed separately as locally routed site networks.
+// prefixes come from tunnel.peers[].allowed_ips; Gateway top-level routes
+// are private destinations reached after packets enter from the WireGuard
+// interface, and are validated against the host FIB.
 func (d *Driver) ApplyPeerRoutes(ctx context.Context, peers []config.Peer) error {
 	if err := ctx.Err(); err != nil {
 		return err

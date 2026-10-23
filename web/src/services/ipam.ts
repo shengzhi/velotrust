@@ -9,6 +9,8 @@ export interface IPAMPool {
   type: 'Gateway' | 'User-Device' | 'Service-VIP';
   allocation_mode: 'static' | 'dynamic';
   idp_group?: string | null;
+  client_group_id?: number | null;
+  client_group_name?: string;
   gateway_binding?: string | null;
   color: string;
   description?: string | null;
@@ -44,12 +46,19 @@ export interface IPAMOverview {
   active_leases: IPAMLease[];
 }
 
+export interface PoolGroupOption {
+  id: number;
+  name: string;
+  code: string;
+  user_count: number;
+}
+
 export interface IPAMPoolInput {
   pool_name: string;
   cidr: string;
   pool_type: IPAMPool['type'];
   allocation_mode: IPAMPool['allocation_mode'];
-  idp_group?: string;
+  client_group_id: number | null;
   gateway_binding?: string;
   color: string;
   description?: string;
@@ -86,6 +95,7 @@ export const ipamApi = {
   setPoolStatus: (pool: IPAMPool, status: IPAMStatus) =>
     jrpcCall<{ success: boolean }>('IPAM_SetPoolStatus', { pool_id: pool.id, status, expected_version: pool.version_no }),
   listLeases: () => jrpcCall<{ items?: IPAMLease[] | null } | null>('IPAM_ListLeases', {}).then(listItems),
+  listEmployeeGroups: () => jrpcCall<{ items?: PoolGroupOption[] | null } | null>('IPAM_ListEmployeeGroups', {}).then(listItems),
   allocateAddress: (input: { pool_id: number; target_name: string; node_type: IPAMLease['node_type']; requested_ip?: string; idp_group?: string; wireguard_pubkey?: string; endpoint?: string }) =>
     jrpcCall<IPAMLease>('IPAM_AllocateAddress', input),
   releaseLease: (leaseId: number) => jrpcCall<{ success: boolean }>('IPAM_ReleaseLease', { lease_id: leaseId }),

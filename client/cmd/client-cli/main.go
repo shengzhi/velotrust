@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,7 +18,9 @@ import (
 	"strings"
 	"syscall"
 
+	"golang.org/x/crypto/ssh/terminal"
 	clientconfig "velotrust/client/internal/config"
+	clientcontrol "velotrust/client/internal/control"
 	clienttunnel "velotrust/client/internal/tunnel/wireguard"
 	winplatform "velotrust/client/system/windows"
 )
@@ -218,6 +221,7 @@ func runKeygen(args []string, stdout, stderr io.Writer) int {
 func runConnect(args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("connect", stderr)
 	path := flags.String("config", "", "client config file containing a static gateway tunnel profile")
+	username := flags.String("username", "", "employee username for HUB login")
 	logLevel := flags.String("log-level", "", "log level: debug, info, warn, or error (overrides config)")
 	if err := parseFlags(flags, args); err != nil {
 		fmt.Fprintln(stderr, err)
@@ -233,7 +237,7 @@ func runConnect(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "load client config: %v\n", err)
 		return 1
 	}
-	if cfg.Tunnel == nil {
+	if cfg.Hub == nil && cfg.Tunnel == nil {
 		fmt.Fprintln(stderr, "client config has no tunnel profile; add provisioned tunnel.peers and an assigned address")
 		return 1
 	}
@@ -245,15 +249,74 @@ func runConnect(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "configure client logging: %v\n", err)
 		return 2
 	}
-	slog.Info("starting client tunnel", "instance_id", cfg.InstanceID, "interface", cfg.Tunnel.InterfaceName, "log_level", strings.ToLower(effectiveLogLevel))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if cfg.Hub != nil {
+		login, err := promptClientLogin(*username, stderr)
+		if err != nil {
+			fmt.Fprintf(stderr, "read Client login credentials: %v\n", err)
+			return 1
+		}
+		manager := newHubTunnelManager(cfg.InstanceID, configPath, cfg.PrivateKeyFile(), stdout)
+		defer func() {
+			if err := manager.Stop(); err != nil {
+				slog.Error("stop Client tunnel during shutdown failed", "error", err)
+			}
+		}()
+		slog.Info("starting Client HUB control", "instance_id", cfg.InstanceID, "endpoint", cfg.Hub.Endpoint, "log_level", strings.ToLower(effectiveLogLevel))
+		if err := clientcontrol.Run(ctx, *cfg.Hub, configPath, cfg.PrivateKeyFile(), version, login, manager, manager.Apply,
+			func() { slog.Info("Client HUB control is authenticated", "endpoint", cfg.Hub.Endpoint) }, manager.Stop,
+		); err != nil {
+			fmt.Fprintf(stderr, "client connection stopped: %v\n", err)
+			return 1
+		}
+		fmt.Fprintln(stdout, "Client HUB connection stopped; configured tunnel networking was removed.")
+		return 0
+	}
+	slog.Info("starting client tunnel", "instance_id", cfg.InstanceID, "interface", cfg.Tunnel.InterfaceName, "log_level", strings.ToLower(effectiveLogLevel))
 	if err := clienttunnel.Connect(ctx, cfg.InstanceID, configPath, *cfg.Tunnel, stdout); err != nil {
 		fmt.Fprintf(stderr, "client connection stopped: %v\n", err)
 		return 1
 	}
 	fmt.Fprintln(stdout, "Client tunnel disconnected; configured routes and address were removed.")
 	return 0
+}
+
+func promptClientLogin(username string, stderr io.Writer) (clientcontrol.LoginCredentials, error) {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		if _, err := fmt.Fprint(stderr, "Employee username: "); err != nil {
+			return clientcontrol.LoginCredentials{}, err
+		}
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil && len(line) == 0 {
+			return clientcontrol.LoginCredentials{}, err
+		}
+		username = strings.TrimSpace(line)
+	}
+	if username == "" {
+		return clientcontrol.LoginCredentials{}, errors.New("employee username is required")
+	}
+	if _, err := fmt.Fprint(stderr, "Employee password: "); err != nil {
+		return clientcontrol.LoginCredentials{}, err
+	}
+	password, err := terminal.ReadPassword(int(os.Stdin.Fd()))
+	_, _ = fmt.Fprintln(stderr)
+	if err != nil {
+		return clientcontrol.LoginCredentials{}, fmt.Errorf("read password without echo; use an interactive terminal: %w", err)
+	}
+	if len(password) < 8 || len(password) > 1024 {
+		clear(password)
+		return clientcontrol.LoginCredentials{}, errors.New("password must contain between 8 and 1024 bytes")
+	}
+	deviceName, err := os.Hostname()
+	if err != nil || strings.TrimSpace(deviceName) == "" {
+		deviceName = "VeloTrust Client"
+	}
+	return clientcontrol.LoginCredentials{
+		Username: username, Password: password, DeviceName: deviceName,
+		Platform: runtime.GOOS + "/" + runtime.GOARCH,
+	}, nil
 }
 
 func runDisconnect(args []string, stdout, stderr io.Writer) int {
@@ -273,8 +336,8 @@ func runDisconnect(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "load client config: %v\n", err)
 		return 1
 	}
-	if cfg.Tunnel == nil {
-		fmt.Fprintln(stderr, "client config has no tunnel profile")
+	if cfg.Tunnel == nil && cfg.Hub == nil {
+		fmt.Fprintln(stderr, "client config has no HUB or tunnel profile")
 		return 1
 	}
 	if !winplatform.IsElevated() {
@@ -287,9 +350,9 @@ func runDisconnect(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer func() { _ = releaseTunnelLock() }()
-	interfaceName := cfg.Tunnel.InterfaceName
-	if interfaceName == "" {
-		interfaceName = "VeloTrust"
+	interfaceName := "VeloTrust"
+	if cfg.Tunnel != nil && cfg.Tunnel.InterfaceName != "" {
+		interfaceName = cfg.Tunnel.InterfaceName
 	}
 	cleanupErr := errors.Join(
 		wrapCommandError("restore Windows DNS policy", winplatform.CleanupDNSCapture(cfg.InstanceID)),
@@ -392,7 +455,7 @@ func printUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "  client-cli config validate [--file PATH] [--json]")
 	fmt.Fprintln(writer, "  client-cli diagnose [--config PATH] [--json]")
 	fmt.Fprintln(writer, "  client-cli keygen --dir PRIVATE_DIR")
-	fmt.Fprintln(writer, "  client-cli connect --config PATH [--log-level debug|info|warn|error]")
+	fmt.Fprintln(writer, "  client-cli connect --config PATH [--username EMPLOYEE] [--log-level debug|info|warn|error]")
 	fmt.Fprintln(writer, "  client-cli disconnect --config PATH")
 }
 

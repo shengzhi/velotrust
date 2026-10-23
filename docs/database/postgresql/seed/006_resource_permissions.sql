@@ -9,12 +9,14 @@ INSERT INTO public.t_iam_resource AS existing
     (resource_name, resource_code, resource_type, description, status, created_by, updated_by)
 VALUES
     ('用户管理', 'iam.user', 'management', '管理 VeloTrust 管理员及用户账号', 'active', 'seed', 'seed'),
+    ('安全用户组', 'iam.group', 'management', '管理员工用户组及成员关系', 'active', 'seed', 'seed'),
     ('角色与权限', 'iam.role', 'management', '管理角色、权限与菜单授权', 'active', 'seed', 'seed'),
     ('审计日志', 'iam.audit_log', 'management', '查询 IAM 管理审计日志', 'active', 'seed', 'seed'),
     ('网关注册凭证', 'gateway.registration', 'management', '管理逻辑网关和一次性注册凭证', 'active', 'seed', 'seed'),
     ('IPAM 网络目录', 'ipam.network', 'management', '管理 Overlay 地址池和地址租约', 'active', 'seed', 'seed'),
     ('网络站点', 'ztna.site', 'management', '管理网络站点、云网络及其归属网关', 'active', 'seed', 'seed'),
-    ('虚拟节点', 'ztna.node', 'management', '查询运行节点并管理节点生命周期状态', 'active', 'seed', 'seed')
+    ('虚拟节点', 'ztna.node', 'management', '查询运行节点并管理节点生命周期状态', 'active', 'seed', 'seed'),
+    ('逻辑隧道', 'ztna.tunnel', 'management', '管理 WireGuard 逻辑隧道及 Gateway 成员关系', 'active', 'seed', 'seed')
 ON CONFLICT (resource_code) DO UPDATE SET
     resource_name = EXCLUDED.resource_name,
     resource_type = EXCLUDED.resource_type,
@@ -35,6 +37,8 @@ FROM public.t_iam_resource AS resource
 CROSS JOIN (VALUES
     ('查看用户', 'iam.user.read', 'read', '查看用户列表、详情及角色关联', 'iam.user'),
     ('管理用户', 'iam.user.write', 'write', '创建、停用用户并重置用户密码', 'iam.user'),
+    ('查看安全用户组', 'iam.group.read', 'read', '查看员工用户组与成员', 'iam.group'),
+    ('管理安全用户组', 'iam.group.write', 'write', '创建用户组并维护员工成员关系', 'iam.group'),
     ('查看角色与权限', 'iam.role.read', 'read', '查看角色、权限目录和菜单目录', 'iam.role'),
     ('管理角色与权限', 'iam.role.write', 'write', '创建角色并管理角色权限和菜单', 'iam.role'),
     ('授予角色', 'iam.role.grant', 'grant', '向用户授予或撤销角色', 'iam.role'),
@@ -46,7 +50,9 @@ CROSS JOIN (VALUES
     ('查看网络站点', 'ztna.site.read', 'read', '查看网络站点与其网络信息', 'ztna.site'),
     ('管理网络站点', 'ztna.site.write', 'write', '创建、编辑、停用和删除网络站点', 'ztna.site'),
     ('查看虚拟节点', 'ztna.node.read', 'read', '查看虚拟节点身份、端点、网络关联和运行状态', 'ztna.node'),
-    ('管理虚拟节点', 'ztna.node.write', 'write', '启用、禁用、隔离或撤销虚拟节点', 'ztna.node')
+    ('管理虚拟节点', 'ztna.node.write', 'write', '启用、禁用、隔离或撤销虚拟节点', 'ztna.node'),
+    ('查看逻辑隧道', 'ztna.tunnel.read', 'read', '查看逻辑隧道和 Gateway Peer 成员', 'ztna.tunnel'),
+    ('管理逻辑隧道', 'ztna.tunnel.write', 'write', '创建逻辑隧道并管理 Gateway Peer 成员关系', 'ztna.tunnel')
 ) AS seed(permission_name, permission_code, action_code, description, resource_code)
 WHERE resource.resource_code = seed.resource_code
 ON CONFLICT (permission_code) DO UPDATE SET

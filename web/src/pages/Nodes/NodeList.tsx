@@ -42,6 +42,12 @@ const healthLabels: Record<VirtualNode['health_status'], string> = {
   unhealthy: '异常',
 };
 
+const connectionLabels: Record<VirtualNode['connection_status'], string> = {
+  online: '在线',
+  offline: '离线',
+  unknown: '未连接',
+};
+
 function isGatewayApprovalPending(node: VirtualNode): boolean {
   return node.node_type === 'gateway'
     && node.node_status === 'pending'
@@ -56,17 +62,20 @@ export const NodeList: React.FC = () => {
   const [nodes, setNodes] = useState<VirtualNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [refreshFailed, setRefreshFailed] = useState(false);
   const [search, setSearch] = useState(searchParams.get('q') ?? '');
   const [typeFilter, setTypeFilter] = useState(searchParams.get('type') ?? 'all');
   const [statusFilter, setStatusFilter] = useState(searchParams.get('status') ?? 'all');
   const approvalOnly = searchParams.get('approval') === 'pending';
 
-  const loadNodes = async (refresh = false) => {
+  const loadNodes = async (refresh = false, notifyError = refresh) => {
     if (refresh) setRefreshing(true);
     try {
       setNodes(await virtualNodeApi.list());
+      setRefreshFailed(false);
     } catch (err) {
-      error(err instanceof Error ? err.message : '获取虚拟节点失败');
+      setRefreshFailed(true);
+      if (notifyError) error(err instanceof Error ? err.message : '获取虚拟节点失败');
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -74,7 +83,12 @@ export const NodeList: React.FC = () => {
   };
 
   useEffect(() => {
-    void loadNodes();
+    void loadNodes(false, true);
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => void loadNodes(), 15000);
+    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -94,6 +108,7 @@ export const NodeList: React.FC = () => {
         node.node_code,
         node.public_endpoint ?? '',
         node.private_endpoint ?? '',
+        node.ipam_address ?? '',
         node.networks.map((network) => `${network.network_name} ${network.cidr}`).join(' '),
       ].some((value) => value.toLowerCase().includes(normalizedSearch));
       return matchesSearch
@@ -111,6 +126,7 @@ export const NodeList: React.FC = () => {
   }, {}), [nodes]);
 
   const lastSeenLabel = (value?: string | null) => value ? formatRelativeTime(value) : '从未上报';
+  const displayedConnectionStatus = (node: VirtualNode) => refreshFailed ? 'unknown' : node.connection_status;
 
   return (
     <div className="space-y-5">
@@ -188,13 +204,20 @@ export const NodeList: React.FC = () => {
       </Card>
 
       <Card>
+        {refreshFailed && (
+          <div role="alert" className="border-b border-amber-200 bg-amber-50 px-5 py-3 text-sm text-amber-900">
+            节点列表刷新失败，当前连接状态已标记为未知。请检查管理服务连接后重试。
+          </div>
+        )}
         <Table>
           <TableHeader>
             <TableRow>
               <TableHead>节点</TableHead>
               <TableHead>类型</TableHead>
+              <TableHead>IPAM 地址</TableHead>
               <TableHead>网络</TableHead>
               <TableHead>生命周期</TableHead>
+              <TableHead>连接状态</TableHead>
               <TableHead>运行健康</TableHead>
               <TableHead>最后心跳</TableHead>
               <TableHead>端点</TableHead>
@@ -203,10 +226,10 @@ export const NodeList: React.FC = () => {
           </TableHeader>
           <TableBody>
             {loading ? (
-              <TableRow><TableCell colSpan={8} className="py-12 text-center text-slate-400"><RefreshCw className="mx-auto mb-2 h-5 w-5 animate-spin" />正在加载节点...</TableCell></TableRow>
+              <TableRow><TableCell colSpan={10} className="py-12 text-center text-slate-400"><RefreshCw className="mx-auto mb-2 h-5 w-5 animate-spin" />正在加载节点...</TableCell></TableRow>
             ) : filteredNodes.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={8} className="p-8">
+                <TableCell colSpan={10} className="p-8">
                   <EmptyState
                     icon={Server}
                     title={nodes.length === 0 ? '尚无虚拟节点' : '没有匹配的虚拟节点'}
@@ -232,6 +255,7 @@ export const NodeList: React.FC = () => {
                   <div className="mt-0.5 font-mono text-[11px] text-slate-500">{node.node_code} · #{node.id}</div>
                 </TableCell>
                 <TableCell><Badge variant={node.node_type === 'gateway' ? 'primary' : 'outline'}>{typeLabels[node.node_type]}</Badge></TableCell>
+                <TableCell className="font-mono text-xs text-slate-700">{node.ipam_address ?? <span className="font-sans text-slate-400">未分配</span>}</TableCell>
                 <TableCell className="max-w-[220px]">
                   {node.networks.length === 0 ? <span className="text-xs text-slate-400">未关联网络</span> : (
                     <div className="space-y-1">
@@ -241,6 +265,11 @@ export const NodeList: React.FC = () => {
                   )}
                 </TableCell>
                 <TableCell><StatusBadge status={node.node_status} label={isGatewayApprovalPending(node) ? '待审批' : statusLabels[node.node_status]} /></TableCell>
+                <TableCell>
+                  <Badge variant={displayedConnectionStatus(node) === 'online' ? 'success' : displayedConnectionStatus(node) === 'offline' ? 'danger' : 'outline'}>
+                    {connectionLabels[displayedConnectionStatus(node)]}
+                  </Badge>
+                </TableCell>
                 <TableCell>
                   <span className={`inline-flex items-center gap-1.5 text-xs ${node.health_status === 'healthy' ? 'text-emerald-700' : node.health_status === 'degraded' ? 'text-amber-700' : node.health_status === 'unhealthy' ? 'text-rose-700' : 'text-slate-500'}`}>
                     <Activity className="h-3.5 w-3.5" />{healthLabels[node.health_status]}

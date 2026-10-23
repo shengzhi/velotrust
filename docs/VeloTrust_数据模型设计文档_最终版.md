@@ -25,7 +25,7 @@
 ### 1.1 核心设计原则
 
 - **单企业部署**：一个部署实例服务一个企业，不在每张业务表中重复添加 `TenantID`。
-- **身份统一**：管理员和普通员工共用 `t_iam_user`，通过角色、权限和策略区分职责。
+- **身份分类**：平台账号和员工账号共用 `t_iam_user`，由 `account_type` 明确区分。平台账号可登录 Management 并通过角色获得管理权限；员工账号使用密码登录 Client Agent（凭证由 Client 经 TLS 提交给 HUB），用于设备归属和网络策略匹配，但不具备 Management 登录权限。兼任人员分别创建两类记录。
 - **管理授权与网络授权分离**：管理后台 RBAC 只控制管理操作；能否访问网络资源由 ZTNA 策略独立判定。
 - **菜单与业务资源分离**：菜单用于导航和页面呈现，管理资源用于描述可管理对象，受保护资源用于描述真实网络访问目标。
 - **控制面期望状态与节点实际状态分离**：数据库中的当前配置不等于节点已经应用的配置，必须持久化任务状态、节点回执和实际配置摘要。
@@ -139,12 +139,13 @@ erDiagram
 
 ### 4.1 `t_iam_user` — 用户
 
-统一保存本地用户、企业目录同步用户和第三方身份映射后的内部用户。管理员不是单独的用户类型。
+统一保存本地用户、企业目录同步用户和第三方身份映射后的内部用户。`account_type` 区分 `platform` 平台账号与 `employee` 员工账号；平台账号可登录 Management，员工账号可通过 HUB 登录 Client Agent 并用于设备归属和访问策略主体，但不可登录 Management。
 
 | 字段 | 类型建议 | 约束/说明 |
 |---|---|---|
 | `id` | BIGINT | PK，继承公共字段 |
-| `username` | VARCHAR(64) | NOT NULL，唯一；登录名 |
+| `account_type` | VARCHAR(24) | NOT NULL DEFAULT `platform`；`platform` 或 `employee` |
+| `username` | VARCHAR(64) | NOT NULL，唯一；平台账号登录名或员工身份标识 |
 | `display_name` | VARCHAR(128) | NOT NULL DEFAULT ''；显示名称 |
 | `email` | VARCHAR(128) | 可空；按产品规则决定是否唯一 |
 | `phone_country_code` | VARCHAR(8) | 可空；电话国家/地区区号，例如 `+86`、`+81` |
@@ -161,6 +162,7 @@ erDiagram
 | 公共字段 | — | `created_at`、`created_by`、`updated_at`、`updated_by`、`version_no` |
 
 约束建议：
+- `account_type` 限定平台账号与员工账号；平台账号允许 Management 密码 / Passkey 登录及 IAM 角色授权；员工密码只用于 Client Agent 经 TLS 向 HUB 登录，不建立 Management 会话、不允许 Passkey 管理登录，也不授予 IAM 管理角色。
 - `username` 建唯一索引，大小写是否敏感由数据库排序规则和产品规范统一决定。
 - 不要仅依据邮箱相同自动合并本地用户和外部身份。
 - 禁用用户后，应按策略撤销会话、阻止新认证并触发相关授权重新评估。
@@ -672,6 +674,8 @@ Overlay 地址池不得与业务网段重叠；不同企业业务网段允许重
 
 约束建议：`public_key` 按适用范围唯一；隧道地址在同一地址域内唯一；`allowed_ips` 的冲突需要在配置生成时校验，不能仅依赖数据库唯一索引。
 
+Client 首次登录时，HUB 根据设备所有者直接所属的 IAM 用户组匹配 `t_ztna_address_pool.client_group_id`，为 Client 分配动态 `User-Device` IPAM 租约。地址池关联只决定 Overlay IP，不创建 WireGuard Peer，也不选择 Gateway；Peer 与可访问 Gateway 应由访问策略配置决定。重复登录和配置同步时复用仍有效的租约。
+
 ### 9.3 Gateway 配置编译 — 不建立配置 JSON 表
 
 HUB 从业务主表编译 Gateway 当前期望状态，不另外维护 `t_ztna_config` JSON 副本。隧道地址来自节点公钥关联的有效 IPAM 租约；Peer 来自 Gateway 关联活动隧道中的活动 Peer；`routes` 来自绑定 Gateway 的活动网络站点 CIDR；NAT 来自这些站点的启用映射及 Overlay 全局网段。接口名、监听端口、私钥和 HUB 连接参数属于 Gateway 本机配置。
@@ -757,7 +761,7 @@ HUB 对规范化编译结果计算摘要，以 `t_ztna_node_config_task.target_c
 
 ### 10.6 `t_ztna_nat_mapping` — 企业网络 NAT 映射台账（已实现）
 
-字段：`id`、`network_id`、`network_name`、`real_cidr`、`virtual_cidr`、`nat_type`、`enabled`、`description`、审计字段。`1:1_Bidirectional` 要求真实和虚拟网段前缀长度相同；SNAT 可不配置虚拟网段。启用映射随网络站点数据由 HUB 编译并下发；当前支持将 `DNAT_VirtualIP` 与 `1:1_Bidirectional` 编译为前缀 DNAT，将 `SNAT_Masquerade` 编译为受源和目标网段限制的 Masquerade。
+字段：`id`、`network_id`、`network_name`、`real_cidr`、`virtual_cidr`、`nat_type`、`enabled`、`description`、审计字段。该表保存可选的影子网段映射，由 HUB 编译为前缀 DNAT。Gateway 关联的活动站点出站 SNAT 由 HUB 根据 Overlay 全局网段自动生成，不再通过此表配置；`SNAT_Masquerade` 作为旧版本数据类型保留读取兼容，新配置不接受该类型。
 
 ---
 
@@ -765,7 +769,7 @@ HUB 对规范化编译结果计算摘要，以 `t_ztna_node_config_task.target_c
 
 | 模块 | 表 | 优先级 | 说明 |
 |---|---|---|---|
-| 用户与组织 | `t_iam_user` | 必须 | 统一内部用户 |
+| 用户与组织 | `t_iam_user` | 必须 | 平台管理账号与 Client 员工登录账号 |
 | 用户与组织 | `t_iam_user_profile` | 建议 | 用户扩展资料 |
 | 用户与组织 | `t_iam_group`、`t_iam_user_group` | 必须 | 群组与成员关系 |
 | 管理 RBAC | `t_iam_role`、`t_iam_user_role` | 必须 | 角色授权 |
@@ -798,9 +802,10 @@ HUB 对规范化编译结果计算摘要，以 `t_ztna_node_config_task.target_c
 | 安全事件 | `t_ztna_security_event` | 建议 | 安全运营闭环 |
 | 地址管理 | `t_ztna_address_pool`、`t_ztna_address_lease` | 已实现 | Overlay 地址池、租约分配与释放历史 |
 | 地址管理 | `t_ztna_overlay_network` | 已实现 | 显式初始化的 Overlay 全局私有地址范围 |
+| 地址管理 | `t_ztna_address_pool.client_group_id` | 已实现 | 动态终端地址池直接关联员工组，HUB 据此自动分配 Client Overlay IP |
 | 地址管理 | `t_ztna_nat_mapping` | 已实现（数据面同步待实现） | 企业网段 NAT 映射配置台账 |
 
-当前 PostgreSQL IAM 初始 schema 已创建 22 张表，包含 Passkey 凭证与挑战字段；暂不创建外部组织表（`t_iam_external_org`、`t_iam_external_identity_org`）和目录同步任务表（`t_iam_integration_sync_task`）。IPAM 网络目录、地址池、租约、NAT 台账及 Overlay 全局范围由后续版本化 migration 008/009/010 创建；ZTNA 设备、节点、受保护资源、策略、隧道、配置下发及安全事件业务表由 migration 011 创建；网络站点管理字段和权限由 migration 013 增补到 `t_ztna_network`，不新增网络站点表。migration 018 将策略规则迁入策略主表并短暂保留当前配置表；migration 019 删除该过渡配置表和手工发布权限。HUB 当前根据 IPAM、Peer、网络站点和 NAT 业务表生成 Gateway 配置摘要，配置任务跟踪发送及应用结果，不存储完整配置 JSON。后续策略规则编译就绪前，Gateway ACL 默认拒绝。migration 011 只提供初始持久化结构，其中标记为建议或按需启用的实体尚不代表业务功能已实现。
+当前 PostgreSQL IAM 初始 schema 已创建 22 张表，包含 Passkey 凭证与挑战字段；暂不创建外部组织表（`t_iam_external_org`、`t_iam_external_identity_org`）和目录同步任务表（`t_iam_integration_sync_task`）。IPAM 网络目录、地址池、租约、NAT 台账及 Overlay 全局范围由后续版本化 migration 008/009/010 创建；ZTNA 设备、节点、受保护资源、策略、隧道、配置下发及安全事件业务表由 migration 011 创建；网络站点管理字段和权限由 migration 013 增补到 `t_ztna_network`，不新增网络站点表。migration 018 将策略规则迁入策略主表并短暂保留当前配置表；migration 019 删除该过渡配置表和手工发布权限。migration 025 曾增加员工组到 Client 隧道的映射；migration 027 将员工组关系迁移到动态地址池并删除该映射表。HUB 根据 IPAM、Peer、网络站点和 NAT 业务表生成 Gateway/Client 配置，配置任务跟踪发送及应用结果，不存储完整配置 JSON。后续策略规则编译就绪前，Gateway ACL 默认拒绝。migration 011 只提供初始持久化结构，其中标记为建议或按需启用的实体尚不代表业务功能已实现。
 
 ---
 
@@ -959,7 +964,7 @@ func (User) TableName() string {
 
 ### 阶段一：基础身份与管理权限
 - 完成用户、用户资料、群组、用户群组关系、角色、用户角色、资源、资源操作权限、角色权限、菜单、角色菜单、Passkey 凭证和 API/RPC 到权限的映射机制。
-- 验收：唯一约束生效；同一资源操作不重复定义；一个权限可映射多个接口；角色只授权资源操作权限而非逐条授权接口；接口请求会按映射权限执行服务端鉴权；未映射的受保护接口默认拒绝；禁用用户无法建立新会话；WebAuthn challenge、origin、RP ID 与签名校验正确；菜单隐藏不能绕过后端权限检查；管理员与普通用户共用统一用户模型。
+- 验收：唯一约束生效；同一资源操作不重复定义；一个权限可映射多个接口；角色只授权资源操作权限而非逐条授权接口；接口请求会按映射权限执行服务端鉴权；未映射的受保护接口默认拒绝；禁用用户无法建立新会话；WebAuthn challenge、origin、RP ID 与签名校验正确；菜单隐藏不能绕过后端权限检查；平台账号与员工账号共用用户模型并由账号类型区分，员工账号只能经 HUB 登录 Client Agent，不能登录 Management。
 
 ### 阶段二：认证安全与第三方身份
 - 完成会话、认证挑战、登录事件、审计日志；按需接入 MFA 与身份提供方/外部身份映射。

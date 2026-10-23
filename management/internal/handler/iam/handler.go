@@ -39,6 +39,10 @@ var methodPolicies = map[string]middleware.IAMMethodPolicy{
 	"ConfirmTOTP":               {Authenticated: true},
 	"DisableTOTP":               {Authenticated: true},
 	"ListUsers":                 {Authenticated: true, Permission: "iam.user.read"},
+	"ListGroups":                {Authenticated: true, Permission: "iam.group.read"},
+	"SaveGroup":                 {Authenticated: true, Permission: "iam.group.write"},
+	"ListGroupMembers":          {Authenticated: true, Permission: "iam.group.read"},
+	"SetGroupMembers":           {Authenticated: true, Permission: "iam.group.write"},
 	"CreateUser":                {Authenticated: true, Permission: "iam.user.write"},
 	"SetUserStatus":             {Authenticated: true, Permission: "iam.user.write"},
 	"ResetUserPassword":         {Authenticated: true, Permission: "iam.user.write"},
@@ -309,8 +313,9 @@ func (h *Handler) GetCurrentUser(ctx *jrpc.Context, _ *struct{}) (*CurrentUserRe
 }
 
 type ListUsersArgs struct {
-	Page     int `json:"page" validate:"omitempty,gte=1"`
-	PageSize int `json:"page_size" validate:"omitempty,gte=1,lte=100"`
+	Page        int    `json:"page" validate:"omitempty,gte=1"`
+	PageSize    int    `json:"page_size" validate:"omitempty,gte=1,lte=100"`
+	AccountType string `json:"account_type" validate:"omitempty,oneof=platform employee"`
 }
 
 type ListUsersReply struct {
@@ -318,11 +323,78 @@ type ListUsersReply struct {
 	Total int64             `json:"total"`
 }
 
+type ListGroupsReply struct {
+	Items []model.Group `json:"items"`
+}
+
+func (h *Handler) ListGroups(ctx *jrpc.Context, _ *struct{}) (*ListGroupsReply, error) {
+	items, err := h.service.ListGroups(middleware.ServiceContext(ctx))
+	if err != nil {
+		return nil, err
+	}
+	return &ListGroupsReply{Items: items}, nil
+}
+
+type SaveGroupArgs struct {
+	ID              int64  `json:"id" validate:"omitempty,gt=0"`
+	ExpectedVersion int64  `json:"expected_version" validate:"omitempty,gt=0"`
+	GroupName       string `json:"group_name" validate:"required,max=128"`
+	GroupCode       string `json:"group_code" validate:"required,max=64"`
+	Description     string `json:"description" validate:"omitempty,max=512"`
+	Status          string `json:"status" validate:"required,oneof=active disabled"`
+	SortOrder       int    `json:"sort_order" validate:"gte=0"`
+}
+
+func (h *Handler) SaveGroup(ctx *jrpc.Context, args *SaveGroupArgs) (*model.Group, error) {
+	if args == nil {
+		return nil, errors.New("IAM group arguments are required")
+	}
+	return h.service.SaveGroup(middleware.ServiceContext(ctx), appIAM.GroupInput{
+		ID: args.ID, VersionNo: args.ExpectedVersion, GroupName: args.GroupName,
+		GroupCode: args.GroupCode, Description: args.Description, Status: args.Status,
+		SortOrder: args.SortOrder,
+	})
+}
+
+type ListGroupMembersArgs struct {
+	GroupID int64 `json:"group_id" validate:"required,gt=0"`
+}
+
+type ListGroupMembersReply struct {
+	Items []model.GroupMember `json:"items"`
+}
+
+func (h *Handler) ListGroupMembers(ctx *jrpc.Context, args *ListGroupMembersArgs) (*ListGroupMembersReply, error) {
+	if args == nil {
+		return nil, errors.New("IAM group member query arguments are required")
+	}
+	items, err := h.service.ListGroupMembers(middleware.ServiceContext(ctx), args.GroupID)
+	if err != nil {
+		return nil, err
+	}
+	return &ListGroupMembersReply{Items: items}, nil
+}
+
+type SetGroupMembersArgs struct {
+	GroupID int64   `json:"group_id" validate:"required,gt=0"`
+	UserIDs []int64 `json:"user_ids" validate:"max=5000,dive,gt=0"`
+}
+
+func (h *Handler) SetGroupMembers(ctx *jrpc.Context, args *SetGroupMembersArgs) (*LogoutReply, error) {
+	if args == nil {
+		return nil, errors.New("IAM group membership arguments are required")
+	}
+	if err := h.service.SetGroupMembers(middleware.ServiceContext(ctx), args.GroupID, args.UserIDs); err != nil {
+		return nil, err
+	}
+	return &LogoutReply{Success: true}, nil
+}
+
 func (h *Handler) ListUsers(ctx *jrpc.Context, args *ListUsersArgs) (*ListUsersReply, error) {
 	if args == nil {
 		args = &ListUsersArgs{}
 	}
-	users, total, err := h.service.ListUsers(middleware.ServiceContext(ctx), args.Page, args.PageSize)
+	users, total, err := h.service.ListUsers(middleware.ServiceContext(ctx), args.Page, args.PageSize, args.AccountType)
 	if err != nil {
 		return nil, err
 	}
@@ -330,10 +402,11 @@ func (h *Handler) ListUsers(ctx *jrpc.Context, args *ListUsersArgs) (*ListUsersR
 }
 
 type CreateUserArgs struct {
+	AccountType string `json:"account_type" validate:"required,oneof=platform employee"`
 	Username    string `json:"username" validate:"required,max=64"`
 	DisplayName string `json:"display_name" validate:"max=128"`
 	Email       string `json:"email" validate:"omitempty,email,max=128"`
-	Password    string `json:"password" validate:"required,min=8,max=1024"`
+	Password    string `json:"password" validate:"omitempty,min=8,max=1024"`
 }
 
 type CreateUserReply struct {
@@ -345,7 +418,7 @@ func (h *Handler) CreateUser(ctx *jrpc.Context, args *CreateUserArgs) (*CreateUs
 		return nil, errors.New("create user arguments are required")
 	}
 	user, err := h.service.CreateUser(middleware.ServiceContext(ctx), appIAM.CreateUserInput{
-		Username: args.Username, DisplayName: args.DisplayName, Email: args.Email, Password: args.Password,
+		AccountType: args.AccountType, Username: args.Username, DisplayName: args.DisplayName, Email: args.Email, Password: args.Password,
 	})
 	if err != nil {
 		return nil, err

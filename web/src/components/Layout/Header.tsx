@@ -26,6 +26,7 @@ export const Header: React.FC = () => {
     if (pathname.startsWith('/permissions')) return '权限与资源中心';
     if (pathname.startsWith('/api-mappings')) return 'API 映射';
     if (pathname.startsWith('/users')) return '系统用户';
+    if (pathname.startsWith('/employee-users')) return '员工用户';
     if (pathname.startsWith('/groups')) return '安全用户组';
     if (pathname.startsWith('/devices')) return '终端设备';
     if (pathname.startsWith('/sites')) return '网络站点';

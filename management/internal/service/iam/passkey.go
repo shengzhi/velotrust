@@ -40,7 +40,7 @@ type webAuthnUser struct {
 }
 
 func newWebAuthnUser(user *model.User, rows []model.WebAuthnCredential) (*webAuthnUser, error) {
-	if user == nil || user.ID <= 0 || len(user.WebAuthnUserHandle) == 0 || len(user.WebAuthnUserHandle) > 64 {
+	if user == nil || user.ID <= 0 || user.WebAuthnUserHandle == nil || len(*user.WebAuthnUserHandle) == 0 || len(*user.WebAuthnUserHandle) > 64 {
 		return nil, errors.New("IAM user has no valid WebAuthn user handle")
 	}
 	result := &webAuthnUser{user: user, rows: rows, credentials: make([]webauthnlib.Credential, 0, len(rows))}
@@ -61,7 +61,7 @@ func newWebAuthnUser(user *model.User, rows []model.WebAuthnCredential) (*webAut
 	return result, nil
 }
 
-func (u *webAuthnUser) WebAuthnID() []byte                            { return u.user.WebAuthnUserHandle }
+func (u *webAuthnUser) WebAuthnID() []byte                            { return *u.user.WebAuthnUserHandle }
 func (u *webAuthnUser) WebAuthnName() string                          { return u.user.Username }
 func (u *webAuthnUser) WebAuthnDisplayName() string                   { return u.user.DisplayName }
 func (u *webAuthnUser) WebAuthnCredentials() []webauthnlib.Credential { return u.credentials }
@@ -81,7 +81,7 @@ func (s *Service) BeginPasskeyRegistration(ctx *servicecontext.Context, origin s
 	if err != nil {
 		return nil, fmt.Errorf("load WebAuthn registration user: %w", err)
 	}
-	if user == nil || user.UserStatus != "active" {
+	if user == nil || user.AccountType != model.AccountTypePlatform || user.UserStatus != "active" {
 		return nil, appErrors.NewAuthError("IAM_UNAUTHENTICATED", appErrors.AuthUnauthenticated)
 	}
 	rows, err := s.store.ListWebAuthnCredentials(ctx, userID, s.opts.WebAuthnRPID)
@@ -130,7 +130,7 @@ func (s *Service) FinishPasskeyRegistration(ctx *servicecontext.Context, challen
 		return appErrors.NewAuthError("IAM_PASSKEY_CHALLENGE_INVALID", appErrors.AuthUnauthenticated)
 	}
 	user, err := s.store.FindUserByID(ctx, userID)
-	if err != nil || user == nil || user.UserStatus != "active" {
+	if err != nil || user == nil || user.AccountType != model.AccountTypePlatform || user.UserStatus != "active" {
 		return appErrors.NewAuthError("IAM_UNAUTHENTICATED", appErrors.AuthUnauthenticated)
 	}
 	rows, err := s.store.ListWebAuthnCredentials(ctx, userID, s.opts.WebAuthnRPID)
@@ -210,7 +210,7 @@ func (s *Service) FinishPasskeyLogin(ctx context.Context, challengeID, origin st
 		if findErr != nil {
 			return nil, findErr
 		}
-		if user == nil || user.UserStatus != "active" || !bytes.Equal(user.WebAuthnUserHandle, userHandle) {
+		if user == nil || user.AccountType != model.AccountTypePlatform || user.UserStatus != "active" || user.WebAuthnUserHandle == nil || !bytes.Equal(*user.WebAuthnUserHandle, userHandle) {
 			return nil, errors.New("Passkey identity is unavailable")
 		}
 		candidate, findErr = newWebAuthnUser(user, rows)
@@ -343,5 +343,8 @@ func mustUserHandle(store repository.Store, ctx *servicecontext.Context, userID 
 	if err != nil || user == nil {
 		return nil
 	}
-	return user.WebAuthnUserHandle
+	if user.WebAuthnUserHandle == nil {
+		return nil
+	}
+	return *user.WebAuthnUserHandle
 }

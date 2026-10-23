@@ -43,6 +43,22 @@ type configuredGateway struct {
 // Connect starts a static client-to-gateway WireGuard session in the current
 // process. It returns when the context is canceled and owns all tunnel cleanup.
 func Connect(ctx context.Context, instanceID string, configPath string, profile clientconfig.Tunnel, output io.Writer) (resultErr error) {
+	return ConnectWithReady(ctx, instanceID, configPath, profile, output, nil)
+}
+
+// ConnectWithReady reports the result of tunnel setup through ready before it
+// begins waiting for context cancellation. This lets the HUB control loop
+// acknowledge a snapshot only after Windows has applied its routes and tunnel.
+func ConnectWithReady(ctx context.Context, instanceID string, configPath string, profile clientconfig.Tunnel, output io.Writer, ready chan<- error) (resultErr error) {
+	readyReported := false
+	reportReady := func(err error) {
+		if ready == nil || readyReported {
+			return
+		}
+		ready <- err
+		readyReported = true
+	}
+	defer func() { reportReady(resultErr) }()
 	if !winplatform.IsElevated() {
 		return errors.New("connect requires an elevated PowerShell session to create the Wintun interface and routes")
 	}
@@ -185,6 +201,7 @@ func Connect(ctx context.Context, instanceID string, configPath string, profile 
 	if _, err := fmt.Fprintf(output, "Tunnel interface %q is running; gateways %d; assigned %s; routes %d. Press Ctrl+C to disconnect.\n", interfaceName, len(gateways), profile.Address, len(routes)); err != nil {
 		return fmt.Errorf("write connection status: %w", err)
 	}
+	reportReady(nil)
 	return waitForTunnel(ctx, wgDevice, gateways, output, localDNS)
 }
 

@@ -6,9 +6,11 @@ import (
 )
 
 var (
-	ErrTargetUnavailable    = errors.New("Gateway configuration target is no longer active")
-	ErrConfigurationRemoved = errors.New("Gateway current configuration was removed")
-	ErrInvalidConfiguration = errors.New("Gateway current configuration is invalid")
+	ErrTargetUnavailable           = errors.New("Gateway configuration target is no longer active")
+	ErrConfigurationRemoved        = errors.New("Gateway current configuration was removed")
+	ErrInvalidConfiguration        = errors.New("Gateway current configuration is invalid")
+	ErrClientAddressNotAssigned    = errors.New("Client has no active Overlay address lease")
+	ErrClientConfigurationNotReady = errors.New("Client configuration is waiting for an authorized Gateway")
 )
 
 // Snapshot is a versioned control-plane contract, not a Management database

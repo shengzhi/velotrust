@@ -17,13 +17,15 @@ import (
 )
 
 const (
-	x25519AuthDomain         = "velotrust/hub/gateway-x25519-auth/v1"
-	x25519RegistrationDomain = "velotrust/hub/gateway-x25519-registration/v1"
-	tlsExporterLabel         = "EXPORTER-VeloTrust-HUB-Gateway-X25519-v1"
-	plaintextBindingDomain   = "velotrust/hub/plaintext-channel-binding/v1"
-	challengeIDSize          = 32
-	challengeNonceSize       = 32
-	proofSize                = sha256.Size
+	x25519AuthDomain               = "velotrust/hub/gateway-x25519-auth/v1"
+	x25519RegistrationDomain       = "velotrust/hub/gateway-x25519-registration/v1"
+	x25519ClientAuthDomain         = "velotrust/hub/client-x25519-auth/v1"
+	x25519ClientRegistrationDomain = "velotrust/hub/client-x25519-registration/v1"
+	tlsExporterLabel               = "EXPORTER-VeloTrust-HUB-Gateway-X25519-v1"
+	plaintextBindingDomain         = "velotrust/hub/plaintext-channel-binding/v1"
+	challengeIDSize                = 32
+	challengeNonceSize             = 32
+	proofSize                      = sha256.Size
 )
 
 // TLSExporterBinding derives a per-challenge channel binding. Both gRPC peers
@@ -85,6 +87,19 @@ func NewGatewayChallenge(nodeID, hubInstanceID string, challengeID, gatewayPubli
 // challenge. Its transcript is domain-separated from ordinary reconnect auth.
 func NewGatewayRegistrationChallenge(nodeID, hubInstanceID string, challengeID, gatewayPublicKey, channelBinding []byte, now time.Time, ttl time.Duration) (Challenge, *PendingChallenge, error) {
 	return newGatewayChallenge(x25519RegistrationDomain, nodeID, hubInstanceID, challengeID, gatewayPublicKey, channelBinding, now, ttl)
+}
+
+// NewClientChallenge creates a Client Agent authentication challenge. Client
+// proofs are domain-separated from Gateway proofs even when the same X25519
+// key material is accidentally reused.
+func NewClientChallenge(nodeID, hubInstanceID string, challengeID, clientPublicKey, channelBinding []byte, now time.Time, ttl time.Duration) (Challenge, *PendingChallenge, error) {
+	return newGatewayChallenge(x25519ClientAuthDomain, nodeID, hubInstanceID, challengeID, clientPublicKey, channelBinding, now, ttl)
+}
+
+// NewClientRegistrationChallenge creates a Client enrollment-specific proof
+// challenge that cannot be replayed as ordinary control-stream auth.
+func NewClientRegistrationChallenge(nodeID, hubInstanceID string, challengeID, clientPublicKey, channelBinding []byte, now time.Time, ttl time.Duration) (Challenge, *PendingChallenge, error) {
+	return newGatewayChallenge(x25519ClientRegistrationDomain, nodeID, hubInstanceID, challengeID, clientPublicKey, channelBinding, now, ttl)
 }
 
 func newGatewayChallenge(domain, nodeID, hubInstanceID string, challengeID, gatewayPublicKey, channelBinding []byte, now time.Time, ttl time.Duration) (Challenge, *PendingChallenge, error) {
@@ -188,6 +203,17 @@ func GatewayProof(privateKey []byte, challenge Challenge, channelBinding []byte)
 // enrollment and cannot be replayed as ordinary control-stream auth.
 func GatewayRegistrationProof(privateKey []byte, challenge Challenge, channelBinding []byte) ([]byte, error) {
 	return gatewayProof(x25519RegistrationDomain, privateKey, challenge, channelBinding)
+}
+
+// ClientProof proves possession of the registered Client X25519 private key.
+func ClientProof(privateKey []byte, challenge Challenge, channelBinding []byte) ([]byte, error) {
+	return gatewayProof(x25519ClientAuthDomain, privateKey, challenge, channelBinding)
+}
+
+// ClientRegistrationProof proves possession of the Client X25519 private key
+// during one-time enrollment and is distinct from ClientProof.
+func ClientRegistrationProof(privateKey []byte, challenge Challenge, channelBinding []byte) ([]byte, error) {
+	return gatewayProof(x25519ClientRegistrationDomain, privateKey, challenge, channelBinding)
 }
 
 func gatewayProof(domain string, privateKey []byte, challenge Challenge, channelBinding []byte) ([]byte, error) {

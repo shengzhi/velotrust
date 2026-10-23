@@ -68,10 +68,9 @@ export const Sites: React.FC = () => {
     localSubnet: '',
     gatewayNodeId: '',
     status: 'active' as 'active' | 'inactive',
-    // NAT Mapping Config
+    // Optional shadow-prefix DNAT mapping; site SNAT is automatic.
     natEnabled: false,
     virtualCidr: '172.31.10.0/24',
-    natType: '1:1_Bidirectional' as '1:1_Bidirectional' | 'SNAT_Masquerade' | 'DNAT_VirtualIP',
     natDesc: '',
   });
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
@@ -83,7 +82,7 @@ export const Sites: React.FC = () => {
   const [natForm, setNatForm] = useState<VpcNatMapping>({
     enabled: true,
     virtualCidr: '172.31.10.0/24',
-    natType: '1:1_Bidirectional',
+    natType: 'DNAT_VirtualIP',
     description: '',
   });
   const [savingNat, setSavingNat] = useState(false);
@@ -138,7 +137,6 @@ export const Sites: React.FC = () => {
       status: 'active',
       natEnabled: false,
       virtualCidr: '172.31.100.0/24',
-      natType: '1:1_Bidirectional',
       natDesc: '',
     });
     setFormErrors({});
@@ -152,9 +150,8 @@ export const Sites: React.FC = () => {
       localSubnet: s.localSubnet,
       gatewayNodeId: s.gatewayNodeId || '',
       status: s.status,
-      natEnabled: !!s.natMapping?.enabled,
+      natEnabled: !!s.natMapping?.enabled && s.natMapping.natType !== 'SNAT_Masquerade' && !!s.natMapping.virtualCidr,
       virtualCidr: s.natMapping?.virtualCidr || '172.31.10.0/24',
-      natType: s.natMapping?.natType || '1:1_Bidirectional',
       natDesc: s.natMapping?.description || '',
     });
     setFormErrors({});
@@ -163,13 +160,14 @@ export const Sites: React.FC = () => {
 
   const openQuickNatModal = (s: Site) => {
     setTargetNatSite(s);
+    const hasShadowMapping = !!s.natMapping?.enabled && s.natMapping.natType !== 'SNAT_Masquerade' && !!s.natMapping.virtualCidr;
     setNatForm({
-      enabled: s.natMapping ? s.natMapping.enabled : true,
+      enabled: s.natMapping ? hasShadowMapping : true,
       id: s.natMapping?.id,
       version_no: s.natMapping?.version_no,
       network_id: s.networkId,
       virtualCidr: s.natMapping?.virtualCidr || '172.31.10.0/24',
-      natType: s.natMapping?.natType || '1:1_Bidirectional',
+      natType: 'DNAT_VirtualIP',
       description: s.natMapping?.description || `针对 ${s.name} 真实网段 ${s.localSubnet} 的防冲突 NAT 映射`,
     });
     setIsNatDrawerOpen(true);
@@ -191,12 +189,12 @@ export const Sites: React.FC = () => {
         id: natForm.id ?? 0,
         expected_version: natForm.version_no ?? 0,
         network_id: targetNatSite.networkId,
-        nat_type: natForm.natType,
+        nat_type: 'DNAT_VirtualIP',
         virtual_cidr: natForm.virtualCidr || undefined,
         enabled: natForm.enabled,
         description: natForm.description,
       });
-      success(`站点 [${targetNatSite.name}] 的 VPC 重叠 NAT 映射已更新`);
+      success(`站点 [${targetNatSite.name}] 的影子网段映射已更新`);
       setIsNatDrawerOpen(false);
       setTargetNatSite(null);
       await loadData();
@@ -253,14 +251,14 @@ export const Sites: React.FC = () => {
             id: 0,
             expected_version: 0,
             network_id: savedSite.networkId,
-            nat_type: siteForm.natType,
+            nat_type: 'DNAT_VirtualIP',
             virtual_cidr: siteForm.virtualCidr || undefined,
             enabled: siteForm.natEnabled,
             description: siteForm.natDesc,
           });
         } catch (natError: any) {
           await loadData();
-          error(`站点已保存，但 NAT 配置未保存：${natError?.message || '请重试'}`);
+          error(`站点已保存，但影子网段映射未保存：${natError?.message || '请重试'}`);
           return;
         }
       }
@@ -363,7 +361,7 @@ export const Sites: React.FC = () => {
           }`}
         >
           <Globe className="h-4 w-4" />
-          <span>站点与 NAT 映射</span>
+          <span>站点与影子网段映射</span>
           <span className="ml-1 text-[11px] font-normal text-slate-400">
             ({sites.length})
           </span>
@@ -405,7 +403,7 @@ export const Sites: React.FC = () => {
                 <TableRow>
                   <TableHead>站点名称</TableHead>
                   <TableHead>站点内网网段</TableHead>
-                  <TableHead>重叠网段 NAT 影子映射</TableHead>
+                  <TableHead>自动 SNAT / 可选影子 DNAT</TableHead>
                   <TableHead>指定汇聚网关</TableHead>
                   <TableHead>关联网关数</TableHead>
                   <TableHead>网络状态</TableHead>
@@ -425,7 +423,8 @@ export const Sites: React.FC = () => {
                   </TableRow>
                 ) : (
                   filteredSites.map((site) => {
-                    const hasNat = site.natMapping?.enabled;
+                    const hasShadowMapping = !!site.natMapping?.enabled && site.natMapping.natType !== 'SNAT_Masquerade' && !!site.natMapping.virtualCidr;
+                    const autoSNATActive = site.status === 'active' && !!site.gatewayNodeId;
                     return (
                       <TableRow key={site.id}>
                         <TableCell className="font-semibold text-slate-900">
@@ -454,39 +453,21 @@ export const Sites: React.FC = () => {
 
                         {/* NAT Mapping Column */}
                         <TableCell>
-                          {hasNat ? (
-                            <div className="space-y-1">
-                              <div className="flex items-center gap-1.5">
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
-                                  <ArrowLeftRight className="w-3 h-3 text-emerald-600" />
-                                  {site.natMapping?.natType === '1:1_Bidirectional'
-                                    ? '1:1 NAT 激活'
-                                    : site.natMapping?.natType === 'SNAT_Masquerade'
-                                      ? 'SNAT 激活'
-                                      : 'DNAT 激活'}
-                                </span>
-                                <span className="font-mono text-xs font-bold text-indigo-700">
-                                  {site.natMapping?.virtualCidr}
-                                </span>
-                              </div>
-                              <div className="text-[11px] text-slate-400 truncate max-w-xs" title={site.natMapping?.description}>
-                                影子网段 ➔ {site.localSubnet}
-                              </div>
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-1.5">
+                              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border ${autoSNATActive ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-slate-50 text-slate-500 border-slate-200'}`}>
+                                <ArrowLeftRight className="w-3 h-3" />
+                                {autoSNATActive ? '出站 SNAT 自动下发' : '启用并关联 Gateway 后自动 SNAT'}
+                              </span>
                             </div>
-                          ) : (
-                            <div className="flex items-center gap-2">
-                              <span className="text-xs text-slate-400 font-mono">未启用 (直连透传)</span>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                disabled={site.status !== 'active'}
-                                onClick={() => openQuickNatModal(site)}
-                                className="h-6 text-[11px] text-blue-600 hover:bg-blue-50 px-1.5"
-                              >
-                                启用影子映射
-                              </Button>
-                            </div>
-                          )}
+                            {hasShadowMapping ? (
+                              <div className="text-[11px] text-slate-500 truncate max-w-xs" title={site.natMapping?.description}>
+                                影子 DNAT：<span className="font-mono">{site.natMapping?.virtualCidr}</span> → {site.localSubnet}
+                              </div>
+                            ) : (
+                              <span className="text-[11px] text-slate-400">无影子映射（网段不冲突时无需配置）</span>
+                            )}
+                          </div>
                         </TableCell>
 
                         <TableCell>
@@ -520,12 +501,12 @@ export const Sites: React.FC = () => {
                               variant="outline"
                               size="sm"
                               disabled={site.status !== 'active'}
-                              title="配置重叠网段 NAT"
+                              title="配置可选影子网段 DNAT"
                               onClick={() => openQuickNatModal(site)}
                               className="h-8 gap-1 text-xs text-indigo-600 border-indigo-200 hover:bg-indigo-50"
                             >
                               <ArrowLeftRight className="w-3.5 h-3.5" />
-                              <span>NAT 映射</span>
+                              <span>影子映射</span>
                             </Button>
                             <Button
                               variant="ghost"
@@ -806,7 +787,7 @@ export const Sites: React.FC = () => {
       <Dialog
         isOpen={isNatDrawerOpen}
         onClose={() => setIsNatDrawerOpen(false)}
-        title={`VPC 重叠网段 NAT 映射配置: ${targetNatSite?.name || ''}`}
+        title={`影子网段 DNAT 配置: ${targetNatSite?.name || ''}`}
         description="解决不同公有云或私有云机房之间相同私网网段 (如 192.168.10.0/24) 路由冲突的关键技术"
         maxWidth="lg"
       >
@@ -826,10 +807,10 @@ export const Sites: React.FC = () => {
             <div className="flex items-center justify-between p-3 border rounded-lg bg-white">
               <div>
                 <span className="font-semibold text-xs text-slate-800">
-                  启用跨云重叠 NAT 映射 (VPC Overlap NAT)
+                  启用影子网段映射 (仅网段冲突时需要)
                 </span>
                 <p className="text-[11px] text-slate-500">
-                  开启后向员工客户端 WireGuard 发布虚拟影子网段，由网关在隧道出口处进行 1:1 NAT
+                  Gateway 关联网络的出站 SNAT 会自动配置；开启后客户端访问影子网段时，Gateway 再将目标地址转换为站点真实地址。
                 </p>
               </div>
               <input
@@ -857,23 +838,6 @@ export const Sites: React.FC = () => {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">NAT 转换模式</label>
-                  <Select
-                    value={natForm.natType}
-                    onChange={(e) =>
-                      setNatForm({
-                        ...natForm,
-                        natType: e.target.value as any,
-                      })
-                    }
-                  >
-                    <option value="1:1_Bidirectional">双向 1:1 NAT (推荐，支持正向访问与反向推送)</option>
-                    <option value="DNAT_VirtualIP">仅目的地址转换 (DNAT 到云端真实主机)</option>
-                    <option value="SNAT_Masquerade">源地址伪装 (网关伪装出口)</option>
-                  </Select>
-                </div>
-
-                <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1">备注说明</label>
                   <Input
                     value={natForm.description || ''}
@@ -890,7 +854,7 @@ export const Sites: React.FC = () => {
               取消
             </Button>
             <Button onClick={handleSaveNat} isLoading={savingNat} className="bg-blue-600 hover:bg-blue-500 text-white">
-              保存 NAT 策略
+              保存影子映射
             </Button>
           </div>
         </div>
@@ -962,12 +926,12 @@ export const Sites: React.FC = () => {
             {formErrors.gatewayNodeId && <p className="mt-1 text-xs text-rose-500">{formErrors.gatewayNodeId}</p>}
           </div>
 
-          {/* Inline NAT setup is available only while creating a site. */}
+          {/* Optional shadow mapping can be created together with a site. */}
           {!editingSite && <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-xs font-semibold text-slate-800 flex items-center gap-1.5">
                 <ArrowLeftRight className="w-3.5 h-3.5 text-indigo-600" />
-                配置重叠网段 NAT 映射 (VPC Overlap)
+                可选：配置网段冲突的影子映射
               </span>
               <input
                 type="checkbox"
@@ -977,24 +941,13 @@ export const Sites: React.FC = () => {
                 className="h-4 w-4 text-blue-600 rounded border-slate-300"
               />
             </div>
+            <p className="text-[11px] text-slate-500">
+              站点关联 Gateway 后，Overlay 客户端访问该站点的出站 SNAT 会自动配置；只有真实网段冲突时才需要设置影子网段。
+            </p>
             {formErrors.natEnabled && <p className="text-[11px] text-rose-600">{formErrors.natEnabled}</p>}
 
             {siteForm.natEnabled && (
               <div className="pt-2 border-t border-slate-200 space-y-2">
-                <div>
-                  <label className="block text-[11px] font-medium text-slate-600 mb-0.5">NAT 转换模式</label>
-                  <Select
-                    value={siteForm.natType}
-                    onChange={(e) => setSiteForm({
-                      ...siteForm,
-                      natType: e.target.value as typeof siteForm.natType,
-                    })}
-                  >
-                    <option value="1:1_Bidirectional">1:1 双向映射</option>
-                    <option value="SNAT_Masquerade">出站 SNAT</option>
-                    <option value="DNAT_VirtualIP">虚拟地址 DNAT</option>
-                  </Select>
-                </div>
                 <div>
                   <label className="block text-[11px] font-medium text-slate-600 mb-0.5">
                     虚拟影子网段 (Shadow CIDR)
@@ -1041,7 +994,7 @@ export const Sites: React.FC = () => {
         onClose={() => setSiteToDelete(null)}
         onConfirm={handleDeleteConfirm}
         title="确认删除站点"
-        description={`确定要删除站点 "${siteToDelete?.name}" (${siteToDelete?.localSubnet}) 吗？该站点将从关联 Gateway 配置中移除，NAT 映射也会停用。`}
+        description={`确定要删除站点 "${siteToDelete?.name}" (${siteToDelete?.localSubnet}) 吗？该站点将从关联 Gateway 配置中移除，自动 SNAT 和影子映射也会一并撤销。`}
         danger={true}
         isLoading={deleting}
       />

@@ -234,7 +234,7 @@ func (s *Service) CreatePool(ctx *servicecontext.Context, pool model.Pool) (*mod
 	if err := validatePool(&pool); err != nil {
 		return nil, err
 	}
-	changes, _ := json.Marshal(map[string]string{"cidr": pool.NetworkCIDR, "type": pool.Type, "allocation_mode": pool.AllocationMode})
+	changes, _ := json.Marshal(map[string]any{"cidr": pool.NetworkCIDR, "type": pool.Type, "allocation_mode": pool.AllocationMode, "client_group_id": pool.ClientGroupID})
 	audit, err := newAudit(actorID, "ipam.pool.create", pool.PoolName, changes)
 	if err != nil {
 		return nil, err
@@ -257,7 +257,7 @@ func (s *Service) UpdatePool(ctx *servicecontext.Context, pool model.Pool) (*mod
 	if err := validatePool(&pool); err != nil {
 		return nil, err
 	}
-	changes, _ := json.Marshal(map[string]string{"cidr": pool.NetworkCIDR, "type": pool.Type, "allocation_mode": pool.AllocationMode})
+	changes, _ := json.Marshal(map[string]any{"cidr": pool.NetworkCIDR, "type": pool.Type, "allocation_mode": pool.AllocationMode, "client_group_id": pool.ClientGroupID})
 	audit, err := newAudit(actorID, "ipam.pool.update", pool.PoolName, changes)
 	if err != nil {
 		return nil, err
@@ -291,6 +291,13 @@ func (s *Service) ListLeases(ctx *servicecontext.Context) ([]model.Lease, error)
 		return nil, err
 	}
 	return s.store.ListLeases(ctx)
+}
+
+func (s *Service) ListEmployeeGroups(ctx *servicecontext.Context) ([]model.PoolGroupOption, error) {
+	if _, err := s.authorize(ctx, readPermission); err != nil {
+		return nil, err
+	}
+	return s.store.ListEmployeeGroups(ctx)
 }
 
 func (s *Service) AllocateAddress(ctx *servicecontext.Context, input model.Allocation) (*model.Lease, error) {
@@ -409,9 +416,13 @@ func (s *Service) saveNATMapping(ctx *servicecontext.Context, mapping model.NATM
 		return nil, invalid("network_id", "an IPAM business network is required")
 	}
 	switch mapping.NATType {
-	case "1:1_Bidirectional", "SNAT_Masquerade", "DNAT_VirtualIP":
+	case "DNAT_VirtualIP":
+	case "SNAT_Masquerade":
+		return nil, invalid("nat_type", "outbound SNAT is automatic for Gateway-associated sites; use a virtual shadow CIDR only when site networks overlap")
+	case "1:1_Bidirectional":
+		return nil, invalid("nat_type", "bidirectional 1:1 NAT is no longer supported; use DNAT for an optional virtual shadow CIDR")
 	default:
-		return nil, invalid("nat_type", "unsupported NAT mapping type")
+		return nil, invalid("nat_type", "only DNAT_VirtualIP is supported for optional shadow mappings")
 	}
 	if mapping.VirtualCIDR != nil {
 		value := strings.TrimSpace(*mapping.VirtualCIDR)
@@ -426,25 +437,24 @@ func (s *Service) saveNATMapping(ctx *servicecontext.Context, mapping model.NATM
 			mapping.VirtualCIDR = &value
 		}
 	}
-	if mapping.NATType != "SNAT_Masquerade" && mapping.VirtualCIDR == nil {
+	if mapping.VirtualCIDR == nil {
 		return nil, invalid("virtual_cidr", "is required for this NAT mode")
 	}
-	if mapping.NATType == "1:1_Bidirectional" && mapping.VirtualCIDR != nil {
+	if mapping.NATType == "DNAT_VirtualIP" && mapping.VirtualCIDR != nil {
 		networks, listErr := s.store.ListNetworks(ctx, true)
 		if listErr != nil {
 			return nil, listErr
 		}
-		var realBits = -1
+		var realPrefix netip.Prefix
 		for _, network := range networks {
 			if network.ID == mapping.NetworkID {
-				p, _ := netip.ParsePrefix(network.CIDR)
-				realBits = p.Bits()
+				realPrefix, _ = netip.ParsePrefix(network.CIDR)
 				break
 			}
 		}
 		virtual, _ := netip.ParsePrefix(*mapping.VirtualCIDR)
-		if realBits < 0 || virtual.Bits() != realBits {
-			return nil, invalid("virtual_cidr", "1:1 NAT requires matching real and virtual prefix lengths")
+		if !realPrefix.IsValid() || virtual.Addr().Is4() != realPrefix.Addr().Is4() || virtual.Bits() != realPrefix.Bits() {
+			return nil, invalid("virtual_cidr", "prefix DNAT requires matching address families and prefix lengths")
 		}
 	}
 	description := ""
@@ -502,6 +512,14 @@ func validatePool(pool *model.Pool) error {
 		pool.IDPGroup = stringPointer(value)
 		if len(value) > 128 {
 			return invalid("idp_group", "must be at most 128 characters")
+		}
+	}
+	if pool.ClientGroupID != nil {
+		if *pool.ClientGroupID <= 0 {
+			return invalid("client_group_id", "must identify an active employee user group")
+		}
+		if pool.Type != "User-Device" || pool.AllocationMode != "dynamic" {
+			return invalid("client_group_id", "automatic Client address assignment requires a dynamic User-Device pool")
 		}
 	}
 	if pool.GatewayBinding != nil {

@@ -50,7 +50,7 @@ const menuIcons: Record<string, any> = {
 
 const applicationRoutes = new Set([
   '/', '/topology', '/resources', '/ipam', '/nodes', '/enrollment-tokens', '/sites', '/dns',
-  '/policies', '/access-matrix', '/devices', '/users', '/groups', '/roles', '/menus',
+  '/policies', '/access-matrix', '/devices', '/employee-users', '/users', '/groups', '/roles', '/menus',
   '/permissions', '/idp', '/audit', '/operation-logs', '/login-logs', '/settings',
 ]);
 

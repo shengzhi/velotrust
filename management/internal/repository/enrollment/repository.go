@@ -339,7 +339,7 @@ func requirePermission(s *xorm.Session, actorID int64, permissionCode string) er
 	var allowed struct {
 		Count int64 `xorm:"'count'"`
 	}
-	query := "SELECT COUNT(*) AS count FROM " + iamUserTable + " u WHERE u.id=? AND u.user_status='active' AND EXISTS (" +
+	query := "SELECT COUNT(*) AS count FROM " + iamUserTable + " u WHERE u.id=? AND u.account_type='platform' AND u.user_status='active' AND EXISTS (" +
 		"SELECT 1 FROM " + iamUserRoleTable + " ur JOIN " + iamRoleTable + " r ON r.id=ur.role_id " +
 		"JOIN " + iamRolePermissionTable + " rp ON rp.role_id=r.id JOIN " + iamPermissionTable + " p ON p.id=rp.permission_id " +
 		"JOIN " + iamResourceTable + " res ON res.id=p.resource_id WHERE ur.user_id=u.id AND r.status='active' " +

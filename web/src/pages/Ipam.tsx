@@ -34,6 +34,7 @@ import {
   IPAMOverview,
   IPAMPool,
   IPAMPoolInput,
+	PoolGroupOption,
   ipamApi,
 } from '../services/ipam';
 
@@ -41,7 +42,7 @@ type Tab = 'pools' | 'leases' | 'heatmap' | 'conflict';
 
 const emptyPool: IPAMPoolInput = {
   pool_name: '', cidr: '', pool_type: 'User-Device', allocation_mode: 'dynamic',
-  idp_group: '', gateway_binding: '', color: '#8b5cf6', description: '',
+  client_group_id: null, gateway_binding: '', color: '#8b5cf6', description: '',
 };
 function suggestedPoolCIDR(globalCIDR: string): string {
   const [address, rawBits] = globalCIDR.split('/');
@@ -65,6 +66,7 @@ export const Ipam: React.FC = () => {
   const [overview, setOverview] = useState<IPAMOverview | null>(null);
   const [pools, setPools] = useState<IPAMPool[]>([]);
   const [leases, setLeases] = useState<IPAMLease[]>([]);
+  const [employeeGroups, setEmployeeGroups] = useState<PoolGroupOption[]>([]);
   const [loading, setLoading] = useState(true);
 
   const [search, setSearch] = useState('');
@@ -104,11 +106,14 @@ export const Ipam: React.FC = () => {
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const [summary, leaseRows] = await Promise.all([ipamApi.overview(), ipamApi.listLeases()]);
+      const [summary, leaseRows, groupRows] = await Promise.all([
+        ipamApi.overview(), ipamApi.listLeases(), ipamApi.listEmployeeGroups(),
+      ]);
       const poolRows = Array.isArray(summary?.ipam_pools) ? summary.ipam_pools : [];
       setOverview({ ...summary, ipam_pools: poolRows, active_leases: Array.isArray(summary?.active_leases) ? summary.active_leases : [] });
       setPools(poolRows);
       setLeases(Array.isArray(leaseRows) ? leaseRows : []);
+      setEmployeeGroups(Array.isArray(groupRows) ? groupRows : []);
       setAllocationForm((form) => ({
         ...form,
         pool_id: poolRows.some((pool) => pool.id === form.pool_id && pool.status === 'active')
@@ -128,6 +133,7 @@ export const Ipam: React.FC = () => {
   const activePools = useMemo(() => pools.filter((pool) => pool.status === 'active'), [pools]);
   const gatewayPools = useMemo(() => pools.filter((pool) => pool.type === 'Gateway' && pool.status === 'active'), [pools]);
   const userPools = useMemo(() => pools.filter((pool) => pool.type === 'User-Device' && pool.status === 'active'), [pools]);
+  const selectedPoolGroup = employeeGroups.find((group) => group.id === poolForm.client_group_id);
   const selectedAllocationPool = activePools.find((pool) => pool.id === allocationForm.pool_id);
   const heatmapPool = pools.find((pool) => pool.id === heatmapPoolId);
 
@@ -185,7 +191,7 @@ export const Ipam: React.FC = () => {
       cidr: pool.cidr,
       pool_type: pool.type,
       allocation_mode: pool.allocation_mode,
-      idp_group: pool.idp_group ?? '',
+      client_group_id: pool.client_group_id ?? null,
       gateway_binding: pool.gateway_binding ?? '',
       color: pool.color,
       description: pool.description ?? '',
@@ -195,12 +201,18 @@ export const Ipam: React.FC = () => {
 
   const savePool = async () => {
     if (!poolForm.pool_name.trim() || !poolForm.cidr.trim()) { error('请填写子网池名称和 CIDR'); return; }
+    if (poolForm.client_group_id && (poolForm.pool_type !== 'User-Device' || poolForm.allocation_mode !== 'dynamic')) {
+      error('员工组自动分配只能用于动态 User-Device 地址池');
+      return;
+    }
     setPoolSaving(true);
     const input = {
       ...poolForm,
       pool_name: poolForm.pool_name.trim(),
       cidr: poolForm.cidr.trim(),
-      idp_group: poolForm.idp_group?.trim(),
+      client_group_id: poolForm.pool_type === 'User-Device' && poolForm.allocation_mode === 'dynamic'
+        ? poolForm.client_group_id
+        : null,
       gateway_binding: poolForm.gateway_binding?.trim(),
       description: poolForm.description?.trim(),
     };
@@ -348,9 +360,11 @@ export const Ipam: React.FC = () => {
             <ShieldCheck className="h-3.5 w-3.5 text-blue-600" />冲突检测
           </Button>
           {tab === 'pools' && (
-            <Button size="sm" onClick={() => openPool()} disabled={!overview?.global_cidr} className="gap-1.5">
-              <Plus className="h-3.5 w-3.5" />新建子网池
-            </Button>
+            <div className="flex gap-2">
+              <Button size="sm" onClick={() => openPool()} disabled={!overview?.global_cidr} className="gap-1.5">
+                <Plus className="h-3.5 w-3.5" />新建子网池
+              </Button>
+            </div>
           )}
           {tab === 'leases' && (
             <Button size="sm" onClick={openAllocation} disabled={!activePools.length} className="gap-1.5 bg-blue-600 text-white hover:bg-blue-700">
@@ -469,7 +483,7 @@ export const Ipam: React.FC = () => {
                     <p className="min-h-9 text-xs leading-relaxed text-slate-600">{pool.description || '无详细描述'}</p>
                     <div className="space-y-1.5 text-xs">
                       <div className="flex items-center justify-between gap-3 text-slate-500"><span>分配策略模式:</span><span className="font-medium text-slate-700">{modeLabel(pool.allocation_mode)}</span></div>
-                      {pool.idp_group && <div className="flex items-center justify-between gap-3 text-slate-500"><span>绑定身份用户组:</span><span className="rounded bg-blue-50 px-1.5 py-0.5 text-[11px] font-semibold text-blue-600">{pool.idp_group}</span></div>}
+                      {pool.client_group_id && <div className="flex items-center justify-between gap-3 text-slate-500"><span>自动分配员工组:</span><span className="rounded bg-blue-50 px-1.5 py-0.5 text-[11px] font-semibold text-blue-600">{pool.client_group_name ?? employeeGroups.find((group) => group.id === pool.client_group_id)?.name ?? `组 #${pool.client_group_id}`}</span></div>}
                       {pool.gateway_binding && <div className="flex items-center justify-between gap-3 text-slate-500"><span>绑定锚点网关:</span><span className="text-[11px] font-semibold text-slate-700">{pool.gateway_binding}</span></div>}
                     </div>
                     <div className="space-y-1.5 border-t border-slate-100 pt-2">
@@ -591,8 +605,58 @@ export const Ipam: React.FC = () => {
         <div className="space-y-5"><Field label="全局 Overlay CIDR"><Input value={overlayCIDR} onChange={(event) => setOverlayCIDR(event.target.value)} placeholder="10.100.0.0/16" className="font-mono text-sm" /></Field><div className="rounded-lg border border-blue-200 bg-blue-50/70 p-3 text-xs leading-relaxed text-blue-800"><div className="mb-1 flex items-center gap-1.5 font-semibold"><Info className="h-4 w-4" />初始化前请确认规划</div>地址池必须完全位于此范围内；保存后该全局范围将锁定。</div><DialogActions close={() => setOverlayNetworkOpen(false)} save={() => void saveOverlayNetwork()} saving={overlayNetworkSaving} label="初始化并锁定" /></div>
       </Dialog>
 
-      <Dialog isOpen={poolOpen} onClose={() => !poolSaving && setPoolOpen(false)} title={editingPool ? '编辑 Overlay 地址池' : '规划新建 Overlay 地址池'} description={`定义 Overlay CIDR、分配模式及身份源绑定。全局范围：${overview?.global_cidr ?? '未初始化'}`}>
-        <div className="space-y-4"><Field label="子网池名称 *"><Input value={poolForm.pool_name} onChange={(event) => setPoolForm({ ...poolForm, pool_name: event.target.value })} placeholder="例如：研发终端动态池" className="text-xs" /></Field><div className="grid grid-cols-1 gap-3 sm:grid-cols-2"><Field label="CIDR 网段 *"><Input value={poolForm.cidr} onChange={(event) => setPoolForm({ ...poolForm, cidr: event.target.value })} placeholder="例如：10.100.0.0/24" className="font-mono text-xs" /></Field><Field label="子网类型"><Select value={poolForm.pool_type} onChange={(event) => setPoolForm({ ...poolForm, pool_type: event.target.value as IPAMPool['type'] })} className="text-xs"><option value="User-Device">员工终端设备 (User-Device)</option><option value="Gateway">骨干网关专网 (Gateway)</option><option value="Service-VIP">高可用服务 VIP (Service-VIP)</option></Select></Field></div><div className="grid grid-cols-1 gap-3 sm:grid-cols-2"><Field label="分配机制"><Select value={poolForm.allocation_mode} onChange={(event) => setPoolForm({ ...poolForm, allocation_mode: event.target.value as IPAMPool['allocation_mode'] })} className="text-xs"><option value="dynamic">动态租约</option><option value="static">静态固定分配</option></Select></Field><Field label="绑定 IdP 策略用户组"><Input value={poolForm.idp_group ?? ''} onChange={(event) => setPoolForm({ ...poolForm, idp_group: event.target.value })} placeholder="例如：研发核心组" className="text-xs" /></Field></div><div className="grid grid-cols-1 gap-3 sm:grid-cols-2"><Field label="绑定锚点网关"><Input value={poolForm.gateway_binding ?? ''} onChange={(event) => setPoolForm({ ...poolForm, gateway_binding: event.target.value })} placeholder="可选" className="text-xs" /></Field><Field label="标记颜色"><input type="color" value={poolForm.color} onChange={(event) => setPoolForm({ ...poolForm, color: event.target.value })} className="h-10 w-full rounded-lg border border-slate-300 bg-white p-1" /></Field></div><Field label="描述说明"><Input value={poolForm.description ?? ''} onChange={(event) => setPoolForm({ ...poolForm, description: event.target.value })} placeholder="说明地址池用途和隔离要求" className="text-xs" /></Field>{editingPool && editingPool.cidr !== poolForm.cidr && <p className="rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">已有地址租约的地址池不能更改 CIDR；保存前服务端会再次校验。</p>}<DialogActions close={() => setPoolOpen(false)} save={() => void savePool()} saving={poolSaving} label="确认保存" /></div>
+      <Dialog isOpen={poolOpen} onClose={() => !poolSaving && setPoolOpen(false)} title={editingPool ? '编辑 Overlay 地址池' : '规划新建 Overlay 地址池'} description={`定义 Overlay 网段和终端自动分配配置。全局范围：${overview?.global_cidr ?? '未初始化'}`}>
+        <div className="space-y-4">
+          <Field label="子网池名称 *">
+            <Input value={poolForm.pool_name} onChange={(event) => setPoolForm({ ...poolForm, pool_name: event.target.value })} placeholder="例如：研发终端动态池" className="text-xs" />
+          </Field>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <Field label="CIDR 网段 *">
+              <Input value={poolForm.cidr} onChange={(event) => setPoolForm({ ...poolForm, cidr: event.target.value })} placeholder="例如：10.100.0.0/24" className="font-mono text-xs" />
+            </Field>
+            <Field label="子网类型">
+              <Select value={poolForm.pool_type} onChange={(event) => setPoolForm({ ...poolForm, pool_type: event.target.value as IPAMPool['type'], client_group_id: null })} className="text-xs">
+                <option value="User-Device">员工终端设备 (User-Device)</option>
+                <option value="Gateway">骨干网关专网 (Gateway)</option>
+                <option value="Service-VIP">高可用服务 VIP (Service-VIP)</option>
+              </Select>
+            </Field>
+          </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <Field label="分配机制">
+              <Select value={poolForm.allocation_mode} onChange={(event) => setPoolForm({ ...poolForm, allocation_mode: event.target.value as IPAMPool['allocation_mode'], client_group_id: null })} className="text-xs">
+                <option value="dynamic">动态租约</option>
+                <option value="static">静态固定分配</option>
+              </Select>
+            </Field>
+            {poolForm.pool_type === 'User-Device' && poolForm.allocation_mode === 'dynamic' && (
+              <Field label="员工用户组">
+                <Select value={poolForm.client_group_id ?? ''} onChange={(event) => setPoolForm({ ...poolForm, client_group_id: event.target.value ? Number(event.target.value) : null })} className="text-xs">
+                  <option value="">不关联员工组</option>
+                  {employeeGroups.map((group) => <option key={group.id} value={group.id}>{group.name}（{group.user_count} 名员工）</option>)}
+                </Select>
+              </Field>
+            )}
+          </div>
+          {poolForm.pool_type === 'User-Device' && poolForm.allocation_mode === 'dynamic' && selectedPoolGroup && (
+            <p className="rounded-lg border border-blue-200 bg-blue-50/70 p-3 text-[11px] leading-relaxed text-blue-800">
+              HUB 登录时按设备所有者的员工组匹配此地址池并自动分配 Overlay IP。该关联只负责 IP 分配；客户端可连接的 Gateway 由访问策略决定。
+            </p>
+          )}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <Field label="绑定锚点网关">
+              <Input value={poolForm.gateway_binding ?? ''} onChange={(event) => setPoolForm({ ...poolForm, gateway_binding: event.target.value })} placeholder="可选" className="text-xs" />
+            </Field>
+            <Field label="标记颜色">
+              <input type="color" value={poolForm.color} onChange={(event) => setPoolForm({ ...poolForm, color: event.target.value })} className="h-10 w-full rounded-lg border border-slate-300 bg-white p-1" />
+            </Field>
+          </div>
+          <Field label="描述说明">
+            <Input value={poolForm.description ?? ''} onChange={(event) => setPoolForm({ ...poolForm, description: event.target.value })} placeholder="说明地址池用途和隔离要求" className="text-xs" />
+          </Field>
+          {editingPool && editingPool.cidr !== poolForm.cidr && <p className="rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">已有地址租约的地址池不能更改 CIDR；保存前服务端会再次校验。</p>}
+          <DialogActions close={() => setPoolOpen(false)} save={() => void savePool()} saving={poolSaving} label="确认保存" />
+        </div>
       </Dialog>
 
       <Dialog isOpen={allocationOpen} onClose={() => !allocationSaving && setAllocationOpen(false)} title="自动化虚拟 IP 分配向导" description="选择接入类型和归属子网池，IPAM 将分配空闲地址并登记节点信息。" maxWidth="2xl">

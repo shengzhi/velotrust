@@ -204,16 +204,23 @@ func (*AgentMessage_X25519AuthProof) isAgentMessage_Body() {}
 
 type Hello struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Deprecated: HUB resolves registered nodes by their X25519 public key and
-	// first-time enrollment targets from the unique registration token.
+	// Deprecated; node identity is resolved from the proved X25519 public key.
 	NodeId             string   `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
 	NodeKind           NodeKind `protobuf:"varint,2,opt,name=node_kind,json=nodeKind,proto3,enum=velotrust.hub.v1.NodeKind" json:"node_kind,omitempty"`
 	WireguardPublicKey string   `protobuf:"bytes,3,opt,name=wireguard_public_key,json=wireguardPublicKey,proto3" json:"wireguard_public_key,omitempty"`
 	AppliedConfigHash  string   `protobuf:"bytes,4,opt,name=applied_config_hash,json=appliedConfigHash,proto3" json:"applied_config_hash,omitempty"`
 	// Present only for the one-time Gateway enrollment exchange.
 	RegistrationToken string `protobuf:"bytes,5,opt,name=registration_token,json=registrationToken,proto3" json:"registration_token,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Client credentials are required for each Client control connection.
+	// HUB accepts them only over TLS. A first successful login also registers
+	// the supplied device identity and its X25519 public key.
+	ClientUsername   string `protobuf:"bytes,6,opt,name=client_username,json=clientUsername,proto3" json:"client_username,omitempty"`
+	ClientPassword   string `protobuf:"bytes,7,opt,name=client_password,json=clientPassword,proto3" json:"client_password,omitempty"`
+	ClientDeviceName string `protobuf:"bytes,8,opt,name=client_device_name,json=clientDeviceName,proto3" json:"client_device_name,omitempty"`
+	ClientPlatform   string `protobuf:"bytes,9,opt,name=client_platform,json=clientPlatform,proto3" json:"client_platform,omitempty"`
+	AgentVersion     string `protobuf:"bytes,10,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *Hello) Reset() {
@@ -277,6 +284,41 @@ func (x *Hello) GetAppliedConfigHash() string {
 func (x *Hello) GetRegistrationToken() string {
 	if x != nil {
 		return x.RegistrationToken
+	}
+	return ""
+}
+
+func (x *Hello) GetClientUsername() string {
+	if x != nil {
+		return x.ClientUsername
+	}
+	return ""
+}
+
+func (x *Hello) GetClientPassword() string {
+	if x != nil {
+		return x.ClientPassword
+	}
+	return ""
+}
+
+func (x *Hello) GetClientDeviceName() string {
+	if x != nil {
+		return x.ClientDeviceName
+	}
+	return ""
+}
+
+func (x *Hello) GetClientPlatform() string {
+	if x != nil {
+		return x.ClientPlatform
+	}
+	return ""
+}
+
+func (x *Hello) GetAgentVersion() string {
+	if x != nil {
+		return x.AgentVersion
 	}
 	return ""
 }
@@ -663,6 +705,7 @@ type HubMessage struct {
 	//	*HubMessage_X25519AuthChallenge
 	//	*HubMessage_RuntimeStatusAck
 	//	*HubMessage_GatewayRegistrationResult
+	//	*HubMessage_ClientRegistrationResult
 	Body          isHubMessage_Body `protobuf_oneof:"body"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -768,6 +811,15 @@ func (x *HubMessage) GetGatewayRegistrationResult() *GatewayRegistrationResult {
 	return nil
 }
 
+func (x *HubMessage) GetClientRegistrationResult() *ClientRegistrationResult {
+	if x != nil {
+		if x, ok := x.Body.(*HubMessage_ClientRegistrationResult); ok {
+			return x.ClientRegistrationResult
+		}
+	}
+	return nil
+}
+
 type isHubMessage_Body interface {
 	isHubMessage_Body()
 }
@@ -800,6 +852,10 @@ type HubMessage_GatewayRegistrationResult struct {
 	GatewayRegistrationResult *GatewayRegistrationResult `protobuf:"bytes,7,opt,name=gateway_registration_result,json=gatewayRegistrationResult,proto3,oneof"`
 }
 
+type HubMessage_ClientRegistrationResult struct {
+	ClientRegistrationResult *ClientRegistrationResult `protobuf:"bytes,8,opt,name=client_registration_result,json=clientRegistrationResult,proto3,oneof"`
+}
+
 func (*HubMessage_Welcome) isHubMessage_Body() {}
 
 func (*HubMessage_ConfigSnapshot) isHubMessage_Body() {}
@@ -813,6 +869,8 @@ func (*HubMessage_X25519AuthChallenge) isHubMessage_Body() {}
 func (*HubMessage_RuntimeStatusAck) isHubMessage_Body() {}
 
 func (*HubMessage_GatewayRegistrationResult) isHubMessage_Body() {}
+
+func (*HubMessage_ClientRegistrationResult) isHubMessage_Body() {}
 
 type Welcome struct {
 	state                    protoimpl.MessageState `protogen:"open.v1"`
@@ -1109,6 +1167,67 @@ func (x *GatewayRegistrationResult) GetNodeStatus() string {
 	return ""
 }
 
+type ClientRegistrationResult struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// HUB retains the stream while an administrator reviews a Client enrollment.
+	Registered       bool   `protobuf:"varint,1,opt,name=registered,proto3" json:"registered,omitempty"`
+	ApprovalRequired bool   `protobuf:"varint,2,opt,name=approval_required,json=approvalRequired,proto3" json:"approval_required,omitempty"`
+	NodeStatus       string `protobuf:"bytes,3,opt,name=node_status,json=nodeStatus,proto3" json:"node_status,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *ClientRegistrationResult) Reset() {
+	*x = ClientRegistrationResult{}
+	mi := &file_shared_proto_v1_hub_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ClientRegistrationResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ClientRegistrationResult) ProtoMessage() {}
+
+func (x *ClientRegistrationResult) ProtoReflect() protoreflect.Message {
+	mi := &file_shared_proto_v1_hub_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ClientRegistrationResult.ProtoReflect.Descriptor instead.
+func (*ClientRegistrationResult) Descriptor() ([]byte, []int) {
+	return file_shared_proto_v1_hub_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *ClientRegistrationResult) GetRegistered() bool {
+	if x != nil {
+		return x.Registered
+	}
+	return false
+}
+
+func (x *ClientRegistrationResult) GetApprovalRequired() bool {
+	if x != nil {
+		return x.ApprovalRequired
+	}
+	return false
+}
+
+func (x *ClientRegistrationResult) GetNodeStatus() string {
+	if x != nil {
+		return x.NodeStatus
+	}
+	return ""
+}
+
 type Reauthenticate struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ReasonCode    string                 `protobuf:"bytes,1,opt,name=reason_code,json=reasonCode,proto3" json:"reason_code,omitempty"`
@@ -1118,7 +1237,7 @@ type Reauthenticate struct {
 
 func (x *Reauthenticate) Reset() {
 	*x = Reauthenticate{}
-	mi := &file_shared_proto_v1_hub_proto_msgTypes[13]
+	mi := &file_shared_proto_v1_hub_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1130,7 +1249,7 @@ func (x *Reauthenticate) String() string {
 func (*Reauthenticate) ProtoMessage() {}
 
 func (x *Reauthenticate) ProtoReflect() protoreflect.Message {
-	mi := &file_shared_proto_v1_hub_proto_msgTypes[13]
+	mi := &file_shared_proto_v1_hub_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1143,7 +1262,7 @@ func (x *Reauthenticate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Reauthenticate.ProtoReflect.Descriptor instead.
 func (*Reauthenticate) Descriptor() ([]byte, []int) {
-	return file_shared_proto_v1_hub_proto_rawDescGZIP(), []int{13}
+	return file_shared_proto_v1_hub_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *Reauthenticate) GetReasonCode() string {
@@ -1164,13 +1283,19 @@ const file_shared_proto_v1_hub_proto_rawDesc = "" +
 	"\x0econfig_applied\x18\x03 \x01(\v2\x1f.velotrust.hub.v1.ConfigAppliedH\x00R\rconfigApplied\x12H\n" +
 	"\x0eruntime_status\x18\x04 \x01(\v2\x1f.velotrust.hub.v1.RuntimeStatusH\x00R\rruntimeStatus\x12O\n" +
 	"\x11x25519_auth_proof\x18\x05 \x01(\v2!.velotrust.hub.v1.X25519AuthProofH\x00R\x0fx25519AuthProofB\x06\n" +
-	"\x04body\"\xea\x01\n" +
+	"\x04body\"\xb8\x03\n" +
 	"\x05Hello\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x127\n" +
 	"\tnode_kind\x18\x02 \x01(\x0e2\x1a.velotrust.hub.v1.NodeKindR\bnodeKind\x120\n" +
 	"\x14wireguard_public_key\x18\x03 \x01(\tR\x12wireguardPublicKey\x12.\n" +
 	"\x13applied_config_hash\x18\x04 \x01(\tR\x11appliedConfigHash\x12-\n" +
-	"\x12registration_token\x18\x05 \x01(\tR\x11registrationToken\"'\n" +
+	"\x12registration_token\x18\x05 \x01(\tR\x11registrationToken\x12'\n" +
+	"\x0fclient_username\x18\x06 \x01(\tR\x0eclientUsername\x12'\n" +
+	"\x0fclient_password\x18\a \x01(\tR\x0eclientPassword\x12,\n" +
+	"\x12client_device_name\x18\b \x01(\tR\x10clientDeviceName\x12'\n" +
+	"\x0fclient_platform\x18\t \x01(\tR\x0eclientPlatform\x12#\n" +
+	"\ragent_version\x18\n" +
+	" \x01(\tR\fagentVersion\"'\n" +
 	"\tHeartbeat\x12\x1a\n" +
 	"\bsequence\x18\x01 \x01(\x04R\bsequence\"\xa7\x01\n" +
 	"\rConfigApplied\x12\x1f\n" +
@@ -1200,7 +1325,7 @@ const file_shared_proto_v1_hub_proto_rawDesc = "" +
 	"\anode_id\x18\a \x01(\tR\x06nodeId\"J\n" +
 	"\x0fX25519AuthProof\x12!\n" +
 	"\fchallenge_id\x18\x01 \x01(\fR\vchallengeId\x12\x14\n" +
-	"\x05proof\x18\x02 \x01(\fR\x05proof\"\xcb\x04\n" +
+	"\x05proof\x18\x02 \x01(\fR\x05proof\"\xb7\x05\n" +
 	"\n" +
 	"HubMessage\x125\n" +
 	"\awelcome\x18\x01 \x01(\v2\x19.velotrust.hub.v1.WelcomeH\x00R\awelcome\x12K\n" +
@@ -1209,7 +1334,8 @@ const file_shared_proto_v1_hub_proto_rawDesc = "" +
 	"\x0ereauthenticate\x18\x04 \x01(\v2 .velotrust.hub.v1.ReauthenticateH\x00R\x0ereauthenticate\x12[\n" +
 	"\x15x25519_auth_challenge\x18\x05 \x01(\v2%.velotrust.hub.v1.X25519AuthChallengeH\x00R\x13x25519AuthChallenge\x12R\n" +
 	"\x12runtime_status_ack\x18\x06 \x01(\v2\".velotrust.hub.v1.RuntimeStatusAckH\x00R\x10runtimeStatusAck\x12m\n" +
-	"\x1bgateway_registration_result\x18\a \x01(\v2+.velotrust.hub.v1.GatewayRegistrationResultH\x00R\x19gatewayRegistrationResultB\x06\n" +
+	"\x1bgateway_registration_result\x18\a \x01(\v2+.velotrust.hub.v1.GatewayRegistrationResultH\x00R\x19gatewayRegistrationResult\x12j\n" +
+	"\x1aclient_registration_result\x18\b \x01(\v2*.velotrust.hub.v1.ClientRegistrationResultH\x00R\x18clientRegistrationResultB\x06\n" +
 	"\x04body\"\xb1\x01\n" +
 	"\aWelcome\x12\x1d\n" +
 	"\n" +
@@ -1229,6 +1355,13 @@ const file_shared_proto_v1_hub_proto_rawDesc = "" +
 	"\x10server_time_unix\x18\x02 \x01(\x03R\x0eserverTimeUnix\x12I\n" +
 	"\x0fconfig_snapshot\x18\x03 \x01(\v2 .velotrust.hub.v1.ConfigSnapshotR\x0econfigSnapshot\"\x89\x01\n" +
 	"\x19GatewayRegistrationResult\x12\x1e\n" +
+	"\n" +
+	"registered\x18\x01 \x01(\bR\n" +
+	"registered\x12+\n" +
+	"\x11approval_required\x18\x02 \x01(\bR\x10approvalRequired\x12\x1f\n" +
+	"\vnode_status\x18\x03 \x01(\tR\n" +
+	"nodeStatus\"\x88\x01\n" +
+	"\x18ClientRegistrationResult\x12\x1e\n" +
 	"\n" +
 	"registered\x18\x01 \x01(\bR\n" +
 	"registered\x12+\n" +
@@ -1259,7 +1392,7 @@ func file_shared_proto_v1_hub_proto_rawDescGZIP() []byte {
 }
 
 var file_shared_proto_v1_hub_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_shared_proto_v1_hub_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_shared_proto_v1_hub_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_shared_proto_v1_hub_proto_goTypes = []any{
 	(NodeKind)(0),                     // 0: velotrust.hub.v1.NodeKind
 	(*AgentMessage)(nil),              // 1: velotrust.hub.v1.AgentMessage
@@ -1275,7 +1408,8 @@ var file_shared_proto_v1_hub_proto_goTypes = []any{
 	(*HeartbeatAck)(nil),              // 11: velotrust.hub.v1.HeartbeatAck
 	(*RuntimeStatusAck)(nil),          // 12: velotrust.hub.v1.RuntimeStatusAck
 	(*GatewayRegistrationResult)(nil), // 13: velotrust.hub.v1.GatewayRegistrationResult
-	(*Reauthenticate)(nil),            // 14: velotrust.hub.v1.Reauthenticate
+	(*ClientRegistrationResult)(nil),  // 14: velotrust.hub.v1.ClientRegistrationResult
+	(*Reauthenticate)(nil),            // 15: velotrust.hub.v1.Reauthenticate
 }
 var file_shared_proto_v1_hub_proto_depIdxs = []int32{
 	2,  // 0: velotrust.hub.v1.AgentMessage.hello:type_name -> velotrust.hub.v1.Hello
@@ -1287,19 +1421,20 @@ var file_shared_proto_v1_hub_proto_depIdxs = []int32{
 	9,  // 6: velotrust.hub.v1.HubMessage.welcome:type_name -> velotrust.hub.v1.Welcome
 	10, // 7: velotrust.hub.v1.HubMessage.config_snapshot:type_name -> velotrust.hub.v1.ConfigSnapshot
 	11, // 8: velotrust.hub.v1.HubMessage.heartbeat_ack:type_name -> velotrust.hub.v1.HeartbeatAck
-	14, // 9: velotrust.hub.v1.HubMessage.reauthenticate:type_name -> velotrust.hub.v1.Reauthenticate
+	15, // 9: velotrust.hub.v1.HubMessage.reauthenticate:type_name -> velotrust.hub.v1.Reauthenticate
 	6,  // 10: velotrust.hub.v1.HubMessage.x25519_auth_challenge:type_name -> velotrust.hub.v1.X25519AuthChallenge
 	12, // 11: velotrust.hub.v1.HubMessage.runtime_status_ack:type_name -> velotrust.hub.v1.RuntimeStatusAck
 	13, // 12: velotrust.hub.v1.HubMessage.gateway_registration_result:type_name -> velotrust.hub.v1.GatewayRegistrationResult
-	10, // 13: velotrust.hub.v1.Welcome.config_snapshot:type_name -> velotrust.hub.v1.ConfigSnapshot
-	10, // 14: velotrust.hub.v1.RuntimeStatusAck.config_snapshot:type_name -> velotrust.hub.v1.ConfigSnapshot
-	1,  // 15: velotrust.hub.v1.HubControl.Connect:input_type -> velotrust.hub.v1.AgentMessage
-	8,  // 16: velotrust.hub.v1.HubControl.Connect:output_type -> velotrust.hub.v1.HubMessage
-	16, // [16:17] is the sub-list for method output_type
-	15, // [15:16] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	14, // 13: velotrust.hub.v1.HubMessage.client_registration_result:type_name -> velotrust.hub.v1.ClientRegistrationResult
+	10, // 14: velotrust.hub.v1.Welcome.config_snapshot:type_name -> velotrust.hub.v1.ConfigSnapshot
+	10, // 15: velotrust.hub.v1.RuntimeStatusAck.config_snapshot:type_name -> velotrust.hub.v1.ConfigSnapshot
+	1,  // 16: velotrust.hub.v1.HubControl.Connect:input_type -> velotrust.hub.v1.AgentMessage
+	8,  // 17: velotrust.hub.v1.HubControl.Connect:output_type -> velotrust.hub.v1.HubMessage
+	17, // [17:18] is the sub-list for method output_type
+	16, // [16:17] is the sub-list for method input_type
+	16, // [16:16] is the sub-list for extension type_name
+	16, // [16:16] is the sub-list for extension extendee
+	0,  // [0:16] is the sub-list for field type_name
 }
 
 func init() { file_shared_proto_v1_hub_proto_init() }
@@ -1322,6 +1457,7 @@ func file_shared_proto_v1_hub_proto_init() {
 		(*HubMessage_X25519AuthChallenge)(nil),
 		(*HubMessage_RuntimeStatusAck)(nil),
 		(*HubMessage_GatewayRegistrationResult)(nil),
+		(*HubMessage_ClientRegistrationResult)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1329,7 +1465,7 @@ func file_shared_proto_v1_hub_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_shared_proto_v1_hub_proto_rawDesc), len(file_shared_proto_v1_hub_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   14,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

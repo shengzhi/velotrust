@@ -2,7 +2,7 @@
 
 - 文档版本：1.0
 - 数据库：PostgreSQL
-- 结构基线：代码仓库迁移 006–018 的累计结果，包含元数据补齐及网关合并。
+- 结构与审计语义基线：代码仓库迁移 006–024 的累计结果，包含元数据补齐、节点合并和审计主体规范。
 - 总览与公共字段：[ZTNA 数据库设计总览](ztna_data_design.md)
 - 业务依据：[数据模型设计文档](../../VeloTrust_数据模型设计文档_最终版.md)
 
@@ -81,8 +81,8 @@ erDiagram
 | `network_id` | `BIGINT` | 否 | — | 所属网络站点，外键指向 t_ztna_network.id；每个网络最多一条映射。 |
 | `network_name` | `VARCHAR(128)` | 否 | — | 网络名称快照，更新时需要与网络对象协调。 |
 | `real_cidr` | `CIDR` | 否 | — | 真实业务网段。 |
-| `virtual_cidr` | `CIDR` | 是 | — | 虚拟影子网段；SNAT_Masquerade 可空，其余类型必须填写。 |
-| `nat_type` | `VARCHAR(32)` | 否 | — | NAT 类型：1:1_Bidirectional、SNAT_Masquerade、DNAT_VirtualIP。 |
+| `virtual_cidr` | `CIDR` | 是 | — | 虚拟影子网段；新建的影子映射必须填写。旧 SNAT_Masquerade 记录可为空。 |
+| `nat_type` | `VARCHAR(32)` | 否 | — | 映射类型：新记录使用 DNAT_VirtualIP；1:1_Bidirectional 和 SNAT_Masquerade 为旧数据兼容值。 |
 | `enabled` | `BOOLEAN` | 否 | `TRUE` | 映射是否启用；启用状态不能代替下发任务的应用确认。 |
 | `description` | `VARCHAR(512)` | 是 | — | NAT 业务说明。 |
 
@@ -107,7 +107,7 @@ erDiagram
 
 **业务一致性与生命周期**
 
-真实网段可以在不同站点重叠，远端通过虚拟影子网段区分。网段语法由 CIDR 类型保障，但 1:1 映射前缀长度相同、影子网段冲突及真实网段与站点匹配均需业务校验。DNAT 负责目标地址转换，出站 SNAT 负责回程；规则最终生效以 Gateway 配置回执为准。
+真实网段可以在不同站点重叠，客户端可通过虚拟影子网段区分。影子前缀 DNAT 要求真实与虚拟 CIDR 前缀长度相同。活动站点关联到 Gateway 后，HUB 自动生成 Overlay 全局网段到站点真实网段的 Masquerade，因此此表不再用于启用出站 SNAT；该表只保存可选的影子网段 DNAT。`SNAT_Masquerade` 是旧版本类型，读取时为兼容保留，但新配置不接受该类型。规则最终是否应用以 Gateway 配置回执为准。
 
 ## 3. 使用与维护约定
 

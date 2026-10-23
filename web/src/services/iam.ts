@@ -2,6 +2,7 @@ import { jrpcCall } from './jrpc';
 
 export interface IAMUser {
   id: number;
+  account_type: 'platform' | 'employee';
   username: string;
   display_name: string;
   email?: string | null;
@@ -36,6 +37,39 @@ export interface IAMRole {
   is_system: boolean;
   status: string;
   created_at: string;
+}
+
+export interface IAMGroup {
+  id: number;
+  parent_id?: number | null;
+  group_name: string;
+  group_code: string;
+  description?: string | null;
+  status: 'active' | 'disabled';
+  sort_order: number;
+  member_count: number;
+  version_no: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface IAMGroupMember {
+  id: number;
+  username: string;
+  display_name: string;
+  email?: string | null;
+  user_status: 'active' | 'disabled' | 'locked' | 'pending';
+  is_member: boolean;
+}
+
+export interface IAMGroupInput {
+  id?: number;
+  expected_version?: number;
+  group_name: string;
+  group_code: string;
+  description: string;
+  status: 'active' | 'disabled';
+  sort_order: number;
 }
 
 export interface IAMPermission {
@@ -141,10 +175,21 @@ export const iamApi = {
   revokePasskey: (credentialId: number) =>
     jrpcCall<{ success: boolean }>('IAM_RevokePasskey', { credential_id: credentialId }),
 
-  listUsers: (page = 1, pageSize = 100) =>
-    jrpcCall<{ items: IAMUser[]; total: number }>('IAM_ListUsers', { page, page_size: pageSize }),
+  listUsers: (page = 1, pageSize = 100, accountType?: 'platform' | 'employee') =>
+    jrpcCall<{ items: IAMUser[]; total: number }>('IAM_ListUsers', { page, page_size: pageSize, ...(accountType ? { account_type: accountType } : {}) }),
 
-  createUser: (input: { username: string; display_name: string; email: string; password: string }) =>
+  listGroups: () => jrpcCall<{ items: IAMGroup[] }>('IAM_ListGroups', {}).then((result) => result.items ?? []),
+
+  saveGroup: (input: IAMGroupInput) =>
+    jrpcCall<IAMGroup>('IAM_SaveGroup', input),
+
+  listGroupMembers: (groupId: number) =>
+    jrpcCall<{ items: IAMGroupMember[] }>('IAM_ListGroupMembers', { group_id: groupId }).then((result) => result.items ?? []),
+
+  setGroupMembers: (groupId: number, userIds: number[]) =>
+    jrpcCall<{ success: boolean }>('IAM_SetGroupMembers', { group_id: groupId, user_ids: userIds }),
+
+  createUser: (input: { account_type: 'platform' | 'employee'; username: string; display_name: string; email: string; password?: string }) =>
     jrpcCall<{ user: IAMUser }>('IAM_CreateUser', input).then((result) => result.user),
 
   setUserStatus: (userId: number, status: 'active' | 'disabled') =>

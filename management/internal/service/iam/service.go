@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -72,6 +73,7 @@ type SessionGrant struct {
 
 type UserView struct {
 	ID                 int64         `json:"id"`
+	AccountType        string        `json:"account_type"`
 	Username           string        `json:"username"`
 	DisplayName        string        `json:"display_name"`
 	Email              *string       `json:"email,omitempty"`
@@ -92,6 +94,7 @@ type PasskeyView struct {
 }
 
 type CreateUserInput struct {
+	AccountType string
 	Username    string
 	DisplayName string
 	Email       string
@@ -102,6 +105,16 @@ type CreateRoleInput struct {
 	RoleName    string
 	RoleCode    string
 	Description string
+}
+
+type GroupInput struct {
+	ID          int64
+	VersionNo   int64
+	GroupName   string
+	GroupCode   string
+	Description string
+	Status      string
+	SortOrder   int
 }
 
 type MenuInput struct {
@@ -197,9 +210,9 @@ func (s *Service) LoginWithTOTP(ctx context.Context, username, password, totpCod
 	if err != nil {
 		return nil, fmt.Errorf("load login identity: %w", err)
 	}
-	validPassword := verifyPassword(user, password)
+	validPassword := user != nil && user.AccountType == model.AccountTypePlatform && verifyPassword(user, password)
 	mfaUsed := false
-	if user != nil && user.UserStatus == "active" && validPassword {
+	if user != nil && user.AccountType == model.AccountTypePlatform && user.UserStatus == "active" && validPassword {
 		authenticator, authErr := s.store.FindTOTPAuthenticator(serviceCtx, user.ID)
 		if authErr != nil {
 			return nil, fmt.Errorf("load IAM MFA authenticator: %w", authErr)
@@ -217,7 +230,7 @@ func (s *Service) LoginWithTOTP(ctx context.Context, username, password, totpCod
 			}
 		}
 	}
-	if user == nil || user.UserStatus != "active" || !validPassword {
+	if user == nil || user.AccountType != model.AccountTypePlatform || user.UserStatus != "active" || !validPassword {
 		log := s.loginLog(user, "local", "failure", "invalid_credentials", sourceIP, userAgent, requestID, "")
 		if err := s.store.RecordLoginFailure(serviceCtx, log, usernameHash, ipHash, loginThrottleFailures, loginThrottleWindowMinutes, loginThrottleBlockMinutes); err != nil {
 			return nil, fmt.Errorf("record login failure: %w", err)
@@ -281,7 +294,7 @@ func (s *Service) ResolveBearer(ctx context.Context, token string) (*model.UserS
 	if user.ID != userID || session.UserID != userID || session.SessionID != claims.ID {
 		return nil, nil, errors.New("IAM JWT claims do not match the stored session")
 	}
-	if user.UserStatus != "active" {
+	if user.AccountType != model.AccountTypePlatform || user.UserStatus != "active" {
 		return nil, nil, errors.New("IAM session user is not active")
 	}
 	if session.IssuedAt.After(now) {
@@ -325,7 +338,7 @@ func (s *Service) CurrentUser(ctx *servicecontext.Context) (*UserView, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load current IAM user: %w", err)
 	}
-	if user == nil || user.UserStatus != "active" {
+	if user == nil || user.AccountType != model.AccountTypePlatform || user.UserStatus != "active" {
 		return nil, appErrors.NewAuthError("IAM_UNAUTHENTICATED", appErrors.AuthUnauthenticated)
 	}
 	permissions, err := s.store.ListPermissions(ctx, userID)
@@ -358,11 +371,14 @@ func (s *Service) HasPermission(ctx context.Context, userID int64, permission st
 	return s.store.HasPermission(serviceCtx, userID, permission)
 }
 
-func (s *Service) ListUsers(ctx *servicecontext.Context, page, pageSize int) ([]UserView, int64, error) {
+func (s *Service) ListUsers(ctx *servicecontext.Context, page, pageSize int, accountType string) ([]UserView, int64, error) {
 	if err := s.requirePermission(ctx, "iam.user.read"); err != nil {
 		return nil, 0, err
 	}
-	users, total, err := s.store.ListUsers(ctx, page, pageSize)
+	if accountType != "" && accountType != model.AccountTypePlatform && accountType != model.AccountTypeEmployee {
+		return nil, 0, appErrors.NewClientError("IAM_INVALID_ARGUMENT", map[string]string{"account_type": "must_be_platform_or_employee"})
+	}
+	users, total, err := s.store.ListUsers(ctx, page, pageSize, accountType)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -373,12 +389,117 @@ func (s *Service) ListUsers(ctx *servicecontext.Context, page, pageSize int) ([]
 	return result, total, nil
 }
 
+func (s *Service) ListGroups(ctx *servicecontext.Context) ([]model.Group, error) {
+	if err := s.requirePermission(ctx, "iam.group.read"); err != nil {
+		return nil, err
+	}
+	return s.store.ListGroups(ctx)
+}
+
+func (s *Service) SaveGroup(ctx *servicecontext.Context, input GroupInput) (*model.Group, error) {
+	if err := s.requirePermission(ctx, "iam.group.write"); err != nil {
+		return nil, err
+	}
+	name := strings.TrimSpace(input.GroupName)
+	code := strings.ToLower(strings.TrimSpace(input.GroupCode))
+	description := strings.TrimSpace(input.Description)
+	if name == "" || len(name) > 128 || len(code) == 0 || len(code) > 64 || len(description) > 512 || input.SortOrder < 0 || (input.Status != "active" && input.Status != "disabled") {
+		return nil, appErrors.NewClientError("IAM_INVALID_ARGUMENT", map[string]string{"group": "invalid"})
+	}
+	for index, char := range code {
+		valid := char >= 'a' && char <= 'z' || char >= '0' && char <= '9' || char == '_' || char == '-' || char == '.'
+		if !valid || index == 0 && !(char >= 'a' && char <= 'z' || char >= '0' && char <= '9') {
+			return nil, appErrors.NewClientError("IAM_INVALID_ARGUMENT", map[string]string{"group_code": "must_start_with_letter_or_number_and_use_only_letters_numbers_dot_dash_or_underscore"})
+		}
+	}
+	if input.ID == 0 && input.VersionNo != 0 || input.ID > 0 && input.VersionNo <= 0 {
+		return nil, appErrors.NewClientError("IAM_INVALID_ARGUMENT", map[string]string{"version_no": "new_group_omits_version_existing_group_requires_version"})
+	}
+	group := &model.Group{ID: input.ID, GroupName: name, GroupCode: code, Status: input.Status, SortOrder: input.SortOrder}
+	if description != "" {
+		group.Description = &description
+	}
+	actor, actorID := actorFromContext(ctx)
+	action := "iam.group.create"
+	if group.ID > 0 {
+		action = "iam.group.update"
+	}
+	changes, _ := json.Marshal(map[string]any{"group_name": name, "group_code": code, "status": input.Status})
+	audit := s.newAudit(ctx, actorID, actor, action, "group", code, "success", nil)
+	audit.ChangesJSON = changes
+	if err := s.store.SaveGroup(ctx, group, input.VersionNo, audit); err != nil {
+		switch {
+		case errors.Is(err, repository.ErrGroupCodeExists):
+			return nil, appErrors.NewClientError("IAM_GROUP_CODE_EXISTS", nil)
+		case errors.Is(err, repository.ErrGroupNotFound):
+			return nil, appErrors.NewClientError("IAM_GROUP_NOT_FOUND", nil)
+		case errors.Is(err, repository.ErrGroupVersionConflict):
+			return nil, appErrors.NewClientError("IAM_GROUP_CONFLICT", nil)
+		default:
+			return nil, fmt.Errorf("save IAM group: %w", err)
+		}
+	}
+	return group, nil
+}
+
+func (s *Service) ListGroupMembers(ctx *servicecontext.Context, groupID int64) ([]model.GroupMember, error) {
+	if err := s.requirePermission(ctx, "iam.group.read"); err != nil {
+		return nil, err
+	}
+	if groupID <= 0 {
+		return nil, appErrors.NewClientError("IAM_INVALID_ARGUMENT", map[string]string{"group_id": "required_positive_integer"})
+	}
+	members, err := s.store.ListGroupMembers(ctx, groupID)
+	if errors.Is(err, repository.ErrGroupNotFound) {
+		return nil, appErrors.NewClientError("IAM_GROUP_NOT_FOUND", nil)
+	}
+	return members, err
+}
+
+func (s *Service) SetGroupMembers(ctx *servicecontext.Context, groupID int64, userIDs []int64) error {
+	if err := s.requirePermission(ctx, "iam.group.write"); err != nil {
+		return err
+	}
+	if groupID <= 0 || len(userIDs) > 5000 {
+		return appErrors.NewClientError("IAM_INVALID_ARGUMENT", map[string]string{"group_members": "invalid"})
+	}
+	unique := make(map[int64]struct{}, len(userIDs))
+	for _, userID := range userIDs {
+		if userID <= 0 {
+			return appErrors.NewClientError("IAM_INVALID_ARGUMENT", map[string]string{"user_ids": "must_be_positive"})
+		}
+		unique[userID] = struct{}{}
+	}
+	userIDs = make([]int64, 0, len(unique))
+	for userID := range unique {
+		userIDs = append(userIDs, userID)
+	}
+	sort.Slice(userIDs, func(i, j int) bool { return userIDs[i] < userIDs[j] })
+	actor, actorID := actorFromContext(ctx)
+	audit := s.newAudit(ctx, actorID, actor, "iam.group.members.update", "group_members", fmt.Sprintf("%d", groupID), "success", nil)
+	if err := s.store.SetGroupMembers(ctx, groupID, userIDs, audit); err != nil {
+		switch {
+		case errors.Is(err, repository.ErrGroupNotFound):
+			return appErrors.NewClientError("IAM_GROUP_NOT_FOUND", nil)
+		case errors.Is(err, repository.ErrGroupMembersInvalid):
+			return appErrors.NewClientError("IAM_INVALID_ARGUMENT", map[string]string{"user_ids": "must_reference_employee_users"})
+		default:
+			return fmt.Errorf("update IAM group membership: %w", err)
+		}
+	}
+	return nil
+}
+
 func (s *Service) CreateUser(ctx *servicecontext.Context, input CreateUserInput) (*UserView, error) {
 	if err := s.requirePermission(ctx, "iam.user.write"); err != nil {
 		return nil, err
 	}
 	username := strings.ToLower(strings.TrimSpace(input.Username))
 	displayName := strings.TrimSpace(input.DisplayName)
+	accountType := strings.TrimSpace(input.AccountType)
+	if accountType != model.AccountTypePlatform && accountType != model.AccountTypeEmployee {
+		return nil, appErrors.NewClientError("IAM_INVALID_ARGUMENT", map[string]string{"account_type": "must_be_platform_or_employee"})
+	}
 	if username == "" || len(username) > 64 || len(displayName) > 128 || len(strings.TrimSpace(input.Email)) > 128 {
 		return nil, appErrors.NewClientError("IAM_INVALID_ARGUMENT", map[string]string{"user": "invalid"})
 	}
@@ -388,20 +509,30 @@ func (s *Service) CreateUser(ctx *servicecontext.Context, input CreateUserInput)
 	if displayName == "" {
 		displayName = username
 	}
-	salt, hash, err := hashPassword(input.Password)
+	var salt, hash *string
+	var version *int16
+	var handle *[]byte
+	mustChangePassword := false
+	saltValue, hashValue, err := hashPassword(input.Password)
 	if err != nil {
 		return nil, fmt.Errorf("hash IAM password: %w", err)
 	}
-	handle := make([]byte, 32)
-	if _, err := rand.Read(handle); err != nil {
-		return nil, fmt.Errorf("generate WebAuthn user handle: %w", err)
+	salt, hash, version = &saltValue, &hashValue, int16Ptr(PasswordHashVersion)
+	if accountType == model.AccountTypePlatform {
+		handleValue := make([]byte, 32)
+		if _, err := rand.Read(handleValue); err != nil {
+			return nil, fmt.Errorf("generate WebAuthn user handle: %w", err)
+		}
+		handle = &handleValue
+		mustChangePassword = true
 	}
 	actor, actorID := actorFromContext(ctx)
-	user := &model.User{Username: username, DisplayName: displayName, WebAuthnUserHandle: handle, PasswordSalt: &salt, PasswordHash: &hash, PasswordHashVersion: int16Ptr(PasswordHashVersion), AuthSource: "local", UserStatus: "active", MustChangePassword: true}
+	user := &model.User{AccountType: accountType, Username: username, DisplayName: displayName, WebAuthnUserHandle: handle, PasswordSalt: salt, PasswordHash: hash, PasswordHashVersion: version, AuthSource: "local", UserStatus: "active", MustChangePassword: mustChangePassword}
 	if email := strings.TrimSpace(input.Email); email != "" {
 		user.Email = &email
 	}
-	audit := s.newAudit(ctx, actorID, actor, "iam.user.create", "user", "", "success", nil)
+	audit := s.newAudit(ctx, actorID, actor, "iam.user.create", "user", username, "success", nil)
+	audit.ChangesJSON = []byte(fmt.Sprintf(`{"account_type":%q}`, accountType))
 	if err := s.store.CreateUser(ctx, user, audit); err != nil {
 		return nil, fmt.Errorf("create IAM user: %w", err)
 	}
@@ -638,6 +769,13 @@ func (s *Service) ListUserRoles(ctx *servicecontext.Context, userID int64) ([]mo
 	if userID <= 0 {
 		return nil, appErrors.NewClientError("IAM_INVALID_ARGUMENT", map[string]string{"user_id": "required_positive_integer"})
 	}
+	user, err := s.store.FindUserByID(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("load IAM role target: %w", err)
+	}
+	if user == nil || user.AccountType != model.AccountTypePlatform {
+		return []model.Role{}, nil
+	}
 	return s.store.ListUserRoles(ctx, userID)
 }
 
@@ -662,6 +800,13 @@ func (s *Service) GrantRole(ctx *servicecontext.Context, userID, roleID int64) e
 	if err := s.requirePermission(ctx, "iam.role.grant"); err != nil {
 		return err
 	}
+	target, err := s.store.FindUserByID(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("load IAM role target: %w", err)
+	}
+	if target == nil || target.AccountType != model.AccountTypePlatform {
+		return appErrors.NewClientError("IAM_ROLE_GRANT_DENIED", map[string]string{"account_type": "platform_required"})
+	}
 	return s.store.GrantRole(ctx, *actorID, userID, roleID, s.newAudit(ctx, actorID, actor, "iam.role.grant", "user_role", fmt.Sprintf("%d:%d", userID, roleID), "success", nil))
 }
 
@@ -675,6 +820,13 @@ func (s *Service) RevokeRole(ctx *servicecontext.Context, userID, roleID int64) 
 	}
 	if err := s.requirePermission(ctx, "iam.role.grant"); err != nil {
 		return err
+	}
+	target, err := s.store.FindUserByID(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("load IAM role target: %w", err)
+	}
+	if target == nil || target.AccountType != model.AccountTypePlatform {
+		return appErrors.NewClientError("IAM_ROLE_REVOKE_DENIED", map[string]string{"account_type": "platform_required"})
 	}
 	return s.store.RevokeRole(ctx, *actorID, userID, roleID, s.newAudit(ctx, actorID, actor, "iam.role.revoke", "user_role", fmt.Sprintf("%d:%d", userID, roleID), "success", nil))
 }
@@ -747,6 +899,13 @@ func (s *Service) ResetUserPassword(ctx *servicecontext.Context, userID int64, n
 	if err := s.requirePermission(ctx, "iam.user.write"); err != nil {
 		return err
 	}
+	target, err := s.store.FindUserByID(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("load IAM password reset target: %w", err)
+	}
+	if target == nil || (target.AccountType != model.AccountTypePlatform && target.AccountType != model.AccountTypeEmployee) {
+		return appErrors.NewClientError("IAM_PASSWORD_RESET_DENIED", map[string]string{"account_type": "unsupported"})
+	}
 	salt, hash, err := hashPassword(newPassword)
 	if err != nil {
 		return fmt.Errorf("hash reset IAM password: %w", err)
@@ -767,7 +926,7 @@ func (s *Service) ChangeOwnPassword(ctx *servicecontext.Context, currentPassword
 	if err != nil {
 		return fmt.Errorf("load IAM password change user: %w", err)
 	}
-	if user == nil || user.UserStatus != "active" || !verifyPassword(user, currentPassword) {
+	if user == nil || user.AccountType != model.AccountTypePlatform || user.UserStatus != "active" || !verifyPassword(user, currentPassword) {
 		return appErrors.NewAuthError("IAM_REAUTHENTICATION_REQUIRED", appErrors.AuthUnauthenticated)
 	}
 	if user.PasswordHash == nil {
@@ -825,7 +984,8 @@ func (s *Service) BootstrapAdmin(ctx context.Context, username, displayName, pas
 	if _, err := rand.Read(handle); err != nil {
 		return err
 	}
-	user := &model.User{Username: username, DisplayName: displayName, WebAuthnUserHandle: handle, PasswordSalt: &salt, PasswordHash: &hash, PasswordHashVersion: int16Ptr(PasswordHashVersion), AuthSource: "local", UserStatus: "active", MustChangePassword: true}
+	userHandle := &handle
+	user := &model.User{AccountType: model.AccountTypePlatform, Username: username, DisplayName: displayName, WebAuthnUserHandle: userHandle, PasswordSalt: &salt, PasswordHash: &hash, PasswordHashVersion: int16Ptr(PasswordHashVersion), AuthSource: "local", UserStatus: "active", MustChangePassword: true}
 	audit := &model.AuditLog{EventID: eventID(), UserName: "bootstrap", Action: "iam.bootstrap", TargetType: "user", TargetID: stringPtr(username), Result: "success", OccurredAt: time.Now().UTC()}
 	return s.store.BootstrapAdmin(serviceCtx, user, audit)
 }
@@ -924,7 +1084,7 @@ func view(user *model.User) UserView {
 	if user == nil {
 		return UserView{}
 	}
-	return UserView{ID: user.ID, Username: user.Username, DisplayName: user.DisplayName, Email: user.Email, UserStatus: user.UserStatus, MustChangePassword: user.MustChangePassword, LastLoginAt: user.LastLoginAt, CreatedAt: user.CreatedAt}
+	return UserView{ID: user.ID, AccountType: user.AccountType, Username: user.Username, DisplayName: user.DisplayName, Email: user.Email, UserStatus: user.UserStatus, MustChangePassword: user.MustChangePassword, LastLoginAt: user.LastLoginAt, CreatedAt: user.CreatedAt}
 }
 
 func parseUserID(value string) (int64, error) {

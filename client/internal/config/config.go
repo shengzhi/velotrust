@@ -38,11 +38,38 @@ const maxDNSDomainsPerGroup = 128
 // Local describes how this installation identifies its private control-plane
 // instance. It must never contain user credentials, device keys, or tokens.
 type Local struct {
-	SchemaVersion   int     `json:"schema_version"`
-	InstanceID      string  `json:"instance_id"`
-	ControlPlaneURL string  `json:"control_plane_url"`
-	LogLevel        string  `json:"log_level,omitempty"`
-	Tunnel          *Tunnel `json:"tunnel,omitempty"`
+	SchemaVersion   int        `json:"schema_version"`
+	InstanceID      string     `json:"instance_id"`
+	ControlPlaneURL string     `json:"control_plane_url"`
+	LogLevel        string     `json:"log_level,omitempty"`
+	Identity        *Identity  `json:"identity,omitempty"`
+	Hub             *HubConfig `json:"hub,omitempty"`
+	Tunnel          *Tunnel    `json:"tunnel,omitempty"`
+}
+
+type Identity struct {
+	PrivateKeyFile string `json:"private_key_file"`
+}
+
+type HubConfig struct {
+	Endpoint        string `json:"endpoint"`
+	TLSEnabledValue *bool  `json:"tls_enabled,omitempty"`
+	ServerName      string `json:"server_name,omitempty"`
+	CAFile          string `json:"ca_file,omitempty"`
+}
+
+func (h HubConfig) TLSEnabled() bool {
+	return h.TLSEnabledValue == nil || *h.TLSEnabledValue
+}
+
+func (cfg Local) PrivateKeyFile() string {
+	if cfg.Identity != nil && cfg.Identity.PrivateKeyFile != "" {
+		return cfg.Identity.PrivateKeyFile
+	}
+	if cfg.Tunnel != nil {
+		return cfg.Tunnel.PrivateKeyFile
+	}
+	return ""
 }
 
 // Tunnel is a static, locally provisioned WireGuard client profile. It does
@@ -273,8 +300,8 @@ func (cfg Local) Validate() error {
 		return errors.New("instance_id must be 1 to 128 safe ASCII characters")
 	}
 	if cfg.ControlPlaneURL == "" {
-		if cfg.Tunnel == nil {
-			return errors.New("control_plane_url is required unless a static tunnel profile is configured")
+		if cfg.Tunnel == nil && cfg.Hub == nil {
+			return errors.New("configure either a HUB control endpoint or a static tunnel profile")
 		}
 	} else {
 		if strings.TrimSpace(cfg.ControlPlaneURL) != cfg.ControlPlaneURL {
@@ -297,6 +324,19 @@ func (cfg Local) Validate() error {
 			}
 		}
 	}
+	if cfg.Hub != nil {
+		if err := cfg.Hub.Validate(); err != nil {
+			return fmt.Errorf("hub: %w", err)
+		}
+		if cfg.PrivateKeyFile() == "" {
+			return errors.New("identity.private_key_file is required for HUB-managed Client connections")
+		}
+	}
+	if cfg.Identity != nil && cfg.Identity.PrivateKeyFile != "" {
+		if err := validatePrivateKeyFile(cfg.Identity.PrivateKeyFile); err != nil {
+			return fmt.Errorf("identity.private_key_file: %w", err)
+		}
+	}
 	if cfg.LogLevel != "" && cfg.LogLevel != "debug" && cfg.LogLevel != "info" && cfg.LogLevel != "warn" && cfg.LogLevel != "error" {
 		return fmt.Errorf("log_level must be one of debug, info, warn, or error")
 	}
@@ -304,6 +344,35 @@ func (cfg Local) Validate() error {
 		if err := cfg.Tunnel.Validate(); err != nil {
 			return fmt.Errorf("tunnel: %w", err)
 		}
+	}
+	return nil
+}
+
+func (h HubConfig) Validate() error {
+	endpoint := strings.TrimSpace(h.Endpoint)
+	if endpoint == "" || endpoint != h.Endpoint || strings.ContainsAny(endpoint, "\r\n\t/\\") {
+		return errors.New("endpoint must be a host:port gRPC address")
+	}
+	host, port, err := net.SplitHostPort(endpoint)
+	if err != nil || host == "" {
+		return errors.New("endpoint must be a host:port gRPC address")
+	}
+	portNumber, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || portNumber == 0 {
+		return errors.New("endpoint port must be between 1 and 65535")
+	}
+	if strings.ContainsAny(h.ServerName, "\r\n\x00/\\") {
+		return errors.New("server_name contains invalid characters")
+	}
+	if strings.ContainsAny(h.CAFile, "\r\n\x00") {
+		return errors.New("ca_file contains invalid characters")
+	}
+	return nil
+}
+
+func validatePrivateKeyFile(path string) error {
+	if filepath.IsAbs(path) || filepath.Base(path) != path || strings.ContainsAny(path, ":/\\") || strings.TrimSpace(path) != path {
+		return errors.New("must be a relative filename inside the config directory")
 	}
 	return nil
 }

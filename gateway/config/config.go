@@ -35,7 +35,7 @@ type Config struct {
 	Hub               *HubConfig   `json:"hub,omitempty"`
 	AllowDefaultRoute bool         `json:"allow_default_route,omitempty"`
 	Tunnel            Tunnel       `json:"tunnel"`
-	Routes            []string     `json:"routes,omitempty"` // Destinations forwarded by this Gateway to its locally routed networks.
+	Routes            []string     `json:"routes,omitempty"` // Gateway-associated private destinations; not host route installation requests.
 	NAT               []NATMapping `json:"nat,omitempty"`
 	Rules             []ACLRule    `json:"rules,omitempty"`
 }

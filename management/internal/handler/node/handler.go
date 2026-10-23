@@ -14,10 +14,14 @@ import (
 type Handler struct{ service *appNode.Service }
 
 var methodPolicies = map[string]middleware.IAMMethodPolicy{
-	"ListNodes":             {Authenticated: true, Permission: "ztna.node.read"},
-	"GetNode":               {Authenticated: true, Permission: "ztna.node.read"},
-	"SetNodeStatus":         {Authenticated: true, Permission: "ztna.node.write"},
-	"SetNodePublicEndpoint": {Authenticated: true, Permission: "ztna.node.write"},
+	"ListNodes":                {Authenticated: true, Permission: "ztna.node.read"},
+	"GetNode":                  {Authenticated: true, Permission: "ztna.node.read"},
+	"GetAccessChangeStatus":    {Authenticated: true, Permission: "ztna.node.read"},
+	"ListGatewayTunnelOptions": {Authenticated: true, Permission: "ztna.tunnel.read"},
+	"CreateLogicalTunnel":      {Authenticated: true, Permission: "ztna.tunnel.write"},
+	"AssignGatewayTunnel":      {Authenticated: true, Permission: "ztna.tunnel.write"},
+	"SetNodeStatus":            {Authenticated: true, Permission: "ztna.node.write"},
+	"SetNodePublicEndpoint":    {Authenticated: true, Permission: "ztna.node.write"},
 }
 
 func Register(server *jrpc.Server, service *appNode.Service, checker middleware.PermissionChecker) error {
@@ -74,6 +78,58 @@ func (h *Handler) GetNode(ctx *jrpc.Context, args *GetNodeArgs) (*model.VirtualN
 		return nil, appErrors.NewResourceError("ZTNA_NODE_NOT_FOUND", "virtual node", true)
 	}
 	return item, nil
+}
+
+type GetAccessChangeStatusArgs struct {
+	SubjectType string `json:"subject_type" validate:"required,oneof=user device node"`
+	SubjectID   int64  `json:"subject_id" validate:"required,gt=0"`
+}
+
+func (h *Handler) GetAccessChangeStatus(ctx *jrpc.Context, args *GetAccessChangeStatusArgs) (*model.AccessChangeStatusView, error) {
+	if args == nil {
+		return nil, errors.New("access-change subject is required")
+	}
+	return h.service.GetAccessChangeStatus(middleware.ServiceContext(ctx), args.SubjectType, args.SubjectID)
+}
+
+type ListGatewayTunnelOptionsReply struct {
+	Items []model.GatewayTunnelOption `json:"items"`
+}
+
+func (h *Handler) ListGatewayTunnelOptions(ctx *jrpc.Context, _ *struct{}) (*ListGatewayTunnelOptionsReply, error) {
+	items, err := h.service.ListGatewayTunnelOptions(middleware.ServiceContext(ctx))
+	if err != nil {
+		return nil, err
+	}
+	return &ListGatewayTunnelOptionsReply{Items: items}, nil
+}
+
+type CreateLogicalTunnelArgs struct {
+	Code        string `json:"tunnel_code" validate:"required,max=64"`
+	Description string `json:"description" validate:"omitempty,max=512"`
+}
+
+func (h *Handler) CreateLogicalTunnel(ctx *jrpc.Context, args *CreateLogicalTunnelArgs) (*model.GatewayTunnelOption, error) {
+	if args == nil {
+		return nil, errors.New("logical tunnel arguments are required")
+	}
+	return h.service.CreateLogicalTunnel(middleware.ServiceContext(ctx), args.Code, args.Description)
+}
+
+type AssignGatewayTunnelArgs struct {
+	NodeID          int64 `json:"node_id" validate:"required,gt=0"`
+	TunnelID        int64 `json:"tunnel_id" validate:"required,gt=0"`
+	ExpectedVersion int64 `json:"expected_version" validate:"required,gt=0"`
+}
+
+func (h *Handler) AssignGatewayTunnel(ctx *jrpc.Context, args *AssignGatewayTunnelArgs) (*MutationReply, error) {
+	if args == nil {
+		return nil, errors.New("Gateway tunnel assignment arguments are required")
+	}
+	if err := h.service.AssignGatewayTunnel(middleware.ServiceContext(ctx), args.NodeID, args.TunnelID, args.ExpectedVersion); err != nil {
+		return nil, err
+	}
+	return &MutationReply{Success: true}, nil
 }
 
 type SetNodeStatusArgs struct {

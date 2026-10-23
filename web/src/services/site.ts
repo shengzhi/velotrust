@@ -46,7 +46,7 @@ export interface SaveSiteNATMappingInput {
   id: number;
   expected_version?: number;
   network_id: number;
-  nat_type: '1:1_Bidirectional' | 'SNAT_Masquerade' | 'DNAT_VirtualIP';
+  nat_type: 'DNAT_VirtualIP';
   virtual_cidr?: string | null;
   enabled: boolean;
   description?: string;

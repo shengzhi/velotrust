@@ -11,6 +11,7 @@ import (
 	"github.com/lib/pq"
 	servicecontext "velotrust/management/internal/context"
 	"velotrust/management/internal/model/iam"
+	accesschanges "velotrust/management/internal/repository/ztna"
 	"velotrust/shared/repository/database"
 	"xorm.io/xorm"
 )
@@ -22,6 +23,8 @@ var bootstrapPermissions = []struct {
 }{
 	{"iam.user.read", "Read users", "iam.user", "read"},
 	{"iam.user.write", "Manage users", "iam.user", "write"},
+	{"iam.group.read", "View employee groups", "iam.group", "read"},
+	{"iam.group.write", "Manage employee groups", "iam.group", "write"},
 	{"iam.role.read", "Read roles", "iam.role", "read"},
 	{"iam.role.write", "Manage roles", "iam.role", "write"},
 	{"iam.role.grant", "Grant roles", "iam.role", "grant"},
@@ -114,7 +117,7 @@ func (r *Repository) CreateLoginSession(ctx *servicecontext.Context, session *ia
 			return fmt.Errorf("insert IAM session: %w", err)
 		}
 		var user iam.User
-		found, err := s.SQL("SELECT * FROM "+iam.TableUser+" WHERE id=? AND user_status='active' FOR UPDATE", session.UserID).Get(&user)
+		found, err := s.SQL("SELECT * FROM "+iam.TableUser+" WHERE id=? AND account_type='platform' AND user_status='active' FOR UPDATE", session.UserID).Get(&user)
 		if err != nil {
 			return fmt.Errorf("update IAM last login: %w", err)
 		}
@@ -324,7 +327,7 @@ func (r *Repository) HasPermission(ctx *servicecontext.Context, userID int64, co
 	var result struct {
 		Allowed bool `xorm:"'allowed'"`
 	}
-	query := "SELECT EXISTS (SELECT 1 FROM " + iam.TableUserRole + " ur JOIN " + iam.TableUser + " u ON u.id=ur.user_id JOIN " + iam.TableRole + " r ON r.id=ur.role_id JOIN " + iam.TableRolePermission + " rp ON rp.role_id=r.id JOIN " + iam.TablePermission + " p ON p.id=rp.permission_id JOIN " + iam.TableResource + " res ON res.id=p.resource_id WHERE ur.user_id=? AND u.user_status='active' AND r.status='active' AND p.permission_code=? AND p.status='active' AND res.status='active') AS allowed"
+	query := "SELECT EXISTS (SELECT 1 FROM " + iam.TableUserRole + " ur JOIN " + iam.TableUser + " u ON u.id=ur.user_id JOIN " + iam.TableRole + " r ON r.id=ur.role_id JOIN " + iam.TableRolePermission + " rp ON rp.role_id=r.id JOIN " + iam.TablePermission + " p ON p.id=rp.permission_id JOIN " + iam.TableResource + " res ON res.id=p.resource_id WHERE ur.user_id=? AND u.account_type='platform' AND u.user_status='active' AND r.status='active' AND p.permission_code=? AND p.status='active' AND res.status='active') AS allowed"
 	s := r.db.Engine().NewSession().Context(ctx)
 	defer s.Close()
 	_, err := s.SQL(query, userID, code).Get(&result)
@@ -338,7 +341,7 @@ func (r *Repository) ListPermissions(ctx *servicecontext.Context, userID int64) 
 	var rows []struct {
 		Code string `xorm:"'permission_code'"`
 	}
-	query := "SELECT DISTINCT p.permission_code FROM " + iam.TableUserRole + " ur JOIN " + iam.TableUser + " u ON u.id=ur.user_id JOIN " + iam.TableRole + " r ON r.id=ur.role_id JOIN " + iam.TableRolePermission + " rp ON rp.role_id=r.id JOIN " + iam.TablePermission + " p ON p.id=rp.permission_id JOIN " + iam.TableResource + " res ON res.id=p.resource_id WHERE ur.user_id=? AND u.user_status='active' AND r.status='active' AND p.status='active' AND res.status='active' ORDER BY p.permission_code"
+	query := "SELECT DISTINCT p.permission_code FROM " + iam.TableUserRole + " ur JOIN " + iam.TableUser + " u ON u.id=ur.user_id JOIN " + iam.TableRole + " r ON r.id=ur.role_id JOIN " + iam.TableRolePermission + " rp ON rp.role_id=r.id JOIN " + iam.TablePermission + " p ON p.id=rp.permission_id JOIN " + iam.TableResource + " res ON res.id=p.resource_id WHERE ur.user_id=? AND u.account_type='platform' AND u.user_status='active' AND r.status='active' AND p.status='active' AND res.status='active' ORDER BY p.permission_code"
 	s := r.db.Engine().NewSession().Context(ctx)
 	defer s.Close()
 	if err := s.SQL(query, userID).Find(&rows); err != nil {
@@ -351,21 +354,31 @@ func (r *Repository) ListPermissions(ctx *servicecontext.Context, userID int64) 
 	return result, nil
 }
 
-func (r *Repository) ListUsers(ctx *servicecontext.Context, page, pageSize int) ([]iam.User, int64, error) {
+func (r *Repository) ListUsers(ctx *servicecontext.Context, page, pageSize int, accountType string) ([]iam.User, int64, error) {
 	if page < 1 {
 		page = 1
 	}
 	if pageSize < 1 || pageSize > 100 {
 		pageSize = 50
 	}
-	s := r.db.Engine().NewSession().Context(ctx)
-	defer s.Close()
-	total, err := s.Table(iam.TableUser).Count(new(iam.User))
+	countSession := r.db.Engine().NewSession().Context(ctx)
+	defer countSession.Close()
+	countQuery := countSession.Table(iam.TableUser)
+	if accountType != "" {
+		countQuery = countQuery.Where("account_type=?", accountType)
+	}
+	total, err := countQuery.Count(new(iam.User))
 	if err != nil {
 		return nil, 0, fmt.Errorf("count IAM users: %w", err)
 	}
 	var users []iam.User
-	err = s.Table(iam.TableUser).OrderBy("id DESC").Limit(pageSize, (page-1)*pageSize).Find(&users)
+	listSession := r.db.Engine().NewSession().Context(ctx)
+	defer listSession.Close()
+	usersQuery := listSession.Table(iam.TableUser)
+	if accountType != "" {
+		usersQuery = usersQuery.Where("account_type=?", accountType)
+	}
+	err = usersQuery.OrderBy("id DESC").Limit(pageSize, (page-1)*pageSize).Find(&users)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list IAM users: %w", err)
 	}
@@ -455,8 +468,8 @@ func (r *Repository) ListUserMenus(ctx *servicecontext.Context, userID int64) ([
 	s := r.db.Engine().NewSession().Context(ctx)
 	defer s.Close()
 	query := "SELECT DISTINCT m.* FROM " + iam.TableMenu + " m WHERE m.status='active' AND (" +
-		"EXISTS (SELECT 1 FROM " + iam.TableRoleMenu + " rm JOIN " + iam.TableUserRole + " ur ON ur.role_id=rm.role_id JOIN " + iam.TableRole + " r ON r.id=ur.role_id JOIN " + iam.TableUser + " u ON u.id=ur.user_id WHERE rm.menu_id=m.id AND ur.user_id=? AND r.status='active' AND u.user_status='active') OR " +
-		"EXISTS (SELECT 1 FROM " + iam.TableMenu + " child JOIN " + iam.TableRoleMenu + " rm ON rm.menu_id=child.id JOIN " + iam.TableUserRole + " ur ON ur.role_id=rm.role_id JOIN " + iam.TableRole + " r ON r.id=ur.role_id JOIN " + iam.TableUser + " u ON u.id=ur.user_id WHERE child.parent_id=m.id AND child.status='active' AND ur.user_id=? AND r.status='active' AND u.user_status='active')) " +
+		"EXISTS (SELECT 1 FROM " + iam.TableRoleMenu + " rm JOIN " + iam.TableUserRole + " ur ON ur.role_id=rm.role_id JOIN " + iam.TableRole + " r ON r.id=ur.role_id JOIN " + iam.TableUser + " u ON u.id=ur.user_id WHERE rm.menu_id=m.id AND ur.user_id=? AND r.status='active' AND u.account_type='platform' AND u.user_status='active') OR " +
+		"EXISTS (SELECT 1 FROM " + iam.TableMenu + " child JOIN " + iam.TableRoleMenu + " rm ON rm.menu_id=child.id JOIN " + iam.TableUserRole + " ur ON ur.role_id=rm.role_id JOIN " + iam.TableRole + " r ON r.id=ur.role_id JOIN " + iam.TableUser + " u ON u.id=ur.user_id WHERE child.parent_id=m.id AND child.status='active' AND ur.user_id=? AND r.status='active' AND u.account_type='platform' AND u.user_status='active')) " +
 		"ORDER BY m.parent_id NULLS FIRST, m.sort_order ASC, m.id ASC"
 	if err := s.SQL(query, userID, userID).Find(&menus); err != nil {
 		return nil, fmt.Errorf("list menus for IAM user: %w", err)
@@ -484,7 +497,7 @@ func (r *Repository) SetRoleMenus(ctx *servicecontext.Context, actorID, roleID i
 		var allowed struct {
 			Count int64 `xorm:"'count'"`
 		}
-		permissionQuery := "SELECT COUNT(*) AS count FROM " + iam.TableUser + " u WHERE u.id=? AND u.user_status='active' AND EXISTS (SELECT 1 FROM " + iam.TableUserRole + " ur JOIN " + iam.TableRole + " r ON r.id=ur.role_id JOIN " + iam.TableRolePermission + " rp ON rp.role_id=r.id JOIN " + iam.TablePermission + " p ON p.id=rp.permission_id JOIN " + iam.TableResource + " res ON res.id=p.resource_id WHERE ur.user_id=u.id AND r.status='active' AND p.status='active' AND res.status='active' AND p.permission_code='iam.role.write')"
+		permissionQuery := "SELECT COUNT(*) AS count FROM " + iam.TableUser + " u WHERE u.id=? AND u.account_type='platform' AND u.user_status='active' AND EXISTS (SELECT 1 FROM " + iam.TableUserRole + " ur JOIN " + iam.TableRole + " r ON r.id=ur.role_id JOIN " + iam.TableRolePermission + " rp ON rp.role_id=r.id JOIN " + iam.TablePermission + " p ON p.id=rp.permission_id JOIN " + iam.TableResource + " res ON res.id=p.resource_id WHERE ur.user_id=u.id AND r.status='active' AND p.status='active' AND res.status='active' AND p.permission_code='iam.role.write')"
 		if _, err := s.SQL(permissionQuery, actorID).Get(&allowed); err != nil {
 			return fmt.Errorf("check IAM role menu write permission: %w", err)
 		}
@@ -769,7 +782,7 @@ func (r *Repository) GrantRole(ctx *servicecontext.Context, actorID, userID, rol
 		var count struct {
 			Value int64 `xorm:"'count'"`
 		}
-		query := "SELECT COUNT(*) AS count FROM " + iam.TableUser + " u CROSS JOIN " + iam.TableRole + " r CROSS JOIN " + iam.TableUser + " actor WHERE u.id=? AND u.user_status='active' AND r.id=? AND r.status='active' AND actor.id=? AND actor.user_status='active'"
+		query := "SELECT COUNT(*) AS count FROM " + iam.TableUser + " u CROSS JOIN " + iam.TableRole + " r CROSS JOIN " + iam.TableUser + " actor WHERE u.id=? AND u.account_type='platform' AND u.user_status='active' AND r.id=? AND r.status='active' AND actor.id=? AND actor.account_type='platform' AND actor.user_status='active'"
 		if _, err := s.SQL(query, userID, roleID, actorID).Get(&count); err != nil {
 			return err
 		}
@@ -820,7 +833,7 @@ func (r *Repository) RevokeRole(ctx *servicecontext.Context, actorID, userID, ro
 		var actor struct {
 			Count int64 `xorm:"'count'"`
 		}
-		query := "SELECT COUNT(*) AS count FROM " + iam.TableUser + " u WHERE u.id=? AND u.user_status='active' AND EXISTS (SELECT 1 FROM " + iam.TableUserRole + " ur JOIN " + iam.TableRole + " r ON r.id=ur.role_id JOIN " + iam.TableRolePermission + " rp ON rp.role_id=r.id JOIN " + iam.TablePermission + " p ON p.id=rp.permission_id JOIN " + iam.TableResource + " res ON res.id=p.resource_id WHERE ur.user_id=u.id AND r.status='active' AND p.status='active' AND res.status='active' AND p.permission_code='iam.role.grant')"
+		query := "SELECT COUNT(*) AS count FROM " + iam.TableUser + " u WHERE u.id=? AND u.account_type='platform' AND u.user_status='active' AND EXISTS (SELECT 1 FROM " + iam.TableUserRole + " ur JOIN " + iam.TableRole + " r ON r.id=ur.role_id JOIN " + iam.TableRolePermission + " rp ON rp.role_id=r.id JOIN " + iam.TablePermission + " p ON p.id=rp.permission_id JOIN " + iam.TableResource + " res ON res.id=p.resource_id WHERE ur.user_id=u.id AND r.status='active' AND p.status='active' AND res.status='active' AND p.permission_code='iam.role.grant')"
 		if _, err := s.SQL(query, actorID).Get(&actor); err != nil || actor.Count != 1 {
 			if err != nil {
 				return err
@@ -842,7 +855,7 @@ func (r *Repository) RevokeRole(ctx *servicecontext.Context, actorID, userID, ro
 			var admins struct {
 				Count int64 `xorm:"'count'"`
 			}
-			countQuery := "SELECT COUNT(DISTINCT u.id) AS count FROM " + iam.TableUser + " u JOIN " + iam.TableUserRole + " ur ON ur.user_id=u.id JOIN " + iam.TableRole + " r ON r.id=ur.role_id WHERE u.user_status='active' AND r.role_code=? AND r.status='active'"
+			countQuery := "SELECT COUNT(DISTINCT u.id) AS count FROM " + iam.TableUser + " u JOIN " + iam.TableUserRole + " ur ON ur.user_id=u.id JOIN " + iam.TableRole + " r ON r.id=ur.role_id WHERE u.account_type='platform' AND u.user_status='active' AND r.role_code=? AND r.status='active'"
 			if _, err := s.SQL(countQuery, platformAdminRole).Get(&admins); err != nil {
 				return err
 			}
@@ -932,7 +945,7 @@ func (r *Repository) GrantPermission(ctx *servicecontext.Context, actorID, roleI
 		var count struct {
 			Value int64 `xorm:"'count'"`
 		}
-		query := "SELECT COUNT(*) AS count FROM " + iam.TableRole + " r CROSS JOIN " + iam.TablePermission + " p JOIN " + iam.TableResource + " res ON res.id=p.resource_id WHERE r.id=? AND r.status='active' AND p.id=? AND p.status='active' AND res.status='active' AND EXISTS (SELECT 1 FROM " + iam.TableUser + " actor_u JOIN " + iam.TableUserRole + " actor_ur ON actor_ur.user_id=actor_u.id JOIN " + iam.TableRole + " actor_r ON actor_r.id=actor_ur.role_id JOIN " + iam.TableRolePermission + " actor_rp ON actor_rp.role_id=actor_r.id JOIN " + iam.TablePermission + " actor_p ON actor_p.id=actor_rp.permission_id JOIN " + iam.TableResource + " actor_res ON actor_res.id=actor_p.resource_id WHERE actor_u.id=? AND actor_u.user_status='active' AND actor_r.status='active' AND actor_p.status='active' AND actor_res.status='active' AND actor_p.permission_code=p.permission_code)"
+		query := "SELECT COUNT(*) AS count FROM " + iam.TableRole + " r CROSS JOIN " + iam.TablePermission + " p JOIN " + iam.TableResource + " res ON res.id=p.resource_id WHERE r.id=? AND r.status='active' AND p.id=? AND p.status='active' AND res.status='active' AND EXISTS (SELECT 1 FROM " + iam.TableUser + " actor_u JOIN " + iam.TableUserRole + " actor_ur ON actor_ur.user_id=actor_u.id JOIN " + iam.TableRole + " actor_r ON actor_r.id=actor_ur.role_id JOIN " + iam.TableRolePermission + " actor_rp ON actor_rp.role_id=actor_r.id JOIN " + iam.TablePermission + " actor_p ON actor_p.id=actor_rp.permission_id JOIN " + iam.TableResource + " actor_res ON actor_res.id=actor_p.resource_id WHERE actor_u.id=? AND actor_u.account_type='platform' AND actor_u.user_status='active' AND actor_r.status='active' AND actor_p.status='active' AND actor_res.status='active' AND actor_p.permission_code=p.permission_code)"
 		if _, err := s.SQL(query, roleID, permissionID, actorID).Get(&count); err != nil {
 			return err
 		}
@@ -969,7 +982,7 @@ func (r *Repository) RevokePermission(ctx *servicecontext.Context, actorID, role
 		var allowed struct {
 			Count int64 `xorm:"'count'"`
 		}
-		query := "SELECT COUNT(*) AS count FROM " + iam.TableUser + " u WHERE u.id=? AND u.user_status='active' AND EXISTS (SELECT 1 FROM " + iam.TableUserRole + " ur JOIN " + iam.TableRole + " r ON r.id=ur.role_id JOIN " + iam.TableRolePermission + " rp ON rp.role_id=r.id JOIN " + iam.TablePermission + " p ON p.id=rp.permission_id JOIN " + iam.TableResource + " res ON res.id=p.resource_id WHERE ur.user_id=u.id AND r.status='active' AND p.status='active' AND res.status='active' AND p.permission_code='iam.role.write')"
+		query := "SELECT COUNT(*) AS count FROM " + iam.TableUser + " u WHERE u.id=? AND u.account_type='platform' AND u.user_status='active' AND EXISTS (SELECT 1 FROM " + iam.TableUserRole + " ur JOIN " + iam.TableRole + " r ON r.id=ur.role_id JOIN " + iam.TableRolePermission + " rp ON rp.role_id=r.id JOIN " + iam.TablePermission + " p ON p.id=rp.permission_id JOIN " + iam.TableResource + " res ON res.id=p.resource_id WHERE ur.user_id=u.id AND r.status='active' AND p.status='active' AND res.status='active' AND p.permission_code='iam.role.write')"
 		if _, err := s.SQL(query, actorID).Get(&allowed); err != nil || allowed.Count != 1 {
 			if err != nil {
 				return err
@@ -1022,7 +1035,7 @@ func (r *Repository) SetUserStatus(ctx *servicecontext.Context, actorID, userID 
 		var actor struct {
 			Count int64 `xorm:"'count'"`
 		}
-		query := "SELECT COUNT(*) AS count FROM " + iam.TableUser + " u WHERE u.id=? AND u.user_status='active' AND EXISTS (SELECT 1 FROM " + iam.TableUserRole + " ur JOIN " + iam.TableRole + " r ON r.id=ur.role_id JOIN " + iam.TableRolePermission + " rp ON rp.role_id=r.id JOIN " + iam.TablePermission + " p ON p.id=rp.permission_id JOIN " + iam.TableResource + " res ON res.id=p.resource_id WHERE ur.user_id=u.id AND r.status='active' AND p.status='active' AND res.status='active' AND p.permission_code='iam.user.write')"
+		query := "SELECT COUNT(*) AS count FROM " + iam.TableUser + " u WHERE u.id=? AND u.account_type='platform' AND u.user_status='active' AND EXISTS (SELECT 1 FROM " + iam.TableUserRole + " ur JOIN " + iam.TableRole + " r ON r.id=ur.role_id JOIN " + iam.TableRolePermission + " rp ON rp.role_id=r.id JOIN " + iam.TablePermission + " p ON p.id=rp.permission_id JOIN " + iam.TableResource + " res ON res.id=p.resource_id WHERE ur.user_id=u.id AND r.status='active' AND p.status='active' AND res.status='active' AND p.permission_code='iam.user.write')"
 		if _, err := s.SQL(query, actorID).Get(&actor); err != nil || actor.Count != 1 {
 			if err != nil {
 				return err
@@ -1040,6 +1053,7 @@ func (r *Repository) SetUserStatus(ctx *servicecontext.Context, actorID, userID 
 		if target.UserStatus == status {
 			return nil
 		}
+		previousStatus := target.UserStatus
 		target.UserStatus = status
 		target.Update(ctx.UserName())
 		target.Cols("user_status")
@@ -1050,7 +1064,7 @@ func (r *Repository) SetUserStatus(ctx *servicecontext.Context, actorID, userID 
 			var admins struct {
 				Count int64 `xorm:"'count'"`
 			}
-			countQuery := "SELECT COUNT(DISTINCT u.id) AS count FROM " + iam.TableUser + " u JOIN " + iam.TableUserRole + " ur ON ur.user_id=u.id JOIN " + iam.TableRole + " r ON r.id=ur.role_id WHERE u.user_status='active' AND r.role_code=? AND r.status='active'"
+			countQuery := "SELECT COUNT(DISTINCT u.id) AS count FROM " + iam.TableUser + " u JOIN " + iam.TableUserRole + " ur ON ur.user_id=u.id JOIN " + iam.TableRole + " r ON r.id=ur.role_id WHERE u.account_type='platform' AND u.user_status='active' AND r.role_code=? AND r.status='active'"
 			if _, err := s.SQL(countQuery, platformAdminRole).Get(&admins); err != nil {
 				return err
 			}
@@ -1061,9 +1075,16 @@ func (r *Repository) SetUserStatus(ctx *servicecontext.Context, actorID, userID 
 				return fmt.Errorf("revoke disabled user's sessions: %w", err)
 			}
 		}
+		changeType := "enabled"
+		if status == "disabled" {
+			changeType = "disabled"
+		}
+		if _, err := accesschanges.CreateAccessChange(ctx, tx, "user", userID, changeType); err != nil {
+			return fmt.Errorf("queue Gateway authorization refresh for IAM user: %w", err)
+		}
 		if audit != nil {
 			audit.TargetID = stringPtr(fmt.Sprintf("%d", userID))
-			audit.ChangesJSON = []byte(fmt.Sprintf(`{"user_status":{"from":%q,"to":%q}}`, target.UserStatus, status))
+			audit.ChangesJSON = []byte(fmt.Sprintf(`{"user_status":{"from":%q,"to":%q}}`, previousStatus, status))
 			if err := insertAudit(ctx, tx, audit); err != nil {
 				return fmt.Errorf("write IAM user status audit: %w", err)
 			}
@@ -1081,7 +1102,7 @@ func (r *Repository) ResetUserPassword(ctx *servicecontext.Context, actorID, use
 		var actor struct {
 			Count int64 `xorm:"'count'"`
 		}
-		query := "SELECT COUNT(*) AS count FROM " + iam.TableUser + " u WHERE u.id=? AND u.user_status='active' AND EXISTS (SELECT 1 FROM " + iam.TableUserRole + " ur JOIN " + iam.TableRole + " r ON r.id=ur.role_id JOIN " + iam.TableRolePermission + " rp ON rp.role_id=r.id JOIN " + iam.TablePermission + " p ON p.id=rp.permission_id JOIN " + iam.TableResource + " res ON res.id=p.resource_id WHERE ur.user_id=u.id AND r.status='active' AND p.status='active' AND res.status='active' AND p.permission_code='iam.user.write')"
+		query := "SELECT COUNT(*) AS count FROM " + iam.TableUser + " u WHERE u.id=? AND u.account_type='platform' AND u.user_status='active' AND EXISTS (SELECT 1 FROM " + iam.TableUserRole + " ur JOIN " + iam.TableRole + " r ON r.id=ur.role_id JOIN " + iam.TableRolePermission + " rp ON rp.role_id=r.id JOIN " + iam.TablePermission + " p ON p.id=rp.permission_id JOIN " + iam.TableResource + " res ON res.id=p.resource_id WHERE ur.user_id=u.id AND r.status='active' AND p.status='active' AND res.status='active' AND p.permission_code='iam.user.write')"
 		if _, err := s.SQL(query, actorID).Get(&actor); err != nil || actor.Count != 1 {
 			if err != nil {
 				return err
@@ -1096,11 +1117,14 @@ func (r *Repository) ResetUserPassword(ctx *servicecontext.Context, actorID, use
 		if !found {
 			return errors.New("IAM user not found")
 		}
+		if target.AccountType != iam.AccountTypePlatform && target.AccountType != iam.AccountTypeEmployee {
+			return errors.New("password reset is restricted to platform or employee accounts")
+		}
 		target.PasswordSalt, target.PasswordHash, target.PasswordHashVersion = &salt, &hash, &version
 		if target.AuthSource == "external" {
 			target.AuthSource = "mixed"
 		}
-		target.MustChangePassword = true
+		target.MustChangePassword = target.AccountType == iam.AccountTypePlatform
 		target.Update(ctx.UserName())
 		target.Cols("password_salt", "password_hash", "password_hash_version", "auth_source", "must_change_password")
 		if _, err := tx.Save(&target); err != nil {
@@ -1111,7 +1135,7 @@ func (r *Repository) ResetUserPassword(ctx *servicecontext.Context, actorID, use
 		}
 		if audit != nil {
 			audit.TargetID = stringPtr(fmt.Sprintf("%d", userID))
-			audit.ChangesJSON = []byte(`{"password":"reset","must_change_password":true}`)
+			audit.ChangesJSON = []byte(fmt.Sprintf(`{"password":"reset","must_change_password":%t}`, target.MustChangePassword))
 			if err := insertAudit(ctx, tx, audit); err != nil {
 				return fmt.Errorf("write IAM password reset audit: %w", err)
 			}
@@ -1127,7 +1151,7 @@ func (r *Repository) ChangeOwnPassword(ctx *servicecontext.Context, userID int64
 	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
 		s := tx.Session
 		var user iam.User
-		found, err := s.SQL("SELECT * FROM "+iam.TableUser+" WHERE id=? AND user_status='active' AND password_hash=? FOR UPDATE", userID, expectedHash).Get(&user)
+		found, err := s.SQL("SELECT * FROM "+iam.TableUser+" WHERE id=? AND account_type='platform' AND user_status='active' AND password_hash=? FOR UPDATE", userID, expectedHash).Get(&user)
 		if err != nil {
 			return fmt.Errorf("change IAM user password: %w", err)
 		}
@@ -1180,7 +1204,7 @@ func (r *Repository) SavePendingTOTP(ctx *servicecontext.Context, row *iam.UserA
 		var user struct {
 			Count int64 `xorm:"'count'"`
 		}
-		if _, err := s.SQL("SELECT COUNT(*) AS count FROM "+iam.TableUser+" WHERE id=? AND user_status='active'", row.UserID).Get(&user); err != nil {
+		if _, err := s.SQL("SELECT COUNT(*) AS count FROM "+iam.TableUser+" WHERE id=? AND account_type='platform' AND user_status='active'", row.UserID).Get(&user); err != nil {
 			return err
 		}
 		if user.Count != 1 {
@@ -1232,7 +1256,7 @@ func (r *Repository) ActivateTOTP(ctx *servicecontext.Context, userID, step int6
 		var user struct {
 			Count int64 `xorm:"'count'"`
 		}
-		if _, err := s.SQL("SELECT COUNT(*) AS count FROM "+iam.TableUser+" WHERE id=? AND user_status='active'", userID).Get(&user); err != nil {
+		if _, err := s.SQL("SELECT COUNT(*) AS count FROM "+iam.TableUser+" WHERE id=? AND account_type='platform' AND user_status='active'", userID).Get(&user); err != nil {
 			return err
 		}
 		if user.Count != 1 {
@@ -1292,7 +1316,7 @@ func (r *Repository) DisableTOTP(ctx *servicecontext.Context, userID, step int64
 		var user struct {
 			Count int64 `xorm:"'count'"`
 		}
-		if _, err := s.SQL("SELECT COUNT(*) AS count FROM "+iam.TableUser+" WHERE id=? AND user_status='active'", userID).Get(&user); err != nil {
+		if _, err := s.SQL("SELECT COUNT(*) AS count FROM "+iam.TableUser+" WHERE id=? AND account_type='platform' AND user_status='active'", userID).Get(&user); err != nil {
 			return err
 		}
 		if user.Count != 1 {
@@ -1334,7 +1358,7 @@ func (r *Repository) WriteAudit(ctx *servicecontext.Context, audit *iam.AuditLog
 }
 
 func (r *Repository) BootstrapAdmin(ctx *servicecontext.Context, user *iam.User, audit *iam.AuditLog) error {
-	if user == nil || audit == nil {
+	if user == nil || audit == nil || user.AccountType != iam.AccountTypePlatform {
 		return errors.New("bootstrap user and audit record are required")
 	}
 	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
@@ -1345,7 +1369,7 @@ func (r *Repository) BootstrapAdmin(ctx *servicecontext.Context, user *iam.User,
 		var admins struct {
 			Count int64 `xorm:"'count'"`
 		}
-		query := "SELECT COUNT(*) AS count FROM " + iam.TableUserRole + " ur JOIN " + iam.TableUser + " u ON u.id=ur.user_id JOIN " + iam.TableRole + " r ON r.id=ur.role_id WHERE u.user_status='active' AND r.role_code=? AND r.status='active'"
+		query := "SELECT COUNT(*) AS count FROM " + iam.TableUserRole + " ur JOIN " + iam.TableUser + " u ON u.id=ur.user_id JOIN " + iam.TableRole + " r ON r.id=ur.role_id WHERE u.account_type='platform' AND u.user_status='active' AND r.role_code=? AND r.status='active'"
 		if _, err := s.SQL(query, platformAdminRole).Get(&admins); err != nil {
 			return err
 		}

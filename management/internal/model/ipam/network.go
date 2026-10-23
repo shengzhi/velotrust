@@ -50,6 +50,8 @@ type Pool struct {
 	Type               string  `xorm:"'pool_type'" json:"type"`
 	AllocationMode     string  `xorm:"'allocation_mode'" json:"allocation_mode"`
 	IDPGroup           *string `xorm:"'idp_group'" json:"idp_group,omitempty"`
+	ClientGroupID      *int64  `xorm:"'client_group_id'" json:"client_group_id,omitempty"`
+	ClientGroupName    string  `xorm:"-" json:"client_group_name,omitempty"`
 	GatewayBinding     *string `xorm:"'gateway_binding'" json:"gateway_binding,omitempty"`
 	Color              string  `xorm:"'color'" json:"color"`
 	Description        *string `xorm:"'description'" json:"description,omitempty"`
@@ -102,6 +104,13 @@ type OverlayNetwork struct {
 }
 
 func (OverlayNetwork) TableName() string { return "t_ztna_overlay_network" }
+
+type PoolGroupOption struct {
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	Code      string `json:"code"`
+	UserCount int64  `json:"user_count"`
+}
 
 type Overview struct {
 	GlobalCIDR           string  `json:"global_cidr"`

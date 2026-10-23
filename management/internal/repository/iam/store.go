@@ -8,15 +8,19 @@ import (
 )
 
 var (
-	ErrMenuNotFound        = errors.New("IAM menu not found")
-	ErrMenuVersionConflict = errors.New("IAM menu was changed by another operator")
-	ErrMenuCodeExists      = errors.New("IAM menu code already exists")
-	ErrMenuParentInvalid   = errors.New("IAM menu parent has an invalid type or status")
-	ErrMenuHasChildren     = errors.New("IAM menu has child entries")
-	ErrMenuAssignedToRole  = errors.New("IAM menu is assigned to a role")
-	ErrRoleNotFound        = errors.New("IAM role not found")
-	ErrRoleMenuSystemRole  = errors.New("menus for a system role cannot be changed")
-	ErrRoleMenuInvalid     = errors.New("IAM role menu assignment contains an invalid menu")
+	ErrMenuNotFound         = errors.New("IAM menu not found")
+	ErrMenuVersionConflict  = errors.New("IAM menu was changed by another operator")
+	ErrMenuCodeExists       = errors.New("IAM menu code already exists")
+	ErrMenuParentInvalid    = errors.New("IAM menu parent has an invalid type or status")
+	ErrMenuHasChildren      = errors.New("IAM menu has child entries")
+	ErrMenuAssignedToRole   = errors.New("IAM menu is assigned to a role")
+	ErrRoleNotFound         = errors.New("IAM role not found")
+	ErrRoleMenuSystemRole   = errors.New("menus for a system role cannot be changed")
+	ErrRoleMenuInvalid      = errors.New("IAM role menu assignment contains an invalid menu")
+	ErrGroupNotFound        = errors.New("IAM group not found")
+	ErrGroupVersionConflict = errors.New("IAM group was changed by another operator")
+	ErrGroupCodeExists      = errors.New("IAM group code already exists")
+	ErrGroupMembersInvalid  = errors.New("IAM group membership contains a non-employee user")
 )
 
 // Store is the IAM persistence boundary. Implementations own SQL and transaction
@@ -35,7 +39,11 @@ type Store interface {
 	RevokeUserSessions(*servicecontext.Context, int64, string) error
 	HasPermission(*servicecontext.Context, int64, string) (bool, error)
 	ListPermissions(*servicecontext.Context, int64) ([]string, error)
-	ListUsers(*servicecontext.Context, int, int) ([]iam.User, int64, error)
+	ListUsers(*servicecontext.Context, int, int, string) ([]iam.User, int64, error)
+	ListGroups(*servicecontext.Context) ([]iam.Group, error)
+	SaveGroup(*servicecontext.Context, *iam.Group, int64, *iam.AuditLog) error
+	ListGroupMembers(*servicecontext.Context, int64) ([]iam.GroupMember, error)
+	SetGroupMembers(*servicecontext.Context, int64, []int64, *iam.AuditLog) error
 	CreateRole(*servicecontext.Context, *iam.Role, *iam.AuditLog) error
 	ListRoles(*servicecontext.Context) ([]iam.Role, error)
 	ListUserRoles(*servicecontext.Context, int64) ([]iam.Role, error)

@@ -31,10 +31,9 @@ type Driver interface {
 	ApplyFirewall(context.Context, []config.ACLRule) error
 	// ApplyPeerRoutes installs the WireGuard routes described by Peer AllowedIPs.
 	ApplyPeerRoutes(context.Context, []config.Peer) error
-	// ApplyRoutes installs locally routed destination networks behind the
-	// Gateway using the host-selected egress interface and next hop. They must
-	// never be installed on the managed WireGuard tunnel. The host's default
-	// route may provide the next hop.
+	// ApplyRoutes validates the host's existing route for each associated site
+	// network and removes legacy routes installed by older Agent versions. It
+	// does not add host routes; destinations must not recurse into WireGuard.
 	ApplyRoutes(context.Context, []string) error
 	ApplyNAT(context.Context, []config.NATMapping) error
 	EnableForwarding(context.Context) error
@@ -106,8 +105,8 @@ func (r *Reconciler) Start(ctx context.Context) error {
 }
 
 // Apply validates and applies a full desired-state config. Traffic is
-// blocked before mutation, firewall rules are installed before routes, and
-// forwarding is enabled only after every stage succeeds.
+// blocked before mutation, and forwarding is enabled only after tunnel,
+// firewall, route validation, and NAT stages succeed.
 func (r *Reconciler) Apply(ctx context.Context, desired config.Config) error {
 	return r.ApplyWithHash(ctx, desired, "")
 }
@@ -168,7 +167,7 @@ func (r *Reconciler) ApplyWithHash(ctx context.Context, desired config.Config, c
 		{name: "apply Peer routes", fn: func() error {
 			return r.driver.ApplyPeerRoutes(ctx, append([]config.Peer(nil), desired.Tunnel.Peers...))
 		}},
-		{name: "apply routes", fn: func() error { return r.driver.ApplyRoutes(ctx, append([]string(nil), desired.Routes...)) }},
+		{name: "validate associated networks", fn: func() error { return r.driver.ApplyRoutes(ctx, append([]string(nil), desired.Routes...)) }},
 		{name: "apply NAT", fn: func() error { return r.driver.ApplyNAT(ctx, append([]config.NATMapping(nil), desired.NAT...)) }},
 		{name: "enable forwarding", fn: func() error { return r.driver.EnableForwarding(ctx) }},
 		{name: "unblock forwarding", fn: func() error { return r.driver.UnblockForwarding(ctx) }},

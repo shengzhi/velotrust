@@ -13,16 +13,18 @@ const (
 	TableNodeConfigTaskEvent = "t_ztna_node_config_task_event"
 )
 
-// Node is the small HUB persistence projection of the Management-owned node
-// table. HUB only updates the runtime columns explicitly selected by its
-// repository; it does not own lifecycle or identity fields.
+// Node is the HUB persistence projection of the Management-owned node table.
+// HUB creates Client node identity during a successful employee login, then
+// updates only runtime-owned columns for existing nodes.
 type Node struct {
 	database.BaseModel `xorm:"extends"`
 	ID                 int64      `xorm:"pk autoincr 'id'"`
+	NodeName           string     `xorm:"'node_name'"`
 	NodeCode           string     `xorm:"'node_code'"`
 	NodeType           string     `xorm:"'node_type'"`
 	NodeStatus         string     `xorm:"'node_status'"`
 	AgentVersion       *string    `xorm:"'agent_version'"`
+	CapabilitiesJSON   []byte     `xorm:"'capabilities_json'"`
 	PublicKey          *string    `xorm:"'public_key'"`
 	LastHeartbeatAt    *time.Time `xorm:"'last_heartbeat_at'"`
 	LastConfigHash     *string    `xorm:"'last_config_hash'"`

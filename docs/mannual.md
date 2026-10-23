@@ -56,7 +56,7 @@ sudo /usr/local/bin/gateway-agent validate --config /etc/velotrust/gateway/gatew
 
 配置文件应显示为 `600` 权限。若在 WSL 中配置位于 `/mnt/c` 等 Windows 挂载目录，且 `chmod` 后权限仍不变，请将 `gateway.json` 和它引用的私钥一并移到 WSL Linux 文件系统（例如 `/home/<user>/.config/velotrust/gateway/`），再对配置和私钥执行 `chmod 600`。
 
-首次接入 HUB 时，在配置文件中添加 `hub.endpoint`、`hub.server_name`、可选的 `hub.ca_file`，以及 Management 为预建网关签发的一次性 `hub.registration_token`。配置中不需要填写 `gateway_id`：首次注册时 HUB 通过 Token 定位预建节点，注册后通过本机 WireGuard 公钥定位节点。配置文件必须保持 `0600` 权限。启动 `run` 后，Agent 先尝试 X25519 身份认证；HUB 明确返回该公钥尚未注册时，Agent 才提交 Token。若需要审批，Agent 会保持运行并等待 HUB 返回审批结果，期间转发保持阻断；获批后 Agent 会重新认证，再应用隧道和规则。升级 Agent 前应先升级 HUB，使 HUB 返回包含规范节点编码的新认证挑战。
+首次接入 HUB 时，在配置文件中添加 `hub.endpoint`、`hub.server_name` 和可选的 `hub.ca_file`。Gateway 首次注册还需要配置 Management 为预建网关签发的一次性 `hub.registration_token`。配置中不需要填写 `gateway_id`：首次注册时 HUB 通过 Token 定位预建节点，注册后通过本机 WireGuard 公钥定位节点。配置文件必须保持 `0600` 权限。启动 `run` 后，Agent 先尝试 X25519 身份认证；HUB 明确返回该公钥尚未注册时，Agent 才提交 Token。若需要审批，Agent 会保持运行并等待 HUB 返回审批结果，期间转发保持阻断；获批后 Agent 会重新认证，再应用隧道和规则。升级 Agent 前应先升级 HUB，使 HUB 返回包含规范节点编码的新认证挑战。
 
 注册完成后，从配置文件删除已消费的 `hub.registration_token`。程序会清除活动配置字段及注册客户端的临时凭证缓冲，但不会改写配置文件。已注册节点无需配置 Token。使用 HUB 管理配置时，还要在本机配置中加入 HUB 地址及 TLS 信任设置，例如：
 
@@ -89,7 +89,7 @@ sudo /usr/local/bin/gateway-agent run \
 
 Gateway Agent 会在 `listen_port` 上启动 WireGuard UDP 监听，并应用 Peer、路由和防火墙规则。需在 Gateway 主机防火墙及云安全组放行 UDP `51820`。运行用户还需要创建隧道、配置路由、nftables 和 IP 转发的权限。空 `rules` 表示默认拒绝转发。
 
-`tunnel.mtu` 以字节为单位，省略时 Gateway 使用 1420；客户端省略时使用 1380。HUB 快照省略 MTU 时 Gateway 保留本机配置值。关联网络 `routes` 是 Gateway 后方的本地目的网段；Gateway 根据主机当前路由选择出口接口和下一跳，并安装受管站点路由。出口不能是 VeloTrust 隧道或回环接口；系统默认路由可以提供下一跳。Peer 的 `allowed_ips` 则描述该 Peer 对应的隧道地址和远端路由网段。
+`tunnel.mtu` 以字节为单位，省略时 Gateway 使用 1420；客户端省略时使用 1380。HUB 快照省略 MTU 时 Gateway 保留本机配置值。关联网络 `routes` 表示 Gateway 后方的私网目的网段；Gateway 使用主机已有路由选择出口，不会为站点网段额外安装重复路由。HUB 自动生成从 Overlay 全局网段到每个活动关联站点的 Masquerade，以便后端响应返回 Gateway；当前 Overlay 仅支持 IPv4，关联 IPv6 站点会被拒绝，直到 IPv6 Overlay SNAT 可用。影子网段冲突时再额外配置 DNAT。Peer 的 `allowed_ips` 则描述该 Peer 对应的隧道地址和远端路由网段。
 
 启动日志会打印 `gateway WireGuard public key`。将该公钥填入客户端对应 Gateway 的 `tunnel.peers[].public_key`。
 
@@ -121,15 +121,15 @@ curl http://127.0.0.1:8765/readyz
 
 - 客户端 Peer 的 `public_key` 必须是客户端 WireGuard 公钥，`allowed_ips` 至少包含该客户端的隧道地址，例如 `10.100.0.2/32`。
 - Gateway 对外 Endpoint 使用 Gateway 主机可达地址和监听端口，例如 `gateway.example.com:51820`。
-- Client `allowed_ips` 生成 Windows 隧道路由；Gateway Peer `allowed_ips` 生成 Linux WireGuard 路由。Gateway 顶层 `routes` 是其后方的站点网段，Agent 按主机路由查找结果安装到物理出口，不能经 WireGuard 或回环接口；系统默认路由可以提供下一跳。
-- 若资源位于 Gateway 直连的 LAN，优先确保 LAN 有返回隧道网段的路由；无法配置回程路由时，可为指定流量配置 SNAT。经其他 Gateway 可达的网段应放在对应 Peer 的 `allowed_ips` 中，由 Agent 安装到 WireGuard 接口。
+- Client `allowed_ips` 生成 Windows 隧道路由；Gateway Peer `allowed_ips` 生成 Linux WireGuard 路由。Gateway 顶层 `routes` 是其后方的站点网段；Agent 验证主机已有路由能够选择有效物理出口，不会为站点网段添加重复主机路由。
+- HUB 管理的 Gateway 会自动对 Overlay 客户端访问关联站点的流量做 Masquerade，后端不需要额外配置 Overlay 回程路由。经其他 Gateway 可达的网段应放在对应 Peer 的 `allowed_ips` 中，由 Agent 安装到 WireGuard 接口。
 - `rules` 必须显式允许需要的流量；只配置 WireGuard Peer 不会自动授权访问资源。
 
 Client 与 Gateway 的字段定义、Endpoint 角色、AllowedIPs、路由与 MTU 约定见[网络配置契约](VeloTrust-网络配置契约.md)。
 
-#### 为 LAN 访问配置 SNAT
+#### 静态 Gateway 配置 SNAT
 
-当 LAN 主机没有返回客户端隧道网段的路由时，可以让 Gateway 使用其 LAN 地址作为客户端流量的来源地址。先确认连接 LAN 的接口和地址：
+HUB 管理模式会从 Overlay 全局网段和 Gateway 关联站点自动生成 Masquerade，不要再为该站点手工添加重复 SNAT。以下配置仅适用于不使用 HUB 下发关联站点配置的静态 Gateway。它要求 LAN 主机没有返回客户端隧道网段的路由，并让 Gateway 使用其 LAN 地址作为客户端流量的来源地址。先确认连接 LAN 的接口和地址：
 
 ```sh
 ip -br address
@@ -159,9 +159,11 @@ sudo gateway-agent validate --config /etc/velotrust/gateway/gateway.json
 sudo nft list chain inet velotrust_gateway_nat gateway_postrouting
 ```
 
-规则应显示隧道入口、指定出口、源/目标前缀和 `snat to` 地址。可在出口接口抓包确认 LAN 主机看到的来源地址是 `to_address`；回包应经 Gateway 的连接跟踪还原后进入 WireGuard 隧道。若某个 LAN 主机已有正确的隧道回程路由，则不需要对此流量配置 SNAT。
+规则应显示隧道入口、指定出口、源/目标前缀和 `snat to` 地址。可在出口接口抓包确认 LAN 主机看到的来源地址是 `to_address`；回包应经 Gateway 的连接跟踪还原后进入 WireGuard 隧道。
 
 ## Windows Client CLI
+
+Windows Client 有两种连接方式：推荐的 **HUB 管理模式**由员工账号密码登录，HUB 完成设备登记、身份认证和配置下发；静态模式由管理员把 Gateway Peer 写入本机配置，适合现有手工联调。
 
 ### 运行前准备
 
@@ -174,7 +176,69 @@ $Exe = "C:\VeloTrust\Client\client-cli-windows-amd64.exe"
 
 Client CLI 以当前进程前台运行，当前不是 Windows 后台服务。
 
-### 生成客户端密钥
+### HUB 管理模式
+
+#### 创建员工登录账号
+
+管理员先在 Management 控制台「零信任安全策略 → 员工用户管理」创建员工账号并设置初始密码。员工账号不能登录 Management 控制台，只用于 Client Agent 登录。员工可在该页面由管理员重置 Client 登录密码；重置后需更新员工设备上正在使用的密码。
+
+#### 创建 Client 配置
+
+在 Windows 上生成设备私钥。这个密钥既用于 HUB 的 X25519 身份认证，也作为 WireGuard 隧道私钥；私钥仅保存在本机。
+
+```powershell
+$ClientDir = Join-Path $env:LOCALAPPDATA "VeloTrust\Client"
+& $Exe keygen --dir $ClientDir
+```
+
+创建 `$ClientDir\client.json`，配置 HUB 地址。Client 首次连接时会提示输入员工账号和密码；密码不会写入此配置文件。
+
+```json
+{
+  "schema_version": 1,
+  "instance_id": "example-enterprise",
+  "identity": {
+    "private_key_file": "client.key"
+  },
+  "hub": {
+    "endpoint": "10.1.3.59:8081",
+    "server_name": "hub.example.com",
+    "ca_file": "hub-ca.pem"
+  }
+}
+```
+
+Client 和 HUB 默认使用 TLS。仅在隔离的开发网络中，可同时在两端显式关闭 TLS：Client 在 `hub` 中设置 `"tls_enabled": false`，HUB 设置 `"tls": {"enabled": false}`。此时员工密码会通过明文 gRPC 传输，不得用于生产网络或不可信网络。HUB 连接参数和设备私钥路径由本地管理员设置；隧道地址、Gateway 公钥、Endpoint 和获准路由由 HUB 下发，不要在 HUB 模式本机配置中另写静态 `tunnel`。
+
+校验并连接：
+
+```powershell
+$ClientConfig = Join-Path $ClientDir "client.json"
+& $Exe config validate --file $ClientConfig --json
+& $Exe connect --config $ClientConfig --log-level debug
+```
+
+连接时需使用管理员 PowerShell。Client 提示输入员工用户名和密码（密码不回显）；也可通过 `--username` 预先指定用户名。首次成功登录时，HUB 校验员工账号，并自动登记本机公钥、设备和节点；每次连接都校验员工密码，再通过 X25519 挑战应答证明设备私钥持有权。账号密码只通过 TLS 发送给 HUB，控制流不请求 Management 地址或 Management API。重连时仍需输入员工账号密码；如果密码被管理员重置，需使用新密码登录。
+
+首次登录后，HUB 会根据设备所有者的活动用户组，查找 IPAM 动态 `User-Device` 地址池的员工组关联并创建地址租约；重连时复用有效租约。此步骤只分配 IP，不选择 Gateway，也不创建隧道 Peer。Client 可连接的 Gateway 应由访问策略决定；策略配置下发尚未完成前，HUB 不会下发隧道配置。若没有获得地址，请检查员工是否属于活动用户组、该组是否关联了启用的动态终端地址池，以及池中是否还有可用地址。收到有效 Gateway 配置后，Client 会创建 `VeloTrust` 接口并显示各 Gateway 握手状态。随后可按策略测试获准资源：
+
+管理员先在「零信任安全策略 → 安全用户组」创建用户组并将员工加入该组，再在「IPAM → Overlay 地址池」创建动态 `User-Device` 地址池并选择该员工组。HUB 后续登录时会按设备所有者的组成员关系分配地址；移除员工组关联或员工成员关系后，下次认证/同步会释放不再符合条件的旧租约。Gateway 访问授权通过访问策略配置。
+
+```powershell
+Test-NetConnection 10.20.0.10 -Port 443
+```
+
+管理员禁用 Client 节点、设备或所属用户后，在线 Client 收到 HUB 撤销通知会清理本机隧道；离线 Client 下次连接时认证会被拒绝。按 Ctrl+C 正常停止；异常退出后可手动清理：
+
+```powershell
+& $Exe disconnect --config $ClientConfig
+```
+
+### 静态配置模式
+
+静态模式不会连接 HUB、不会使用注册 Token，也不会从控制台同步隧道配置。管理员需在 Gateway Peer 中手动登记客户端公钥。
+
+#### 生成客户端密钥
 
 ```powershell
 $ClientDir = Join-Path $env:LOCALAPPDATA "VeloTrust\Client"
@@ -277,4 +341,4 @@ Resolve-DnsName www.example.com -DnsOnly
 
 ## 当前边界
 
-客户端使用本地静态 DNS 策略，尚未接入控制面策略下发和应用状态回报。DNS 接管通过 Windows DNS Client/NRPT 工作；自行发送 DNS、DoH 和 DoT 的应用不在本阶段拦截范围内。macOS/Linux DNS 接管、Windows 网络切换时的真实端到端验证、用户登录、设备注册、Windows 后台服务和休眠恢复尚未实现。Gateway Agent 已可连接 HUB 并接收由 IPAM、隧道 Peer、网络站点和 NAT 业务数据编译的配置；访问策略尚未编译为 Gateway ACL，因此数据面继续默认拒绝。
+HUB 管理模式已有员工密码登录、Client 设备首次登记、X25519 身份认证、配置同步、运行状态上报和在线撤销清理。当前控制台尚未提供隧道 Peer 关联管理，因此需要后续实现后才能从 Management 完成端到端隧道配置；HUB 会话租约也仍是单实例内存状态。Windows Client 仍以前台进程运行，macOS/Linux DNS 接管、Windows 网络切换验证及休眠恢复尚未实现。DNS 接管通过 Windows DNS Client/NRPT 工作；自行发送 DNS、DoH 和 DoT 的应用不在当前范围。Gateway 访问策略尚未编译为 ACL，因此 Gateway 数据面继续默认拒绝。

@@ -71,15 +71,16 @@ erDiagram
 
 ### 3.1 `t_iam_user` — 用户
 
-统一保存管理员和普通员工的内部用户身份。管理员权限由角色授权决定，不由单独用户类型字段决定。
+统一保存平台账号和员工账号。`account_type` 区分 Management 登录主体与 Client Agent 登录主体；平台账号的管理权限由角色授权决定，员工账号仅用于经 HUB 登录 Client Agent 和设备归属。需要同时承担两类职责的人员分别创建平台账号和员工账号记录。
 
 - **键与基础列：** `id` 主键；标准审计实体基础列。
-- **唯一与检查：** `LOWER(username)` 唯一；`LOWER(email)` 在非空时建索引但不要求唯一；Passkey user handle 唯一；认证来源、用户状态受检查约束；密码哈希、盐和版本必须同时为空或同时有值；WebAuthn handle 长 1–64 字节；版本号大于零。
-- **索引：** 用户名大小写不敏感唯一索引、状态索引、非空邮箱大小写不敏感索引、最近登录时间索引。
+- **唯一与检查：** `account_type` 仅允许 `platform` / `employee`；`LOWER(username)` 唯一；`LOWER(email)` 在非空时建索引但不要求唯一；Passkey user handle 唯一；认证来源、用户状态受检查约束；密码哈希、盐和版本必须同时为空或同时有值；WebAuthn handle 长 1–64 字节；版本号大于零。
+- **索引：** 用户名大小写不敏感唯一索引、状态索引、账号类型与状态组合索引、非空邮箱大小写不敏感索引、最近登录时间索引。
 
 | 字段 | PostgreSQL 类型 | 约束 / 默认值 | 说明 |
 |---|---|---|---|
-| `username` | `VARCHAR(64)` | 非空；大小写不敏感唯一 | 登录用户名；应用负责规范化，数据库防止大小写差异重复。 |
+| `account_type` | `VARCHAR(24)` | 非空，默认 `platform`；`platform` / `employee` | `platform` 可登录 Management 并分配 IAM 角色；`employee` 不能登录 Management，只能通过 HUB 使用 Client Agent，并用于设备归属和访问策略匹配。 |
+| `username` | `VARCHAR(64)` | 非空；大小写不敏感唯一 | 平台账号或员工 Client 登录名；应用负责规范化，数据库防止大小写差异重复。 |
 | `display_name` | `VARCHAR(128)` | 非空，默认 `''` | 控制台显示名称。 |
 | `email` | `VARCHAR(128)` | 可空 | 联系邮箱；当前 Schema 不强制唯一。 |
 | `phone_country_code` | `VARCHAR(8)` | 可空 | 电话国家或地区区号。 |

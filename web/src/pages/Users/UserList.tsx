@@ -10,6 +10,7 @@ import { Dialog } from '../../components/ui/dialog';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { EmptyState } from '../../components/EmptyState';
 import { useToast } from '../../components/ui/toast';
+import { AccessChangeStatus, virtualNodeApi } from '../../services/node';
 import {
   Table,
   TableBody,
@@ -43,11 +44,29 @@ export const UserList: React.FC = () => {
   const [passwordTarget, setPasswordTarget] = useState<IAMUser | null>(null);
   const [newPassword, setNewPassword] = useState('');
   const [passwordSaving, setPasswordSaving] = useState(false);
+  const [accessNotice, setAccessNotice] = useState<AccessChangeStatus | null>(null);
+
+  const refreshAccessStatus = async (userID: number) => {
+    const started = Date.now();
+    let latest: AccessChangeStatus | null = null;
+    do {
+      try {
+        latest = await virtualNodeApi.getAccessChangeStatus('user', userID);
+      } catch {
+        return latest;
+      }
+      if (latest) setAccessNotice(latest);
+      if (latest?.status === 'completed') return latest;
+      if (Date.now() - started >= 5000) break;
+      await new Promise((resolve) => window.setTimeout(resolve, 500));
+    } while (true);
+    return latest;
+  };
 
   const loadUsers = async (pageNumber = page) => {
     setLoading(true);
     try {
-      const result = await iamApi.listUsers(pageNumber, pageSize);
+      const result = await iamApi.listUsers(pageNumber, pageSize, 'platform');
       setUsers(result.items ?? []);
       setTotal(result.total ?? 0);
       setPage(pageNumber);
@@ -114,6 +133,7 @@ export const UserList: React.FC = () => {
     setSaving(true);
     try {
       const created = await iamApi.createUser({
+        account_type: 'platform',
         username: createForm.username.trim(),
         display_name: createForm.display_name.trim(),
         email: createForm.email.trim(),
@@ -121,7 +141,7 @@ export const UserList: React.FC = () => {
       });
       setCreateOpen(false);
       setCreateForm(emptyForm);
-      success('账号已创建，首次登录必须修改密码。');
+      success('平台账号已创建，首次登录必须修改密码。');
       await loadUsers(1);
       if (hasPermission('iam.role.grant')) await openRoleManager(created);
     } catch (err) {
@@ -134,10 +154,19 @@ export const UserList: React.FC = () => {
   const changeStatus = async () => {
     if (!statusTarget) return;
     setStatusSaving(true);
+    setAccessNotice(null);
     const status = statusTarget.user_status === 'active' ? 'disabled' : 'active';
     try {
       await iamApi.setUserStatus(statusTarget.id, status);
-      success(status === 'disabled' ? '账号已禁用，现有会话已撤销。' : '账号已启用。');
+      if (status === 'disabled') {
+        const change = await refreshAccessStatus(statusTarget.id);
+        success(change?.status === 'completed'
+          ? `账号已禁用，${change.acknowledged_count}/${change.target_count} 个 Gateway 已确认更新。`
+          : '账号已禁用，Gateway 配置正在同步。');
+      } else {
+        success('账号已启用，Gateway 将同步恢复授权配置。');
+        void refreshAccessStatus(statusTarget.id);
+      }
       setStatusTarget(null);
       await loadUsers();
     } catch (err) {
@@ -175,7 +204,7 @@ export const UserList: React.FC = () => {
       <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
         <div>
           <h1 className="text-xl font-bold tracking-tight text-slate-900">系统用户管理</h1>
-          <p className="mt-1 text-xs text-slate-500">账号、状态和角色均读取并写入 Management IAM。</p>
+          <p className="mt-1 text-xs text-slate-500">管理可登录 Management 控制台的系统账号及其角色。</p>
         </div>
         <div className="flex gap-2">
           <Button variant="outline" onClick={() => void loadUsers()} isLoading={loading} aria-label="刷新用户">
@@ -184,7 +213,7 @@ export const UserList: React.FC = () => {
           {canWriteUsers && (
             <Button onClick={() => setCreateOpen(true)} className="gap-1.5">
               <Plus className="h-4 w-4" />
-              新建用户
+              新建系统用户
             </Button>
           )}
         </div>
@@ -199,11 +228,26 @@ export const UserList: React.FC = () => {
         />
       </Card>
 
+      {accessNotice?.status === 'pending' && (
+        <Card className="flex flex-col gap-3 border-amber-200 bg-amber-50/70 p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-sm font-semibold text-amber-900">网络访问变更仍在同步</p>
+            <p className="mt-1 text-xs text-amber-800">
+              已确认 {accessNotice.acknowledged_count}/{accessNotice.target_count} 个 Gateway。离线 Gateway 会在重新连接并应用当前配置后确认。
+            </p>
+            {accessNotice.last_error && <p className="mt-2 text-xs text-red-700">最近一次配置失败：{accessNotice.last_error}</p>}
+          </div>
+          <Button variant="outline" size="sm" onClick={() => void refreshAccessStatus(accessNotice.subject_id)}>
+            <RefreshCw className="mr-1.5 h-3.5 w-3.5" />再次检查
+          </Button>
+        </Card>
+      )}
+
       <Card>
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>用户名</TableHead>
+              <TableHead>用户名 / 身份标识</TableHead>
               <TableHead>姓名</TableHead>
               <TableHead>邮箱</TableHead>
               <TableHead>状态</TableHead>
@@ -215,9 +259,9 @@ export const UserList: React.FC = () => {
           </TableHeader>
           <TableBody>
             {loading ? (
-              <TableRow><TableCell colSpan={8} className="py-10 text-center text-slate-500">正在从 Management 加载用户…</TableCell></TableRow>
+              <TableRow><TableCell colSpan={8} className="py-10 text-center text-slate-500">正在从 Management 加载系统用户…</TableCell></TableRow>
             ) : filteredUsers.length === 0 ? (
-              <TableRow><TableCell colSpan={8} className="p-8"><EmptyState icon={UserRoundCog} title="没有匹配的用户" description="调整搜索词，或创建一个新账号。" /></TableCell></TableRow>
+              <TableRow><TableCell colSpan={8} className="p-8"><EmptyState icon={UserRoundCog} title="没有匹配的系统用户" description="调整搜索词，或创建一个系统用户。" /></TableCell></TableRow>
             ) : filteredUsers.map((item) => {
               const isSelf = item.id === currentUser?.id;
               return (
@@ -260,16 +304,16 @@ export const UserList: React.FC = () => {
         </div>
       </Card>
 
-      <Dialog isOpen={createOpen} onClose={() => setCreateOpen(false)} title="新建 IAM 用户" description="新账号首次登录后必须修改密码。">
+      <Dialog isOpen={createOpen} onClose={() => setCreateOpen(false)} title="新建系统用户" description="系统用户可登录 Management 控制台；创建后可分配管理角色。">
         <form className="space-y-4" onSubmit={createUser}>
           <label className="block space-y-1 text-xs font-medium text-slate-700">用户名<Input required maxLength={64} value={createForm.username} onChange={(event) => setCreateForm({ ...createForm, username: event.target.value })} autoComplete="off" /></label>
           <label className="block space-y-1 text-xs font-medium text-slate-700">显示名称<Input maxLength={128} value={createForm.display_name} onChange={(event) => setCreateForm({ ...createForm, display_name: event.target.value })} /></label>
           <label className="block space-y-1 text-xs font-medium text-slate-700">邮箱（可选）<Input type="email" maxLength={128} value={createForm.email} onChange={(event) => setCreateForm({ ...createForm, email: event.target.value })} /></label>
           <label className="block space-y-1 text-xs font-medium text-slate-700">初始密码<Input type="password" minLength={8} maxLength={1024} required value={createForm.password} onChange={(event) => setCreateForm({ ...createForm, password: event.target.value })} autoComplete="new-password" /></label>
-          <p className="text-[11px] text-slate-500">密码至少 8 个字符。创建完成后，可将账号分配到一个或多个角色。</p>
+          <p className="text-[11px] text-slate-500">密码至少 8 个字符。创建完成后，可将系统用户分配到一个或多个角色。</p>
           <div className="flex justify-end gap-2 border-t border-slate-100 pt-4">
             <Button type="button" variant="outline" onClick={() => setCreateOpen(false)}>取消</Button>
-            <Button type="submit" isLoading={saving}>创建账号</Button>
+            <Button type="submit" isLoading={saving}>创建系统用户</Button>
           </div>
         </form>
       </Dialog>

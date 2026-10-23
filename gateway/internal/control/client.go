@@ -36,9 +36,48 @@ const (
 )
 
 var errRegistrationCompleted = errors.New("Gateway registration completed; identity authentication must be repeated")
+var errAccessConfigurationChanged = errors.New("HUB requested an immediate authorization refresh")
+var errAccessRevoked = errors.New("HUB revoked Gateway forwarding authorization")
 
 type SnapshotApplier func(context.Context, *hubv1.ConfigSnapshot) error
 type DisconnectHandler func() error
+
+type controlReceiveResult struct {
+	message *hubv1.HubMessage
+	err     error
+}
+
+type controlMessageReader struct {
+	ctx     context.Context
+	results chan controlReceiveResult
+}
+
+func newControlMessageReader(ctx context.Context, stream grpc.BidiStreamingClient[hubv1.AgentMessage, hubv1.HubMessage]) *controlMessageReader {
+	reader := &controlMessageReader{ctx: ctx, results: make(chan controlReceiveResult, 1)}
+	go func() {
+		for {
+			message, err := stream.Recv()
+			select {
+			case reader.results <- controlReceiveResult{message: message, err: err}:
+			case <-ctx.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return reader
+}
+
+func (r *controlMessageReader) Receive() (*hubv1.HubMessage, error) {
+	select {
+	case result := <-r.results:
+		return result.message, result.err
+	case <-r.ctx.Done():
+		return nil, r.ctx.Err()
+	}
+}
 
 const (
 	registrationReasonNotRegistered = "GATEWAY_NOT_REGISTERED"
@@ -79,6 +118,9 @@ func Run(ctx context.Context, hubConfig config.HubConfig, privateKeyText string,
 		if err == nil {
 			err = errors.New("HUB control stream closed")
 		}
+		if errors.Is(err, errAccessConfigurationChanged) || errors.Is(err, errAccessRevoked) {
+			backoff = initialRetryDelay
+		}
 		slog.Warn("Gateway HUB control stream ended; reconnecting", "endpoint", hubConfig.Endpoint, "error", err, "retry_in", backoff)
 		timer := time.NewTimer(backoff)
 		select {
@@ -87,7 +129,9 @@ func Run(ctx context.Context, hubConfig config.HubConfig, privateKeyText string,
 			return nil
 		case <-timer.C:
 		}
-		if backoff < maximumRetryDelay/2 {
+		if errors.Is(err, errAccessConfigurationChanged) || errors.Is(err, errAccessRevoked) {
+			backoff = initialRetryDelay
+		} else if backoff < maximumRetryDelay/2 {
 			backoff *= 2
 		} else {
 			backoff = maximumRetryDelay
@@ -126,8 +170,9 @@ func runSession(ctx context.Context, cfg config.HubConfig, privateKeyText, publi
 	}}}); err != nil {
 		return fmt.Errorf("send Gateway hello: %w", err)
 	}
+	reader := newControlMessageReader(streamContext, stream)
 
-	challengeMessage, err := stream.Recv()
+	challengeMessage, err := reader.Receive()
 	if err != nil {
 		err = applyFailClosedIfRequired(onDisconnected, err)
 		switch gatewayAuthorizationReason(err) {
@@ -187,7 +232,7 @@ func runSession(ctx context.Context, cfg config.HubConfig, privateKeyText, publi
 		return fmt.Errorf("send Gateway X25519 proof: %w", err)
 	}
 	clear(proof)
-	welcomeMessage, err := stream.Recv()
+	welcomeMessage, err := reader.Receive()
 	if err != nil {
 		return applyFailClosedIfRequired(onDisconnected, fmt.Errorf("receive HUB welcome: %w", err))
 	}
@@ -205,8 +250,12 @@ func runSession(ctx context.Context, cfg config.HubConfig, privateKeyText, publi
 	if onAuthenticated != nil {
 		onAuthenticated()
 	}
-	err = serveControlMessages(streamContext, stream, welcome.GetHeartbeatIntervalSeconds(), statusProvider, applySnapshot)
-	if ctx.Err() == nil && onDisconnected != nil && shouldFailClosedAfterControlError(err) {
+	err = serveControlMessages(streamContext, stream, reader, welcome.GetHeartbeatIntervalSeconds(), statusProvider, applySnapshot)
+	if ctx.Err() == nil && onDisconnected != nil && errors.Is(err, errAccessRevoked) {
+		if closeErr := onDisconnected(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("block Gateway dataplane after access revocation: %w", closeErr))
+		}
+	} else if ctx.Err() == nil && onDisconnected != nil && shouldFailClosedAfterControlError(err) {
 		if closeErr := onDisconnected(); closeErr != nil {
 			err = errors.Join(err, fmt.Errorf("block Gateway dataplane after HUB authorization/configuration failure: %w", closeErr))
 		}
@@ -228,6 +277,9 @@ func applyFailClosedIfRequired(onDisconnected DisconnectHandler, err error) erro
 // active. Explicit authorization or protocol failures invalidate that state.
 func shouldFailClosedAfterControlError(err error) bool {
 	if err == nil || errors.Is(err, io.EOF) {
+		return false
+	}
+	if errors.Is(err, errAccessConfigurationChanged) || errors.Is(err, errAccessRevoked) {
 		return false
 	}
 	grpcStatus, ok := status.FromError(err)
@@ -255,12 +307,12 @@ func gatewayAuthorizationReason(err error) string {
 	return ""
 }
 
-func serveControlMessages(ctx context.Context, stream grpc.BidiStreamingClient[hubv1.AgentMessage, hubv1.HubMessage], intervalSeconds uint32, statusProvider interface{ Status() agent.Snapshot }, applySnapshot SnapshotApplier) error {
+func serveControlMessages(ctx context.Context, stream grpc.BidiStreamingClient[hubv1.AgentMessage, hubv1.HubMessage], reader *controlMessageReader, intervalSeconds uint32, statusProvider interface{ Status() agent.Snapshot }, applySnapshot SnapshotApplier) error {
 	interval := time.Duration(intervalSeconds) * time.Second
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	var heartbeatSequence, statusSequence uint64
-	configuration, err := sendRuntimeStatus(ctx, stream, statusProvider, &statusSequence)
+	configuration, err := sendRuntimeStatus(ctx, stream, reader, statusProvider, &statusSequence)
 	if err != nil {
 		return err
 	}
@@ -273,21 +325,32 @@ func serveControlMessages(ctx context.Context, stream grpc.BidiStreamingClient[h
 		select {
 		case <-ctx.Done():
 			return nil
+		case received := <-reader.results:
+			if received.err != nil {
+				return fmt.Errorf("receive unsolicited HUB control message: %w", received.err)
+			}
+			if reauth := received.message.GetReauthenticate(); reauth != nil {
+				return accessChangeError(reauth)
+			}
+			return errors.New("HUB sent an unexpected control message without a pending Gateway request")
 		case <-ticker.C:
 			heartbeatSequence++
 			if err := stream.Send(&hubv1.AgentMessage{Body: &hubv1.AgentMessage_Heartbeat{Heartbeat: &hubv1.Heartbeat{Sequence: heartbeatSequence}}}); err != nil {
 				return fmt.Errorf("send Gateway heartbeat: %w", err)
 			}
-			ackMessage, err := stream.Recv()
+			ackMessage, err := reader.Receive()
 			if err != nil {
 				return fmt.Errorf("receive Gateway heartbeat acknowledgment: %w", err)
+			}
+			if reauth := ackMessage.GetReauthenticate(); reauth != nil {
+				return accessChangeError(reauth)
 			}
 			ack := ackMessage.GetHeartbeatAck()
 			if ack == nil || ack.GetSequence() != heartbeatSequence {
 				return errors.New("HUB heartbeat acknowledgment does not match the request")
 			}
 			slog.Debug("Gateway heartbeat acknowledged", "sequence", heartbeatSequence, "server_time_unix", ack.GetServerTimeUnix())
-			configuration, err := sendRuntimeStatus(ctx, stream, statusProvider, &statusSequence)
+			configuration, err := sendRuntimeStatus(ctx, stream, reader, statusProvider, &statusSequence)
 			if err != nil {
 				return err
 			}
@@ -300,7 +363,7 @@ func serveControlMessages(ctx context.Context, stream grpc.BidiStreamingClient[h
 	}
 }
 
-func sendRuntimeStatus(ctx context.Context, stream grpc.BidiStreamingClient[hubv1.AgentMessage, hubv1.HubMessage], statusProvider interface{ Status() agent.Snapshot }, sequence *uint64) (*hubv1.ConfigSnapshot, error) {
+func sendRuntimeStatus(ctx context.Context, stream grpc.BidiStreamingClient[hubv1.AgentMessage, hubv1.HubMessage], reader *controlMessageReader, statusProvider interface{ Status() agent.Snapshot }, sequence *uint64) (*hubv1.ConfigSnapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil
 	}
@@ -321,9 +384,12 @@ func sendRuntimeStatus(ctx context.Context, stream grpc.BidiStreamingClient[hubv
 	}}}); err != nil {
 		return nil, fmt.Errorf("send Gateway runtime status: %w", err)
 	}
-	ackMessage, err := stream.Recv()
+	ackMessage, err := reader.Receive()
 	if err != nil {
 		return nil, fmt.Errorf("receive Gateway runtime status acknowledgment: %w", err)
+	}
+	if reauth := ackMessage.GetReauthenticate(); reauth != nil {
+		return nil, accessChangeError(reauth)
 	}
 	ack := ackMessage.GetRuntimeStatusAck()
 	if ack == nil || ack.GetSequence() != *sequence {
@@ -331,6 +397,13 @@ func sendRuntimeStatus(ctx context.Context, stream grpc.BidiStreamingClient[hubv
 	}
 	slog.Debug("Gateway runtime status acknowledged", "sequence", *sequence, "wireguard_status", wireGuardStatus, "health_status", healthStatus, "connected_peer_count_known", false)
 	return ack.GetConfigSnapshot(), nil
+}
+
+func accessChangeError(message *hubv1.Reauthenticate) error {
+	if message != nil && message.GetReasonCode() == "ACCESS_REVOKED" {
+		return errAccessRevoked
+	}
+	return errAccessConfigurationChanged
 }
 
 func applyAndAcknowledgeSnapshot(ctx context.Context, stream grpc.BidiStreamingClient[hubv1.AgentMessage, hubv1.HubMessage], snapshot *hubv1.ConfigSnapshot, applySnapshot SnapshotApplier) error {

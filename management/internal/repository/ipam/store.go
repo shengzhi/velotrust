@@ -20,6 +20,7 @@ type Store interface {
 	UpdatePool(*servicecontext.Context, int64, *model.Pool, *model.AuditEvent) error
 	SetPoolStatus(*servicecontext.Context, int64, int64, string, int64, *model.AuditEvent) error
 	ListLeases(*servicecontext.Context) ([]model.Lease, error)
+	ListEmployeeGroups(*servicecontext.Context) ([]model.PoolGroupOption, error)
 	AllocateAddress(*servicecontext.Context, int64, *model.Lease, *model.AuditEvent) error
 	ReleaseLease(*servicecontext.Context, int64, int64, *model.AuditEvent) error
 	SaveSiteNATMapping(*servicecontext.Context, int64, *model.NATMapping, *model.AuditEvent) error

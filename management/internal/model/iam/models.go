@@ -9,6 +9,9 @@ import (
 )
 
 const (
+	AccountTypePlatform = "platform"
+	AccountTypeEmployee = "employee"
+
 	TableUser               = "t_iam_user"
 	TableUserProfile        = "t_iam_user_profile"
 	TableGroup              = "t_iam_group"
@@ -36,12 +39,13 @@ const (
 type User struct {
 	database.BaseModel  `xorm:"extends"`
 	ID                  int64      `xorm:"pk autoincr 'id'" json:"id"`
+	AccountType         string     `xorm:"'account_type'" json:"account_type"`
 	Username            string     `xorm:"'username'" json:"username"`
 	DisplayName         string     `xorm:"'display_name'" json:"display_name"`
 	Email               *string    `xorm:"'email'" json:"email,omitempty"`
 	PhoneCountryCode    *string    `xorm:"'phone_country_code'" json:"phone_country_code,omitempty"`
 	PhoneNumber         *string    `xorm:"'phone_number'" json:"phone_number,omitempty"`
-	WebAuthnUserHandle  []byte     `xorm:"'webauthn_user_handle'" json:"-"`
+	WebAuthnUserHandle  *[]byte    `xorm:"'webauthn_user_handle'" json:"-"`
 	PasswordSalt        *string    `xorm:"'password_salt'" json:"-"`
 	PasswordHash        *string    `xorm:"'password_hash'" json:"-"`
 	PasswordHashVersion *int16     `xorm:"'password_hash_version'" json:"-"`
@@ -78,9 +82,20 @@ type Group struct {
 	Description        *string `xorm:"'description'" json:"description,omitempty"`
 	Status             string  `xorm:"'status'" json:"status"`
 	SortOrder          int     `xorm:"'sort_order'" json:"sort_order"`
+	MemberCount        int64   `xorm:"-" json:"member_count"`
 }
 
 func (Group) TableName() string { return TableGroup }
+
+// GroupMember is a safe employee summary used by the group membership editor.
+type GroupMember struct {
+	ID          int64   `xorm:"'id'" json:"id"`
+	Username    string  `xorm:"'username'" json:"username"`
+	DisplayName string  `xorm:"'display_name'" json:"display_name"`
+	Email       *string `xorm:"'email'" json:"email,omitempty"`
+	UserStatus  string  `xorm:"'user_status'" json:"user_status"`
+	IsMember    bool    `xorm:"'is_member'" json:"is_member"`
+}
 
 type UserGroup struct {
 	database.BaseModel `xorm:"extends"`

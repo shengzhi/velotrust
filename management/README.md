@@ -46,10 +46,10 @@ IAM 的 JRPC 方法使用 `IAM_Method` 命名。登录、Passkey 登录是公开
 - 角色和权限：`ListRoles`、`CreateRole`、`ListPermissionCatalog`、`ListRolePermissions`、`GrantPermission`、`RevokePermission`
 - 角色菜单：`ListRoleMenus`、`SetRoleMenus`、`ListCurrentUserMenus`。菜单变更整组事务提交并写入审计；系统角色菜单只读，普通角色可在控制台树形选择。
 - 菜单：`ListMenus`、`CreateMenu`、`UpdateMenu`、`DeleteMenu`。菜单写入使用 `iam.role.write`，更新带版本号进行并发保护；删除会拒绝仍有子菜单或角色绑定的节点。菜单关联只控制导航显示，不能代替服务端权限码校验。
-- 网关注册凭证：`ENROLLMENT_ListCredentials`、`ListSelectableSiteNetworks`、`CreateGateway`、`ExtendCredential`、`RevokeCredential`。凭证明文只在创建网关时返回一次，数据库仅存 SHA-256 摘要；读写分别要求 `gateway.registration.read` 和 `gateway.registration.write`，所有管理操作都写入 IAM 审计日志。凭证必须随新网关身份一并创建，不提供为已有网关重新签发的入口。
+- Gateway 注册凭证：`ENROLLMENT_ListCredentials`、`ListSelectableSiteNetworks`、`CreateGateway`、`ExtendCredential`、`RevokeCredential`。Gateway 注册 Token 只显示一次，数据库只存 SHA-256 摘要；凭证读写要求 `gateway.registration.read` / `gateway.registration.write`。Client 不使用 Management 签发的注册凭证。
 - 网络站点：`SITE_ListSites`、`ListGateways`、`SaveSite`、`DeleteSite` 管理 `network_type='site'` 的网络记录；读写需要 `ztna.site.read` / `ztna.site.write`。站点 ID 就是 network ID；网关注册页仍通过 `ENROLLMENT_ListSelectableSiteNetworks` 获取启用的站点网段并提交该 ID。
 
-Gateway inventory 和凭证表通过 `006_gateway_enrollment.sql` 创建，权限通过 `007_gateway_registration_permissions.sql` 加入，并授予活动的 `platform_admin` 角色。网关注册凭证页面已接入这些 JRPC 接口。Gateway Agent 端的凭证消费、节点身份认证、注册审批和注册后配置下发尚未实现；创建网关并签发凭证目前只完成凭证管理，不代表 Gateway 已完成入网。
+Gateway 由 HUB 使用 X25519 节点认证，并在首次注册时消费一次性 Gateway Token。Client 员工账号在 Management「员工用户管理」页面创建和重置密码；员工通过 TLS 连接 HUB，以账号密码登录并在首次登录时登记设备。HUB 为新设备原子创建节点、设备和 X25519 公钥凭证；后续连接仍校验员工账号密码，并验证设备私钥持有证明。禁用节点、设备或所属员工会阻断 Client 后续认证，并通知在线 Client 清理隧道。Client 的 IP 租约由员工组关联的动态地址池独立分配。HUB 尚未将访问策略编译为 Client 的 Gateway Peer 配置；在该能力完成前，Client 隧道配置会保持未就绪并默认不下发。旧 Client 注册凭证表保留为历史数据结构，当前 Client 接入流程不再签发或消费该凭证。
 
 网络站点直接保存为 `t_ztna_network` 中 `network_type='site'` 的记录；站点 ID、名称、CIDR、可选网关、状态和逻辑删除标记都由同一行维护。迁移 013 为网络目录增加站点字段和站点权限，不创建单独的站点表。站点创建后名称和 CIDR 固定，编辑只修改 Gateway 关联和状态；停用或删除站点会同时停用关联 NAT，删除还会清空 Gateway 关联并逻辑删除站点。站点 NAT 通过 `SITE_SaveNATMapping` 和 `ztna.site.write` 管理，持久化于 `t_ztna_nat_mapping`，启用映射由 HUB 编译并同步至 Gateway Agent 数据面。
 
@@ -64,6 +64,8 @@ Migration `013_physical_sites.sql` 为 `t_ztna_network` 增加网络站点所需
 本地开发时，Web 的 Vite 服务默认将 `/jrpc` 代理到 `http://127.0.0.1:8080`。浏览器通过 `http://localhost:3000` 使用 Passkey 时，`[auth.webauthn]` 必须配置 `rp_id = "localhost"` 和 `origins = ["http://localhost:3000"]`；这些值需要与实际 Origin 完全匹配。生产环境改为控制台 HTTPS 主机名，并同步配置对应 RP ID 和 Origin。
 
 IAM 模块的数据模型、会话和访问控制设计见 [IAM 设计文档](../docs/VeloTrust_IAM身份与访问管理模块设计.md)。版本化 PostgreSQL 迁移位于 `management/migrations/postgresql/`；初始 schema 快照仍保存在 `docs/database/postgresql/schema/iam/` 供审阅。
+
+员工用户组通过 IAM JRPC 管理：可创建和停用用户组、查看员工成员并批量维护成员关系。`iam.group.read` / `iam.group.write` 控制这些操作，migration `026_iam_group_management_permissions.sql` 为已有平台管理员补齐权限；管理员 bootstrap 也会授予这两项权限。动态 User-Device 地址池可直接关联员工组，由 HUB 自动分配 Client Overlay IP；Gateway 访问仍由访问策略决定。
 
 IAM、IPAM、Gateway 注册、ZTNA 和定时任务的持久化模型统一嵌入 `database.BaseModel`；需要逻辑删除的模型嵌入 `database.DeletableModel`。Repository 的数据变更必须通过 `db.Save` 或事务内的 `tx.Save` 完成，读操作仍使用 Repository 查询；写事务使用 `WithSaveTransaction` 将校验、锁定、模型保存和审计写入放在同一事务中。更新会检查 `version_no`，冲突时返回错误。迁移 `012_model_save_metadata.sql` 为旧表补齐 BaseModel 所需的元数据列；`015_unify_gateway_nodes_and_audit_actors.sql` 修正遗留数值审计字段并合并重复网关表。
 

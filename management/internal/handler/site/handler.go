@@ -115,7 +115,7 @@ type SaveNATMappingArgs struct {
 	ID              int64   `json:"id" validate:"omitempty,gt=0"`
 	ExpectedVersion int64   `json:"expected_version" validate:"omitempty,gt=0"`
 	NetworkID       int64   `json:"network_id" validate:"required,gt=0"`
-	NATType         string  `json:"nat_type" validate:"required,oneof=1:1_Bidirectional SNAT_Masquerade DNAT_VirtualIP"`
+	NATType         string  `json:"nat_type" validate:"required,oneof=DNAT_VirtualIP"`
 	VirtualCIDR     *string `json:"virtual_cidr" validate:"omitempty,max=64"`
 	Enabled         bool    `json:"enabled"`
 	Description     *string `json:"description" validate:"omitempty,max=512"`

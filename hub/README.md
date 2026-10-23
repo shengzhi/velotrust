@@ -1,6 +1,6 @@
 # HUB
 
-HUB 是运行控制平面，负责节点认证、注册凭证校验、配置与策略同步、会话管理、Peer 状态及运行状态上报。实际业务流量由 Gateway 和 Client Agent 直接通过隧道传输，不经过 HUB。
+HUB 是运行控制平面，负责 Gateway 首次注册凭证校验、Client 员工账号登录和设备登记、节点认证、配置与策略同步、会话管理、Peer 状态及运行状态上报。实际业务流量由 Gateway 和 Client Agent 直接通过隧道传输，不经过 HUB。
 
 ## 当前代码框架
 
@@ -8,7 +8,7 @@ HUB 是运行控制平面，负责节点认证、注册凭证校验、配置与�
 - `app/`：HUB 组合根；独立进程和未来合并部署复用同一套服务装配。
 - `runtime/`：服务生命周期和优雅关闭，可由独立入口或后续 `cmd/server` 组合启动。
 - `transport/grpc/`：gRPC 服务端、TLS 与标准健康检查。
-- `internal/auth/`：Gateway 当前节点身份校验。
+- `internal/auth/`：Gateway 与 Client 节点身份校验。
 - `internal/session/`：单实例内存会话租约；多实例共享租约尚未实现。
 - `internal/repository/postgres/`：节点目录、心跳和运行状态访问。
 - `internal/model/`：HUB 按需使用的数据库持久化模型。
@@ -16,9 +16,11 @@ HUB 是运行控制平面，负责节点认证、注册凭证校验、配置与�
 - `internal/report/`：节点运行状态上报接口。
 - `shared/proto/v1/hub.proto`：跨进程控制通道契约；生成代码位于 `shared/gen/go/hub/v1/`。
 
-当前已接入 PostgreSQL Gateway 节点目录校验和 Gateway X25519 控制流认证：新建 gRPC 流先发送 Hello，HUB 核验节点处于 active 状态且公钥与数据库绑定一致，再发出一次性挑战；Gateway 使用注册的 WireGuard X25519 私钥及 TLS exporter（TLS 模式）或显式明文挑战上下文（明文模式）计算证明。认证成功后服务端才发送 Welcome。认证后的心跳会续租单实例内存会话，并更新 `t_ztna_node.last_heartbeat_at`；运行状态写入节点当前状态及 `t_ztna_node_status_report`，节点收到状态确认后才知道该报告已持久化。
+Gateway 和 Client 均通过 PostgreSQL 节点目录校验及 X25519 挑战完成控制流认证：新建 gRPC 流先发送 Hello，HUB 核验节点状态、公钥及关联凭证，再发出一次性挑战；节点使用自己的 WireGuard X25519 私钥及 TLS exporter（TLS 模式）或明文挑战上下文（明文模式）计算证明。认证成功后服务端才发送 Welcome。Client 的目录校验还要求关联设备、所属用户和设备公钥凭证都处于有效状态。认证后的心跳续租单实例内存会话；运行状态写入节点当前状态及 `t_ztna_node_status_report`，节点收到状态确认后才知道该报告已持久化。
 
-Gateway 首次注册由 `gateway-agent run` 自动处理：Agent 先执行常规身份认证，HUB 仅对尚未绑定公钥的预建节点返回专用“未注册”错误；Agent 随后使用配置中的一次性凭证完成注册专用 X25519 密钥持有证明。HUB 在单个 PostgreSQL 事务中消费凭证并绑定公钥。若需要 Management 审批，HUB 先返回待审批状态并保持注册 gRPC 流，定期读取节点状态；节点获批后再返回最终结果。Agent 收到通过结果后重新执行常规身份认证，认证成功前转发保持阻断。凭证无效、过期、撤销、重复使用、目标节点已注册或公钥冲突均拒绝。Gateway 配置同步由 HUB 从 Gateway 节点的 IPAM 租约、活动隧道 Peer、关联站点网络及 NAT 台账编译期望快照；计算摘要后通过欢迎消息或运行状态应答发送。Gateway 校验内容摘要和本机配置边界后调用 Reconciler 替换隧道、ACL、防火墙、路由及 NAT 状态，完成后回执。HUB 将发送与回执写入配置任务和事件，运行状态持续报告实际配置摘要；普通网络中断期间 Gateway 保留最近一次已验证配置；重连后重新认证并对账。无 IPAM 租约、业务数据无效或读取失败时，Gateway fail-closed。配置变化通过 Gateway 心跳周期内的状态上报发现。Client 身份认证、跨实例会话协调、撤销处理及 HA 尚未实现。Gateway Agent 报告反映本地 Reconciler 状态；Peer 数当前标记为未知。X25519 通道绑定协议仍须完成独立安全评审和真实客户端互通验证后再用于生产。
+Gateway 首次注册由 `gateway-agent run` 使用 Management 签发的一次性凭证自动处理。Client 员工账号由 Management「员工用户管理」页面创建；员工在 Client Agent 登录时输入账号密码，Client 只把凭证发送给启用 TLS 的 HUB，不调用 Management API。HUB 校验员工账号后，在单个 PostgreSQL 事务中首次创建 Client 节点、设备及其 X25519 公钥凭证；之后每次 Client 连接都校验员工密码和账号状态，并要求设备私钥完成 X25519 挑战应答。密码错误、账号禁用、设备禁用或公钥与已绑定设备不一致时拒绝连接。HUB 根据活动隧道 Peer 和 Gateway 站点/NAT 数据编译 Client 配置；内容摘要通过欢迎消息或运行状态应答下发，Client 校验摘要、创建 Windows WireGuard 隧道并回执。配置下发目前要求 Client 已被加入一个活动逻辑隧道，且该隧道内存在活动 Gateway Peer；当前控制台尚未提供这一关联操作，需补齐隧道 Peer 管理后才能完成端到端自动配置。禁用节点、设备或所属员工会使认证失败，并通过活动流通知在线 Client 清理本机隧道；离线 Client 会在下次认证时被拒绝。Client 的管理控制只连接 HUB，不调用 Management API。
+
+HUB 的 Client 与 Gateway 配置同步均在节点重连及心跳状态上报时对账。普通临时断连期间 Client 保留最近应用的隧道；收到访问撤销通知、授权失效或配置应用失败时 Client 停止本机隧道。当前会话租约仍为单实例内存状态，跨 HUB 实例会话协调、Client 配置回执的独立持久化和 HA 故障恢复尚未实现。Gateway Agent 报告反映本地 Reconciler 状态；Peer 数当前标记为未知。X25519 通道绑定协议仍须完成独立安全评审和真实客户端互通验证后再用于生产。
 
 ### Gateway 当前配置格式与安全边界
 
@@ -41,6 +43,8 @@ Gateway 配置也要显式关闭 TLS：
 ```json
 "hub": { "endpoint": "127.0.0.1:8443", "tls": false }
 ```
+
+Client 对应字段为 `hub.tls_enabled: false`。当且仅当 HUB 也显式关闭 TLS 时，HUB 才接受明文员工密码登录。员工密码会以明文通过网络传输；此模式仅用于隔离的开发网络，生产部署必须启用 TLS。
 
 Go 标准库 `net/rpc` 不作为候选：它是已冻结的通用 RPC 包，缺少本项目需要的双向流和跨语言协议生成能力。自定义 TCP 会要求项目自行维护消息 framing、版本兼容、重连、背压、流控、超时及认证集成；除非未来有明确的 HTTP/2 不可用环境或性能证据，否则不承担这套协议维护成本。
 

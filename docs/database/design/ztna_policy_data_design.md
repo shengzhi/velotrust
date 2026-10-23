@@ -2,7 +2,7 @@
 
 - 文档版本：1.0
 - 数据库：PostgreSQL
-- 结构基线：代码仓库迁移 006–018 的累计结果，包含元数据补齐及网关合并。
+- 结构与审计语义基线：代码仓库迁移 006–024 的累计结果，包含元数据补齐、节点合并和审计主体规范。
 - 总览与公共字段：[ZTNA 数据库设计总览](ztna_data_design.md)
 - 业务依据：[数据模型设计文档](../../VeloTrust_数据模型设计文档_最终版.md)
 
@@ -287,7 +287,7 @@ allow/deny/step_up 是结果快照，不直接生成永久通行凭证。审计�
 
 **业务一致性与生命周期**
 
-`requested_by`、`approved_by` 是业务操作人 ID，应保留 BIGINT 外键；基础 created_by/updated_by 是用户名字符串。approved 需有审批人及完整有效期；生效判断还必须比较当前时间、状态和资源/设备条件。
+`requested_by`、`approved_by` 是业务操作人 ID，应保留 BIGINT 外键；基础 `created_by`/`updated_by` 记录操作主体字符串：人工操作用用户名，自动化操作用带类型前缀的机器主体（例如 `client:<node_code>`、`gateway:<node_code>` 或 `hub:<instance_id>`）。approved 需有审批人及完整有效期；生效判断还必须比较当前时间、状态和资源/设备条件。
 
 ## 3. 使用与维护约定
 

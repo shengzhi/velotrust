@@ -39,6 +39,14 @@ type testStore struct {
 	hasPermission          bool
 	resourceCatalog        []model.Resource
 	resourceCatalogCalled  bool
+	groupList              []model.Group
+	groupListCalled        bool
+	savedGroup             *model.Group
+	savedGroupVersion      int64
+	groupMembers           []model.GroupMember
+	groupMembersSet        []int64
+	groupMembersGroupID    int64
+	groupMembersSetCalled  bool
 }
 
 func testJWTSigningKey() []byte { return []byte(strings.Repeat("j", 32)) }
@@ -130,6 +138,32 @@ func (s *testStore) ListResourceCatalog(*servicecontext.Context) ([]model.Resour
 	return s.resourceCatalog, nil
 }
 
+func (s *testStore) ListGroups(*servicecontext.Context) ([]model.Group, error) {
+	s.groupListCalled = true
+	return s.groupList, nil
+}
+
+func (s *testStore) SaveGroup(ctx *servicecontext.Context, group *model.Group, expectedVersion int64, _ *model.AuditLog) error {
+	s.savedGroup = group
+	s.savedGroupVersion = expectedVersion
+	if group.ID == 0 {
+		group.ID = 17
+		group.CreateNew(ctx.UserName())
+	}
+	return nil
+}
+
+func (s *testStore) ListGroupMembers(*servicecontext.Context, int64) ([]model.GroupMember, error) {
+	return s.groupMembers, nil
+}
+
+func (s *testStore) SetGroupMembers(_ *servicecontext.Context, groupID int64, userIDs []int64, _ *model.AuditLog) error {
+	s.groupMembersSetCalled = true
+	s.groupMembersGroupID = groupID
+	s.groupMembersSet = append([]int64(nil), userIDs...)
+	return nil
+}
+
 func TestPasswordHashVerifiesAndUsesUniqueSalt(t *testing.T) {
 	salt1, hash1, err := hashPassword("correct horse battery staple")
 	if err != nil {
@@ -147,7 +181,7 @@ func TestPasswordHashVerifiesAndUsesUniqueSalt(t *testing.T) {
 		t.Fatalf("unexpected salt encoding/length: %d, %v", len(saltBytes), err)
 	}
 	version := PasswordHashVersion
-	user := &model.User{PasswordSalt: &salt1, PasswordHash: &hash1, PasswordHashVersion: &version}
+	user := &model.User{AccountType: model.AccountTypePlatform, PasswordSalt: &salt1, PasswordHash: &hash1, PasswordHashVersion: &version}
 	if !verifyPassword(user, "correct horse battery staple") {
 		t.Fatal("valid password was rejected")
 	}
@@ -186,7 +220,7 @@ func TestLoginPersistsOpaqueSessionAndThrottleResetTogether(t *testing.T) {
 		t.Fatal(err)
 	}
 	version := PasswordHashVersion
-	store := &testStore{user: &model.User{ID: 7, Username: "operator", DisplayName: "Operator", UserStatus: "active", PasswordSalt: &salt, PasswordHash: &passwordHash, PasswordHashVersion: &version}}
+	store := &testStore{user: &model.User{ID: 7, AccountType: model.AccountTypePlatform, Username: "operator", DisplayName: "Operator", UserStatus: "active", PasswordSalt: &salt, PasswordHash: &passwordHash, PasswordHashVersion: &version}}
 	service, err := New(store, Options{JWTSigningKey: testJWTSigningKey(), ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
 	if err != nil {
 		t.Fatal(err)
@@ -218,7 +252,7 @@ func TestLoginRecordsFailureWithoutCreatingSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	version := PasswordHashVersion
-	store := &testStore{user: &model.User{ID: 7, Username: "operator", UserStatus: "active", PasswordSalt: &salt, PasswordHash: &passwordHash, PasswordHashVersion: &version}}
+	store := &testStore{user: &model.User{ID: 7, AccountType: model.AccountTypePlatform, Username: "operator", UserStatus: "active", PasswordSalt: &salt, PasswordHash: &passwordHash, PasswordHashVersion: &version}}
 	service, err := New(store, Options{JWTSigningKey: testJWTSigningKey(), ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
 	if err != nil {
 		t.Fatal(err)
@@ -243,7 +277,7 @@ func TestLoginRequiresAndConsumesTOTPWhenAuthenticatorIsActive(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := &testStore{
-		user:              &model.User{ID: 7, Username: "operator", UserStatus: "active", PasswordSalt: &salt, PasswordHash: &passwordHash, PasswordHashVersion: &version},
+		user:              &model.User{ID: 7, AccountType: model.AccountTypePlatform, Username: "operator", UserStatus: "active", PasswordSalt: &salt, PasswordHash: &passwordHash, PasswordHashVersion: &version},
 		totpAuthenticator: &model.UserAuthenticator{UserID: 7, SecretCiphertext: ciphertext, EncryptionKeyVersion: "v1", Status: "active"},
 	}
 	service, err := New(store, Options{JWTSigningKey: testJWTSigningKey(), ThrottleHMACKey: []byte(strings.Repeat("k", 32)), TOTPEncryptionKey: []byte(strings.Repeat("e", 32))})
@@ -276,7 +310,7 @@ func TestResolveBearerRevokesIdleSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := &testStore{
-		user:         &model.User{ID: 7, Username: "operator", UserStatus: "active"},
+		user:         &model.User{ID: 7, AccountType: model.AccountTypePlatform, Username: "operator", UserStatus: "active"},
 		loginSession: &model.UserSession{SessionID: "session-id", UserID: 7, TokenHash: hashToken(token), IssuedAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(time.Hour), Status: "active"},
 	}
 	service, err := New(store, Options{SessionIdleTTL: time.Minute, SessionAbsoluteTTL: 3 * time.Hour, JWTSigningKey: testJWTSigningKey(), ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
@@ -407,7 +441,7 @@ func TestOwnPasswordChangeChecksOldPasswordAndKeepsCurrentSession(t *testing.T) 
 		t.Fatal(err)
 	}
 	version := PasswordHashVersion
-	store := &testStore{user: &model.User{ID: 7, Username: "operator", UserStatus: "active", PasswordSalt: &salt, PasswordHash: &hash, PasswordHashVersion: &version}}
+	store := &testStore{user: &model.User{ID: 7, AccountType: model.AccountTypePlatform, Username: "operator", UserStatus: "active", PasswordSalt: &salt, PasswordHash: &hash, PasswordHashVersion: &version}}
 	service, err := New(store, Options{JWTSigningKey: testJWTSigningKey(), ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
 	if err != nil {
 		t.Fatal(err)
@@ -421,5 +455,54 @@ func TestOwnPasswordChangeChecksOldPasswordAndKeepsCurrentSession(t *testing.T) 
 	}
 	if !store.changePasswordCalled || store.changedSessionID != "session-current" {
 		t.Fatal("password change did not preserve the current session identity")
+	}
+}
+
+func TestGroupManagementRequiresPermissionAndNormalizesGroupCode(t *testing.T) {
+	store := &testStore{}
+	service, err := New(store, Options{JWTSigningKey: testJWTSigningKey(), ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := servicecontext.New(context.Background(), servicecontext.Principal{ID: "7", Name: "operator"}, servicecontext.RequestMeta{})
+	if _, err := service.ListGroups(ctx); err == nil || store.groupListCalled {
+		t.Fatal("group list without iam.group.read permission reached the store")
+	}
+	if _, err := service.SaveGroup(ctx, GroupInput{GroupName: "Engineering", GroupCode: "engineering", Status: "active"}); err == nil || store.savedGroup != nil {
+		t.Fatal("group creation without iam.group.write permission reached the store")
+	}
+
+	store.hasPermission = true
+	group, err := service.SaveGroup(ctx, GroupInput{GroupName: "  Engineering  ", GroupCode: "  Engineering.Team  ", Description: "  Client staff  ", Status: "active", SortOrder: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if group.GroupName != "Engineering" || group.GroupCode != "engineering.team" || group.Description == nil || *group.Description != "Client staff" || group.ID != 17 {
+		t.Fatalf("group input was not normalized: %+v", group)
+	}
+	if store.savedGroupVersion != 0 || store.savedGroup.CreatedBy != "operator" {
+		t.Fatalf("new group did not preserve expected version/audit principal: expected=%d group=%+v", store.savedGroupVersion, store.savedGroup)
+	}
+
+	if err := service.SetGroupMembers(ctx, 9, []int64{8, 3, 8}); err != nil {
+		t.Fatal(err)
+	}
+	if !store.groupMembersSetCalled || store.groupMembersGroupID != 9 || len(store.groupMembersSet) != 2 || store.groupMembersSet[0] != 3 || store.groupMembersSet[1] != 8 {
+		t.Fatalf("group membership was not deduplicated and sorted: %+v", store)
+	}
+}
+
+func TestGroupCodeRejectsInvalidCharactersBeforeRepository(t *testing.T) {
+	store := &testStore{hasPermission: true}
+	service, err := New(store, Options{JWTSigningKey: testJWTSigningKey(), ThrottleHMACKey: []byte(strings.Repeat("k", 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := servicecontext.New(context.Background(), servicecontext.Principal{ID: "7", Name: "operator"}, servicecontext.RequestMeta{})
+	if _, err := service.SaveGroup(ctx, GroupInput{GroupName: "Engineering", GroupCode: "engineering team", Status: "active"}); err == nil {
+		t.Fatal("group code containing spaces was accepted")
+	}
+	if store.savedGroup != nil {
+		t.Fatal("invalid group code reached the repository")
 	}
 }

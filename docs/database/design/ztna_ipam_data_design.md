@@ -1,14 +1,14 @@
 # VeloTrust ZTNA 数据库设计：Overlay IPAM 地址管理
 
-- 文档版本：1.0
+- 文档版本：1.1
 - 数据库：PostgreSQL
-- 结构基线：代码仓库迁移 006–018 的累计结果，包含元数据补齐及网关合并。
+- 结构与审计语义基线：代码仓库迁移 006–027 的累计结果，包含元数据补齐、节点合并、审计主体规范和 Client 地址池员工组关联。
 - 总览与公共字段：[ZTNA 数据库设计总览](ztna_data_design.md)
 - 业务依据：[数据模型设计文档](../../VeloTrust_数据模型设计文档_最终版.md)
 
 ## 1. 模块职责与关系
 
-全局范围、地址池和租约形成地址分配层次；全局范围到池是应用校验的 CIDR 包含关系，没有数据库外键。
+全局范围、地址池和租约形成地址分配层次；全局范围到池是应用校验的 CIDR 包含关系，没有数据库外键。动态 User-Device 地址池可直接关联一个员工组，HUB 根据设备所有者的员工组分配 Overlay IP。该关联只负责地址分配；Client 可访问的 Gateway 由访问策略决定。
 
 本模块收录 3 张表。图中实线表示已声明的外键，虚线表示应用层校验的逻辑关系；跨模块表只作为关系上下文，其字段在所属文档定义。Mermaid 的线型在本文用于区分物理约束与逻辑关系。
 
@@ -16,6 +16,7 @@
 erDiagram
     t_ztna_overlay_network ||..o{ t_ztna_address_pool : contains_cidr
     t_ztna_address_pool ||--o{ t_ztna_address_lease : allocates
+    t_iam_group ||--o| t_ztna_address_pool : assigns_client_addresses
 ```
 
 ## 2. 数据表设计
@@ -62,6 +63,7 @@ erDiagram
 | `pool_type` | `VARCHAR(32)` | 否 | — | 用途：Gateway、User-Device、Service-VIP；大小写以 DDL 枚举为准。 |
 | `allocation_mode` | `VARCHAR(16)` | 否 | — | 分配模式：static、dynamic。 |
 | `idp_group` | `VARCHAR(128)` | 是 | — | 身份组绑定标签；字符串元数据，当前无 IAM 用户组外键。 |
+| `client_group_id` | `BIGINT` | 是 | — | 员工 IAM 用户组；仅动态 `User-Device` 池可设置。HUB 据此自动分配 Client Overlay IP，不授予 Gateway 访问权限。 |
 | `gateway_binding` | `VARCHAR(128)` | 是 | — | 网关绑定标签；字符串元数据，当前无节点外键。 |
 | `color` | `CHAR(7)` | 否 | `'#10b981'` | 界面颜色，格式为 #RRGGBB。 |
 | `description` | `VARCHAR(512)` | 是 | — | 地址池用途说明。 |
@@ -76,6 +78,8 @@ erDiagram
 | `ck_t_ztna_address_pool_allocation` | `CHECK (allocation_mode IN ('static', 'dynamic'))` |
 | `ck_t_ztna_address_pool_color` | `CHECK (color ~ '^#[0-9A-Fa-f]{6}$')` |
 | `ck_t_ztna_address_pool_status` | `CHECK (status IN ('active', 'disabled'))` |
+| `fk_t_ztna_address_pool_client_group` | 外键到 `t_iam_group.id`，删除策略为 RESTRICT。 |
+| `ck_t_ztna_address_pool_client_group` | `client_group_id` 非空时，池类型必须为 `User-Device` 且分配模式为 `dynamic`。 |
 | `ck_t_ztna_address_pool_not_default` | `CHECK (network_cidr <> '0.0.0.0/0'::cidr AND network_cidr <> '::/0'::cidr)` |
 | `ck_t_ztna_address_pool_version` | `CHECK (version_no > 0)` |
 
@@ -85,12 +89,13 @@ erDiagram
 |---|---|
 | `ix_t_ztna_address_pool_status` | `(status, pool_name)` |
 | `ix_t_ztna_address_pool_cidr` | `(network_cidr)` |
+| `uq_t_ztna_address_pool_client_group` | `UNIQUE (client_group_id) WHERE client_group_id IS NOT NULL`，一个员工组最多关联一个地址池。 |
 
 说明：主键与 UNIQUE 约束也会形成相应唯一索引，上表只列额外显式创建的索引。
 
 **业务一致性与生命周期**
 
-当前应用要求 IPv4 /16–/30，地址池必须位于已初始化的全局范围内并校验重叠；这些包含关系和重叠规则没有外键或排斥约束。`idp_group`、`gateway_binding` 是标签，不能当成已验证的主体或节点关系。已分配地址时修改池范围需要保护现有租约。
+当前应用要求 IPv4 /16–/30，地址池必须位于已初始化的全局范围内并校验重叠；这些包含关系和重叠规则没有外键或排斥约束。`idp_group`、`gateway_binding` 是标签，不能当成已验证的主体或节点关系。`client_group_id` 是经过 IAM 外键校验的真实关系。已分配地址时修改池范围需要保护现有租约。
 
 ### 2.3 `t_ztna_address_lease` — Overlay 地址租约
 
@@ -142,5 +147,7 @@ active/reserved 地址全表唯一，释放后保留历史但不继续占用地�
 
 - 写入由对应领域服务经 Repository 与事务接口完成；使用项目 `db.Save` 持久化业务模型，由服务显式传递 `internal/context` 中的操作者用户名。
 - 公共 `version_no` 用于并发修改检查；它不是策略或配置历史版本。密钥轮换状态按 Peer 密钥生命周期单独管理。
+- HUB 只匹配设备所有者直接所属的 active IAM 用户组和关联的 active 动态 `User-Device` 地址池；池行锁保证并发分配串行化，再从池内空闲地址中随机选择一个。有效租约会幂等复用。
+- 自动分配只写入 IP 租约，不创建 WireGuard Peer，也不选择 Gateway。Gateway 集合由访问策略决定，配置未就绪时 HUB 保持不下发状态。
 - 本文描述仓库迁移结构与业务要求，不代表所有服务、页面或分发链路已实现；数据库 CHECK 未覆盖的业务条件须在服务事务中明确验证。
 - 涉及身份或授权的状态未知、过期或无法验证时默认拒绝访问；状态变更及撤销应留存审计，数据面应用结果由节点回执确认。

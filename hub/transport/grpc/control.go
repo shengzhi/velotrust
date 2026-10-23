@@ -36,23 +36,35 @@ import (
 // authentication and bound to the active Gateway identity.
 type ControlHandler struct {
 	hubv1.UnimplementedHubControlServer
-	instanceID        string
-	plaintextAllowed  bool
-	authenticationTTL time.Duration
-	heartbeatInterval time.Duration
-	sessionLeaseTTL   time.Duration
-	authenticator     *auth.GatewayAuthenticator
-	registrations     GatewayRegistrationRepository
-	sessions          session.Store
-	heartbeats        report.HeartbeatRecorder
-	reporter          report.Reporter
-	configurations    configsync.Source
+	instanceID          string
+	plaintextAllowed    bool
+	authenticationTTL   time.Duration
+	heartbeatInterval   time.Duration
+	sessionLeaseTTL     time.Duration
+	authenticator       *auth.GatewayAuthenticator
+	registrations       GatewayRegistrationRepository
+	clientAuth          *auth.ClientAuthenticator
+	clientRegistrations ClientRegistrationRepository
+	sessions            session.Store
+	heartbeats          report.HeartbeatRecorder
+	reporter            report.Reporter
+	configurations      configsync.Source
+	activeStreams       *session.ActiveRegistry
 }
 
 type GatewayRegistrationRepository interface {
 	CheckCredential(context.Context, string) (auth.GatewayIdentity, error)
 	RegisterGateway(context.Context, string, string, []byte, string, time.Time) (auth.GatewayIdentity, bool, error)
 	RegistrationState(context.Context, string) (auth.GatewayIdentity, error)
+}
+
+type ClientRegistrationRepository interface {
+	LoginClient(context.Context, string, []byte, []byte, string, string, string, string, time.Time) (auth.ClientIdentity, bool, error)
+}
+
+type ClientControlDependencies struct {
+	Authenticator *auth.ClientAuthenticator
+	Registrations ClientRegistrationRepository
 }
 
 var errRegistrationCredentialNotApplicable = errors.New("Gateway registration credential is not applicable")
@@ -64,7 +76,7 @@ const (
 
 const registrationApprovalPollInterval = 2 * time.Second
 
-func NewControlHandler(instanceID string, authenticator *auth.GatewayAuthenticator, registrations GatewayRegistrationRepository, sessions session.Store, heartbeats report.HeartbeatRecorder, reporter report.Reporter, configurations configsync.Source, authenticationTTL, heartbeatInterval, sessionLeaseTTL time.Duration, plaintextAllowed bool) (*ControlHandler, error) {
+func NewControlHandler(instanceID string, authenticator *auth.GatewayAuthenticator, registrations GatewayRegistrationRepository, sessions session.Store, heartbeats report.HeartbeatRecorder, reporter report.Reporter, configurations configsync.Source, authenticationTTL, heartbeatInterval, sessionLeaseTTL time.Duration, plaintextAllowed bool, clientDependencies ...ClientControlDependencies) (*ControlHandler, error) {
 	if instanceID == "" {
 		return nil, errors.New("HUB instance ID is required")
 	}
@@ -80,7 +92,7 @@ func NewControlHandler(instanceID string, authenticator *auth.GatewayAuthenticat
 	if heartbeatInterval <= 0 || sessionLeaseTTL <= heartbeatInterval {
 		return nil, errors.New("HUB session lease must exceed the positive heartbeat interval")
 	}
-	return &ControlHandler{
+	handler := &ControlHandler{
 		instanceID:        instanceID,
 		plaintextAllowed:  plaintextAllowed,
 		authenticationTTL: authenticationTTL,
@@ -92,13 +104,30 @@ func NewControlHandler(instanceID string, authenticator *auth.GatewayAuthenticat
 		heartbeats:        heartbeats,
 		reporter:          reporter,
 		configurations:    configurations,
-	}, nil
+		activeStreams:     session.NewActiveRegistry(),
+	}
+	if len(clientDependencies) > 1 {
+		return nil, errors.New("at most one Client control dependency set may be configured")
+	}
+	if len(clientDependencies) == 1 {
+		dependencies := clientDependencies[0]
+		if dependencies.Authenticator == nil || dependencies.Registrations == nil {
+			return nil, errors.New("Client authentication and registration repositories are both required")
+		}
+		handler.clientAuth = dependencies.Authenticator
+		handler.clientRegistrations = dependencies.Registrations
+	}
+	return handler, nil
 }
 
 func (h *ControlHandler) RegisterGRPC(server *Server) {
 	server.RegisterService(func(registrar grpc.ServiceRegistrar) {
 		hubv1.RegisterHubControlServer(registrar, h)
 	})
+}
+
+func (h *ControlHandler) NotifyConfigurationChange(nodeCode, reason string) bool {
+	return h.activeStreams.Notify(nodeCode, reason)
 }
 
 func (h *ControlHandler) Connect(stream hubv1.HubControl_ConnectServer) error {
@@ -109,6 +138,9 @@ func (h *ControlHandler) Connect(stream hubv1.HubControl_ConnectServer) error {
 	hello := first.GetHello()
 	if hello == nil {
 		return status.Error(codes.Unauthenticated, "the first control message must be a Gateway hello")
+	}
+	if hello.GetNodeKind() == hubv1.NodeKind_NODE_KIND_CLIENT {
+		return h.connectClient(stream, hello)
 	}
 	if hello.GetNodeKind() != hubv1.NodeKind_NODE_KIND_GATEWAY {
 		return status.Error(codes.Unauthenticated, "this HUB control stream currently accepts authenticated Gateways only")
@@ -159,6 +191,7 @@ func (h *ControlHandler) Connect(stream hubv1.HubControl_ConnectServer) error {
 		if err := h.configurations.MarkApplied(stream.Context(), identity.NodeID, hello.GetAppliedConfigHash()); err != nil {
 			slog.Warn("reconcile Gateway configuration task", "node_id", identity.NodeID, "error", err)
 		}
+		h.acknowledgeAccessChangesIfCurrent(stream.Context(), identity.NodeID, hello.GetAppliedConfigHash())
 	}
 
 	sessionID, err := newSessionID()
@@ -176,6 +209,8 @@ func (h *ControlHandler) Connect(stream hubv1.HubControl_ConnectServer) error {
 		return status.Error(codes.Unavailable, "Gateway session could not be established")
 	}
 	defer h.releaseSession(sessionID, identity.NodeID)
+	changeSignal, unregister := h.activeStreams.Register(identity.NodeID)
+	defer unregister()
 	welcome := &hubv1.Welcome{
 		SessionId:                sessionID,
 		HeartbeatIntervalSeconds: uint32(h.heartbeatInterval / time.Second),
@@ -196,7 +231,130 @@ func (h *ControlHandler) Connect(stream hubv1.HubControl_ConnectServer) error {
 	if hasInitialSnapshot {
 		pendingSnapshot = &initialSnapshot
 	}
-	return h.serveAuthenticatedStream(stream, identity, sessionID, pendingSnapshot)
+	return h.serveAuthenticatedStream(stream, identity, sessionID, pendingSnapshot, changeSignal)
+}
+
+func (h *ControlHandler) connectClient(stream hubv1.HubControl_ConnectServer, hello *hubv1.Hello) error {
+	if h.clientAuth == nil || h.clientRegistrations == nil {
+		return status.Error(codes.Unavailable, "HUB Client control is not configured")
+	}
+	if hello.GetRegistrationToken() != "" {
+		return status.Error(codes.Unauthenticated, "Client registration tokens are no longer accepted; employee login is required")
+	}
+	claimedKey, err := base64.StdEncoding.DecodeString(hello.GetWireguardPublicKey())
+	if err != nil || len(claimedKey) != 32 {
+		return status.Error(codes.Unauthenticated, "Client X25519 public key is invalid")
+	}
+	defer clear(claimedKey)
+	password := []byte(hello.GetClientPassword())
+	hello.ClientPassword = ""
+	defer clear(password)
+	if _, err := tlsStateFromContext(stream.Context()); err != nil && !h.plaintextAllowed {
+		return gatewayAuthorizationStateError("CLIENT_LOGIN_FAILED", "Client employee login requires a TLS-protected HUB connection")
+	}
+	identity, created, err := h.clientRegistrations.LoginClient(stream.Context(), hello.GetClientUsername(), password, claimedKey,
+		hello.GetClientDeviceName(), hello.GetClientPlatform(), gatewayPeerIP(stream.Context()), hello.GetAgentVersion(), time.Now().UTC())
+	if err != nil {
+		switch {
+		case errors.Is(err, auth.ErrClientLoginFailed):
+			slog.Warn("reject Client employee login")
+			return gatewayAuthorizationStateError("CLIENT_LOGIN_FAILED", "Client employee login was rejected")
+		case errors.Is(err, auth.ErrClientApprovalPending):
+			return gatewayAuthorizationStateError("CLIENT_APPROVAL_PENDING", "Client device registration is awaiting approval")
+		case errors.Is(err, auth.ErrClientNotAllowed):
+			return status.Error(codes.Unauthenticated, "Client device is not authorized")
+		default:
+			slog.Error("authenticate Client employee login", "error", err)
+			return status.Error(codes.Unavailable, "Client employee authentication is unavailable")
+		}
+	}
+	if created {
+		if err := stream.Send(&hubv1.HubMessage{Body: &hubv1.HubMessage_ClientRegistrationResult{ClientRegistrationResult: &hubv1.ClientRegistrationResult{
+			Registered: true, NodeStatus: identity.NodeStatus,
+		}}}); err != nil {
+			return fmt.Errorf("send Client device registration result: %w", err)
+		}
+		slog.Info("registered Client device from employee login", "node_id", identity.NodeID, "owner_id", identity.OwnerID, "device_id", identity.DeviceID)
+	}
+	identity, err = h.authenticateClient(stream, claimedKey)
+	if err != nil {
+		return err
+	}
+	initialSnapshot, hasSnapshot, err := h.configurations.Current(stream.Context(), identity.NodeID, hello.GetAppliedConfigHash())
+	if err != nil {
+		return mapConfigurationSourceError("load Client desired configuration", identity.NodeID, err)
+	}
+	if !hasSnapshot && hello.GetAppliedConfigHash() != "" {
+		if err := h.configurations.MarkApplied(stream.Context(), identity.NodeID, hello.GetAppliedConfigHash()); err != nil {
+			slog.Warn("reconcile Client configuration task", "node_id", identity.NodeID, "error", err)
+		}
+	}
+	sessionID, err := newSessionID()
+	if err != nil {
+		return status.Error(codes.Internal, "could not initialize Client session")
+	}
+	now := time.Now()
+	if err := h.sessions.Acquire(stream.Context(), session.Record{
+		SessionID: sessionID, NodeID: identity.NodeID, InstanceID: h.instanceID,
+		LeaseUntil: now.Add(h.sessionLeaseTTL),
+	}); err != nil {
+		slog.Error("acquire HUB Client session", "node_id", identity.NodeID, "error", err)
+		return status.Error(codes.Unavailable, "Client session could not be established")
+	}
+	defer h.releaseSession(sessionID, identity.NodeID)
+	changeSignal, unregister := h.activeStreams.Register(identity.NodeID)
+	defer unregister()
+	welcome := &hubv1.Welcome{SessionId: sessionID, HeartbeatIntervalSeconds: uint32(h.heartbeatInterval / time.Second)}
+	if hasSnapshot {
+		welcome.ConfigSnapshot = toConfigSnapshot(initialSnapshot)
+	}
+	if err := stream.Send(&hubv1.HubMessage{Body: &hubv1.HubMessage_Welcome{Welcome: welcome}}); err != nil {
+		return fmt.Errorf("send authenticated Client welcome: %w", err)
+	}
+	if hasSnapshot {
+		if err := h.configurations.MarkSent(stream.Context(), identity.NodeID, initialSnapshot); err != nil {
+			return status.Error(codes.Unavailable, "Client configuration task could not be updated")
+		}
+	}
+	slog.Info("Client control identity authenticated", "node_id", identity.NodeID, "hub_instance_id", h.instanceID, "session_id", sessionID)
+	var pending *configsync.Snapshot
+	if hasSnapshot {
+		pending = &initialSnapshot
+	}
+	return h.serveAuthenticatedStream(stream, identity, sessionID, pending, changeSignal)
+}
+
+func (h *ControlHandler) authenticateClient(stream hubv1.HubControl_ConnectServer, claimedKey []byte) (auth.ClientIdentity, error) {
+	challengeID, err := hubauth.NewChallengeID()
+	if err != nil {
+		return auth.ClientIdentity{}, status.Error(codes.Internal, "could not initialize Client authentication")
+	}
+	binding, err := h.channelBinding(stream.Context(), challengeID)
+	if err != nil {
+		return auth.ClientIdentity{}, status.Error(codes.Unauthenticated, "control channel binding is unavailable")
+	}
+	identity, challenge, pending, err := h.clientAuth.Begin(stream.Context(), h.instanceID, claimedKey, challengeID, binding)
+	clear(binding)
+	if err != nil {
+		switch {
+		case errors.Is(err, auth.ErrClientNotRegistered):
+			return auth.ClientIdentity{}, gatewayAuthorizationStateError("CLIENT_NOT_REGISTERED", "Client device is not registered")
+		case errors.Is(err, auth.ErrClientApprovalPending):
+			return identity, gatewayAuthorizationStateError("CLIENT_APPROVAL_PENDING", "Client registration is awaiting Management approval")
+		case errors.Is(err, auth.ErrClientNotFound), errors.Is(err, auth.ErrClientNotAllowed), errors.Is(err, auth.ErrPublicKeyMismatch):
+			return auth.ClientIdentity{}, status.Error(codes.Unauthenticated, "Client identity is not authorized")
+		default:
+			slog.Error("load HUB Client authorization state", "error", err)
+			return auth.ClientIdentity{}, status.Error(codes.Unavailable, "Client authorization state is unavailable")
+		}
+	}
+	if err := sendChallenge(stream, challenge, false); err != nil {
+		return auth.ClientIdentity{}, fmt.Errorf("send Client authentication challenge: %w", err)
+	}
+	if err := receiveProofAndVerify(h, stream, pending, identity.NodeID, challenge.ExpiresAt); err != nil {
+		return auth.ClientIdentity{}, err
+	}
+	return identity, nil
 }
 
 func (h *ControlHandler) authenticateGateway(stream hubv1.HubControl_ConnectServer, claimedKey []byte) (auth.GatewayIdentity, error) {
@@ -412,13 +570,19 @@ func gatewayPeerIP(ctx context.Context) string {
 	return ""
 }
 
-func (h *ControlHandler) serveAuthenticatedStream(stream hubv1.HubControl_ConnectServer, identity auth.GatewayIdentity, sessionID string, pendingSnapshot *configsync.Snapshot) error {
+func (h *ControlHandler) serveAuthenticatedStream(stream hubv1.HubControl_ConnectServer, identity auth.GatewayIdentity, sessionID string, pendingSnapshot *configsync.Snapshot, changeSignal <-chan string) error {
 	var lastHeartbeatSequence uint64
 	var lastStatusSequence uint64
 	lastHeartbeatAt := time.Now()
 	for {
 		leaseUntil := lastHeartbeatAt.Add(h.sessionLeaseTTL)
-		message, err := h.receiveWithin(stream, time.Until(leaseUntil))
+		message, err, changeReason := h.receiveWithinOrNotify(stream, time.Until(leaseUntil), changeSignal)
+		if changeReason != "" {
+			if err := stream.Send(&hubv1.HubMessage{Body: &hubv1.HubMessage_Reauthenticate{Reauthenticate: &hubv1.Reauthenticate{ReasonCode: changeReason}}}); err != nil {
+				return fmt.Errorf("notify Gateway to refresh its access configuration: %w", err)
+			}
+			return status.Error(codes.Unavailable, "Gateway must reconnect to apply current authorization")
+		}
 		if errors.Is(err, io.EOF) {
 			return nil
 		}
@@ -509,6 +673,7 @@ func (h *ControlHandler) serveAuthenticatedStream(stream hubv1.HubControl_Connec
 				if err := h.configurations.MarkApplied(stream.Context(), identity.NodeID, runtimeStatus.GetAppliedConfigHash()); err != nil {
 					slog.Warn("reconcile Gateway configuration task", "node_id", identity.NodeID, "error", err)
 				}
+				h.acknowledgeAccessChangesIfCurrent(stream.Context(), identity.NodeID, runtimeStatus.GetAppliedConfigHash())
 			}
 		case *hubv1.AgentMessage_ConfigApplied:
 			applied := body.ConfigApplied
@@ -520,12 +685,47 @@ func (h *ControlHandler) serveAuthenticatedStream(stream hubv1.HubControl_Connec
 				return status.Error(codes.FailedPrecondition, "Gateway configuration result could not be recorded")
 			}
 			if !applied.GetSuccess() {
+				if recorder, ok := h.configurations.(accessChangeFailureRecorder); ok {
+					message := applied.GetErrorMessage()
+					if message == "" {
+						message = applied.GetErrorCode()
+					}
+					if err := recorder.RecordAccessChangeFailure(stream.Context(), identity.NodeID, message); err != nil {
+						slog.Warn("record Gateway access-change apply failure", "node_id", identity.NodeID, "error", err)
+					}
+				}
 				return status.Error(codes.FailedPrecondition, "Gateway failed to apply its desired configuration")
 			}
+			h.acknowledgeAccessChangesIfCurrent(stream.Context(), identity.NodeID, applied.GetConfigHash())
 			pendingSnapshot = nil
 		default:
 			return status.Error(codes.FailedPrecondition, "control message is not valid after Gateway authentication")
 		}
+	}
+}
+
+type accessChangeAcknowledger interface {
+	AcknowledgeCurrentConfig(context.Context, string) error
+}
+
+type accessChangeFailureRecorder interface {
+	RecordAccessChangeFailure(context.Context, string, string) error
+}
+
+func (h *ControlHandler) acknowledgeAccessChangesIfCurrent(ctx context.Context, nodeCode, appliedHash string) {
+	if appliedHash == "" {
+		return
+	}
+	_, hasNewer, err := h.configurations.Current(ctx, nodeCode, appliedHash)
+	if err != nil || hasNewer {
+		return
+	}
+	acknowledger, ok := h.configurations.(accessChangeAcknowledger)
+	if !ok {
+		return
+	}
+	if err := acknowledger.AcknowledgeCurrentConfig(ctx, nodeCode); err != nil {
+		slog.Warn("acknowledge Gateway access-change delivery", "node_id", nodeCode, "error", err)
 	}
 }
 
@@ -568,6 +768,33 @@ func (h *ControlHandler) receiveWithin(stream hubv1.HubControl_ConnectServer, re
 	}
 }
 
+func (h *ControlHandler) receiveWithinOrNotify(stream hubv1.HubControl_ConnectServer, remaining time.Duration, changed <-chan string) (*hubv1.AgentMessage, error, string) {
+	if remaining <= 0 {
+		return nil, status.Error(codes.DeadlineExceeded, "Gateway heartbeat lease expired"), ""
+	}
+	type receiveResult struct {
+		message *hubv1.AgentMessage
+		err     error
+	}
+	result := make(chan receiveResult, 1)
+	go func() {
+		message, err := stream.Recv()
+		result <- receiveResult{message: message, err: err}
+	}()
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	select {
+	case received := <-result:
+		return received.message, received.err, ""
+	case <-timer.C:
+		return nil, status.Error(codes.DeadlineExceeded, "Gateway heartbeat lease expired"), ""
+	case <-stream.Context().Done():
+		return nil, stream.Context().Err(), ""
+	case reason := <-changed:
+		return nil, nil, reason
+	}
+}
+
 func (h *ControlHandler) mapAuthenticationReceiveError(operation string, err error) error {
 	if errors.Is(err, io.EOF) {
 		return status.Error(codes.Unauthenticated, "Gateway closed the authentication stream")
@@ -587,8 +814,8 @@ func (h *ControlHandler) releaseSession(sessionID, nodeID string) {
 }
 
 func mapRuntimeRepositoryError(operation string, err error) error {
-	if errors.Is(err, auth.ErrGatewayNotFound) || errors.Is(err, auth.ErrGatewayNotAllowed) || errors.Is(err, auth.ErrPublicKeyMismatch) {
-		return status.Error(codes.Unauthenticated, "Gateway authorization has changed")
+	if errors.Is(err, auth.ErrGatewayNotFound) || errors.Is(err, auth.ErrGatewayNotAllowed) || errors.Is(err, auth.ErrClientNotFound) || errors.Is(err, auth.ErrClientNotAllowed) || errors.Is(err, auth.ErrPublicKeyMismatch) {
+		return status.Error(codes.Unauthenticated, "node authorization has changed")
 	}
 	if errors.Is(err, report.ErrInvalidRuntimeStatus) {
 		return status.Error(codes.InvalidArgument, "Gateway runtime status is invalid")

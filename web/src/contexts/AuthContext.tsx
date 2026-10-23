@@ -177,7 +177,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const canAccessRoute = (pathname: string): boolean => {
     const target = pathname.split('?')[0].replace(/\/$/, '') || '/';
     if (target === '/profile') return true;
-    if ((target === '/users' || target.startsWith('/users/') || target === '/groups') && !hasPermission('iam.user.read')) return false;
+    if ((target === '/users' || target.startsWith('/users/') || target === '/employee-users' || target === '/groups') && !hasPermission('iam.user.read')) return false;
     if (target === '/roles' || target === '/permissions' || target === '/api-mappings' || target === '/menus') {
       if (!hasPermission('iam.role.read')) return false;
     }

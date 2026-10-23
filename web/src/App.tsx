@@ -10,6 +10,7 @@ import { NodeList } from './pages/Nodes/NodeList';
 import { NodeDetail } from './pages/Nodes/NodeDetail';
 import { Topology } from './pages/Topology';
 import { UserList } from './pages/Users/UserList';
+import { EmployeeList } from './pages/Users/EmployeeList';
 import { GroupList } from './pages/Users/GroupList';
 import { Devices } from './pages/Devices';
 import { Sites } from './pages/Sites';
@@ -54,6 +55,7 @@ export default function App() {
               <Route path="topology" element={<Topology />} />
               <Route path="resources" element={<Resources />} />
               <Route path="users" element={<UserList />} />
+              <Route path="employee-users" element={<EmployeeList />} />
               <Route path="groups" element={<GroupList />} />
               <Route path="roles" element={<Roles />} />
               <Route path="menus" element={<Menus />} />

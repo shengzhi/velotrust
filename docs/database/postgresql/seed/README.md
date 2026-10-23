@@ -27,7 +27,7 @@ the same transaction, regardless of whether bootstrap runs before or after
 migration `004`.
 
 `006_resource_permissions.sql` initializes the system resource and permission
-catalog for IAM, gateway registration, and IPAM, then grants every active
+catalog for IAM users and groups, gateway registration, and IPAM, then grants every active
 catalog permission to the active system `platform_admin` role. It upserts catalog
 metadata, does not bump versions when nothing changed, preserves deliberately
 disabled resource/permission status, and adds missing role grants without
@@ -38,6 +38,18 @@ apply it manually from the repository root:
 ```sh
 psql "$DATABASE_DSN" -v ON_ERROR_STOP=1 -f docs/database/postgresql/seed/006_resource_permissions.sql
 ```
+
+`008_employee_user_menu.sql` adds a dedicated “员工用户” page under the
+“零信任安全策略” directory and grants that navigation entry to active
+`platform_admin` roles. The executable migration is
+`management/migrations/postgresql/023_iam_employee_users_menu.sql` and runs as
+part of the normal Management migration process. The page manages employee
+identities separately from Management login accounts.
+
+Migration `026_iam_group_management_permissions.sql` adds `iam.group.read` and
+`iam.group.write` for the “安全用户组” page and grants them to an existing
+platform administrator. The repeatable `006_resource_permissions.sql` seed
+also includes these permissions, so a later seed run repairs a missing grant.
 
 The versioned migration `management/migrations/postgresql/014_network_site_labels.sql`
 renames the existing site menu, resource, and permission display names to
