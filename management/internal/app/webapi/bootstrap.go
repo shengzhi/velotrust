@@ -14,6 +14,8 @@ import (
 	"velotrust/management/internal/handler/iam"
 	ipamHandler "velotrust/management/internal/handler/ipam"
 	nodeHandler "velotrust/management/internal/handler/node"
+	policyHandler "velotrust/management/internal/handler/policy"
+	resourceHandler "velotrust/management/internal/handler/resource"
 	siteHandler "velotrust/management/internal/handler/site"
 	"velotrust/management/internal/lib/cache"
 	"velotrust/management/internal/lib/logger"
@@ -23,10 +25,12 @@ import (
 	appIPAMRepo "velotrust/management/internal/repository/ipam"
 	appNodeRepo "velotrust/management/internal/repository/node"
 	appSiteRepo "velotrust/management/internal/repository/site"
+	appZTNARepo "velotrust/management/internal/repository/ztna"
 	appEnrollmentService "velotrust/management/internal/service/enrollment"
 	appIAMService "velotrust/management/internal/service/iam"
 	appIPAMService "velotrust/management/internal/service/ipam"
 	appNodeService "velotrust/management/internal/service/node"
+	appPolicyService "velotrust/management/internal/service/policy"
 	appSiteService "velotrust/management/internal/service/site"
 	management "velotrust/management/runtime"
 	"velotrust/pkg/ioc"
@@ -141,6 +145,15 @@ func Build(conf *config.Config, listenAddr, version string) (*management.Server,
 		_ = db.Close()
 		return nil, nil, nil, fmt.Errorf("resolve virtual-node service from IOC: %w", err)
 	}
+	policyService, err := ioc.GetObject[*appPolicyService.Service]()
+	if err != nil {
+		if ceremonyCloser != nil {
+			_ = ceremonyCloser.Close()
+		}
+		_ = service.Close()
+		_ = db.Close()
+		return nil, nil, nil, fmt.Errorf("resolve access-policy service from IOC: %w", err)
+	}
 	server, err := management.New(management.Config{
 		ListenAddr: listenAddr, Version: version, IdentityResolver: resolver,
 		TrustedProxies: conf.HTTP.TrustedProxies,
@@ -164,6 +177,12 @@ func Build(conf *config.Config, listenAddr, version string) (*management.Server,
 			return err
 		}
 		if err := nodeHandler.Register(rpc, nodeService, service); err != nil {
+			return err
+		}
+		if err := policyHandler.Register(rpc, policyService, service); err != nil {
+			return err
+		}
+		if err := resourceHandler.Register(rpc, policyService, service); err != nil {
 			return err
 		}
 		return nil
@@ -301,6 +320,24 @@ func registerDependencies(conf *config.Config, db *database.Database, ceremonySt
 			return nil, err
 		}
 		return appNodeService.New(store, permissions)
+	}, ioc.Singleton)
+	ioc.RegistInterfaceFunc[appZTNARepo.Store, appZTNARepo.Repository](func() (*appZTNARepo.Repository, error) {
+		sharedDB, err := ioc.GetObject[*database.Database]()
+		if err != nil {
+			return nil, err
+		}
+		return appZTNARepo.New(sharedDB)
+	}, ioc.Singleton)
+	ioc.RegistObjectFunc[appPolicyService.Service](func() (*appPolicyService.Service, error) {
+		store, err := ioc.GetObject[appZTNARepo.Store]()
+		if err != nil {
+			return nil, err
+		}
+		permissions, err := ioc.GetObject[*appIAMService.Service]()
+		if err != nil {
+			return nil, err
+		}
+		return appPolicyService.New(store, permissions)
 	}, ioc.Singleton)
 	dependencyRegistered = true
 	return nil

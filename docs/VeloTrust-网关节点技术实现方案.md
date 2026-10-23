@@ -290,7 +290,7 @@ HUB 管理模式下，Gateway 关联的活动站点默认启用 Overlay 到站�
 - NAT 使用 nftables 前缀 DNAT，将从隧道进入的目标影子前缀映射到真实前缀。HUB 会为每个活动关联站点自动生成 Overlay 全局网段到站点真实网段的 Masquerade，保证私网响应回到 Gateway；当前 Overlay 仅支持 IPv4，关联 IPv6 站点会被拒绝。静态模式也保留限定隧道来源、目标前缀和出口接口的固定地址 SNAT 能力。转发 ACL 匹配 DNAT 后的目标地址和 SNAT 前的来源地址，因此 DNAT ACL 目标应使用真实资源网段，SNAT ACL 来源应使用客户端原始地址。
 - Agent 在应用变更前阻断隧道转发；只有隧道、防火墙、路由、NAT 和转发开关全部应用成功后才解除阻断。正常退出会阻断流量、删除受管隧道和路由，并恢复本进程修改过的转发 sysctl 值。
 
-当前 Gateway 支持本地配置与 HUB 配置同步。HUB 从 IPAM 租约、活动 Peer、关联站点网络和 NAT 台账编译快照；私钥、接口名、监听端口、MTU 和 HUB 连接设置保留在本机。ACL 规则目前没有稳定的数据库编译格式，因此编译快照保持空规则集并默认拒绝。配置不合法、业务数据不完整或同步失败时 Gateway fail-closed。进程被强制终止时，内核 WireGuard 接口、最后一次成功的 nftables 规则及 Docker `DOCKER-USER` 中的镜像规则可能暂时保留，直到服务重启或运维清理；受控服务自动重启和后续配置租约仍需完善崩溃收敛。
+当前 Gateway 支持本地配置与 HUB 配置同步。HUB 从 IPAM 租约、活动 Peer、关联站点网络、NAT 台账和 Management 当前访问策略编译快照；ACL 按策略及规则优先级转换为 Gateway 可执行规则，空规则集默认拒绝。私钥、接口名、监听端口、MTU 和 HUB 连接设置保留在本机。配置不合法、业务数据不完整或同步失败时 Gateway fail-closed。进程被强制终止时，内核 WireGuard 接口、最后一次成功的 nftables 规则及 Docker `DOCKER-USER` 中的镜像规则可能暂时保留，直到服务重启或运维清理；受控服务自动重启和后续配置租约仍需完善崩溃收敛。
 
 ---
 

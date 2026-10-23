@@ -72,6 +72,7 @@ func logTunnelConfiguration(desired config.Tunnel) {
 		}
 		slog.Debug("gateway WireGuard peer configured",
 			"peer_id", configuredPeer.ID,
+			"peer_name", configuredPeer.PeerName,
 			"public_key_fingerprint", fingerprint,
 			"endpoint", configuredPeer.Endpoint,
 			"allowed_ips", configuredPeer.AllowedIPs,

@@ -2,6 +2,7 @@ package node
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -38,38 +39,39 @@ func New(db *database.Database) (*Repository, error) {
 }
 
 type nodeRow struct {
-	ID                 int64      `xorm:"'id'"`
-	VersionNo          int64      `xorm:"'version_no'"`
-	NodeName           string     `xorm:"'node_name'"`
-	NodeCode           string     `xorm:"'node_code'"`
-	NodeType           string     `xorm:"'node_type'"`
-	NodeStatus         string     `xorm:"'node_status'"`
-	ConnectionStatus   string     `xorm:"'connection_status'"`
-	AgentVersion       *string    `xorm:"'agent_version'"`
-	ControlEndpoint    *string    `xorm:"'control_endpoint'"`
-	PublicEndpoint     *string    `xorm:"'public_endpoint'"`
-	PrivateEndpoint    *string    `xorm:"'private_endpoint'"`
-	IPAMAddress        *string    `xorm:"'ipam_address'"`
-	PublicKey          *string    `xorm:"'public_key'"`
-	LastHeartbeatAt    *time.Time `xorm:"'last_heartbeat_at'"`
-	LastConfigHash     *string    `xorm:"'last_config_hash'"`
-	ActualConfigHash   *string    `xorm:"'actual_config_hash'"`
-	CapabilitiesJSON   []byte     `xorm:"'capabilities_json'"`
-	HealthStatus       string     `xorm:"'health_status'"`
-	GatewayType        *string    `xorm:"'gateway_type'"`
-	GatewayNetworkName *string    `xorm:"'gateway_network_name'"`
-	RequireApproval    bool       `xorm:"'require_approval'"`
-	RegisteredAt       *time.Time `xorm:"'registered_at'"`
-	CreatedAt          time.Time  `xorm:"'created_at'"`
-	NetworksJSON       []byte     `xorm:"'networks_json'"`
-	PeersJSON          []byte     `xorm:"'peers_json'"`
-	DeviceID           *int64     `xorm:"'device_id'"`
-	DeviceName         *string    `xorm:"'device_name'"`
-	DeviceType         *string    `xorm:"'device_type'"`
-	DevicePlatform     *string    `xorm:"'device_platform'"`
-	DeviceStatus       *string    `xorm:"'device_status'"`
-	OwnerUserID        *int64     `xorm:"'owner_user_id'"`
-	OwnerUsername      *string    `xorm:"'owner_username'"`
+	ID                 int64        `xorm:"'id'"`
+	VersionNo          int64        `xorm:"'version_no'"`
+	NodeName           string       `xorm:"'node_name'"`
+	NodeCode           string       `xorm:"'node_code'"`
+	NodeType           string       `xorm:"'node_type'"`
+	NodeStatus         string       `xorm:"'node_status'"`
+	ConnectionStatus   string       `xorm:"'connection_status'"`
+	AgentVersion       *string      `xorm:"'agent_version'"`
+	ControlEndpoint    *string      `xorm:"'control_endpoint'"`
+	PublicEndpoint     *string      `xorm:"'public_endpoint'"`
+	PrivateEndpoint    *string      `xorm:"'private_endpoint'"`
+	IPAMAddress        *string      `xorm:"'ipam_address'"`
+	PublicKey          *string      `xorm:"'public_key'"`
+	LastHeartbeatAt    sql.NullTime `xorm:"'last_heartbeat_at'"`
+	LastConfigHash     *string      `xorm:"'last_config_hash'"`
+	ActualConfigHash   *string      `xorm:"'actual_config_hash'"`
+	CapabilitiesJSON   []byte       `xorm:"'capabilities_json'"`
+	HealthStatus       string       `xorm:"'health_status'"`
+	GatewayType        *string      `xorm:"'gateway_type'"`
+	GatewayNetworkName *string      `xorm:"'gateway_network_name'"`
+	RequireApproval    bool         `xorm:"'require_approval'"`
+	RegisteredAt       *time.Time   `xorm:"'registered_at'"`
+	CreatedAt          time.Time    `xorm:"'created_at'"`
+	NetworksJSON       []byte       `xorm:"'networks_json'"`
+	PeersJSON          []byte       `xorm:"'peers_json'"`
+	GatewayGroupsJSON  []byte       `xorm:"'gateway_groups_json'"`
+	DeviceID           *int64       `xorm:"'device_id'"`
+	DeviceName         *string      `xorm:"'device_name'"`
+	DeviceType         *string      `xorm:"'device_type'"`
+	DevicePlatform     *string      `xorm:"'device_platform'"`
+	DeviceStatus       *string      `xorm:"'device_status'"`
+	OwnerUserID        *int64       `xorm:"'owner_user_id'"`
+	OwnerUsername      *string      `xorm:"'owner_username'"`
 }
 
 const nodeViewQuery = `
@@ -103,6 +105,15 @@ SELECT n.id, n.version_no, n.node_name, n.node_code, n.node_type, n.node_status,
            JOIN t_ztna_tunnel tunnel ON tunnel.id = peer.tunnel_id
            WHERE peer.node_id = n.id
        ), '[]'::json) AS peers_json,
+       COALESCE((
+           SELECT json_agg(json_build_object(
+               'id', security_group.id, 'name', security_group.group_name,
+               'code', security_group.group_code, 'status', security_group.status
+           ) ORDER BY security_group.group_name, security_group.id)
+           FROM public.t_ztna_gateway_group_binding AS binding
+           JOIN public.t_iam_group AS security_group ON security_group.id=binding.group_id
+           WHERE binding.gateway_node_id=n.id
+       ), '[]'::json) AS gateway_groups_json,
        linked_device.device_id, linked_device.device_name, linked_device.device_type,
        linked_device.device_platform, linked_device.device_status,
        linked_device.owner_user_id, linked_device.owner_username
@@ -405,17 +416,23 @@ func (r *Repository) loadNodes(ctx *servicecontext.Context, id int64) ([]model.V
 }
 
 func toNodeView(row nodeRow) (model.VirtualNodeView, error) {
+	var lastHeartbeatAt *time.Time
+	if row.LastHeartbeatAt.Valid {
+		utc := row.LastHeartbeatAt.Time.UTC()
+		lastHeartbeatAt = &utc
+	}
 	item := model.VirtualNodeView{
 		ID: row.ID, VersionNo: row.VersionNo, NodeName: row.NodeName, NodeCode: row.NodeCode,
 		NodeType: row.NodeType, NodeStatus: row.NodeStatus, ConnectionStatus: row.ConnectionStatus, AgentVersion: row.AgentVersion,
 		ControlEndpoint: row.ControlEndpoint, PublicEndpoint: row.PublicEndpoint,
 		PrivateEndpoint: row.PrivateEndpoint, IPAMAddress: row.IPAMAddress, PublicKey: row.PublicKey,
-		LastHeartbeatAt: row.LastHeartbeatAt, LastConfigHash: row.LastConfigHash,
+		LastHeartbeatAt: lastHeartbeatAt, LastConfigHash: row.LastConfigHash,
 		ActualConfigHash: row.ActualConfigHash, HealthStatus: row.HealthStatus,
 		GatewayType: row.GatewayType, GatewayNetworkName: row.GatewayNetworkName,
 		RequireApproval: row.RequireApproval, RegisteredAt: row.RegisteredAt,
 		CreatedAt: row.CreatedAt, Networks: []model.VirtualNodeNetwork{}, Peers: []model.VirtualNodePeer{},
-		DeviceID: row.DeviceID, DeviceName: row.DeviceName, DeviceType: row.DeviceType,
+		GatewayGroups: []model.VirtualNodeGroup{},
+		DeviceID:      row.DeviceID, DeviceName: row.DeviceName, DeviceType: row.DeviceType,
 		DevicePlatform: row.DevicePlatform, DeviceStatus: row.DeviceStatus,
 		OwnerUserID: row.OwnerUserID, OwnerUsername: row.OwnerUsername,
 	}
@@ -433,6 +450,11 @@ func toNodeView(row nodeRow) (model.VirtualNodeView, error) {
 	if len(row.PeersJSON) != 0 {
 		if err := json.Unmarshal(row.PeersJSON, &item.Peers); err != nil {
 			return model.VirtualNodeView{}, fmt.Errorf("decode tunnel peers: %w", err)
+		}
+	}
+	if len(row.GatewayGroupsJSON) != 0 {
+		if err := json.Unmarshal(row.GatewayGroupsJSON, &item.GatewayGroups); err != nil {
+			return model.VirtualNodeView{}, fmt.Errorf("decode Gateway security-group bindings: %w", err)
 		}
 	}
 	return item, nil
@@ -527,6 +549,11 @@ func (r *Repository) SetNodeStatus(ctx *servicecontext.Context, actorID, nodeID 
 		if _, err := accesschanges.CreateAccessChange(ctx, tx, "node", current.ID, changeType); err != nil {
 			return fmt.Errorf("queue Gateway authorization refresh: %w", err)
 		}
+		if current.NodeType == "gateway" {
+			if err := accesschanges.CreateGatewayGroupClientRefreshes(ctx, tx, current.ID); err != nil {
+				return fmt.Errorf("queue Client refresh after Gateway status change: %w", err)
+			}
+		}
 		return nil
 	})
 }
@@ -617,6 +644,11 @@ func (r *Repository) SetNodePublicEndpoint(ctx *servicecontext.Context, actorID,
 			"public_endpoint_to":   optionalString(endpoint),
 		}); err != nil {
 			return err
+		}
+		if current.NodeType == "gateway" {
+			if err := accesschanges.CreateGatewayGroupClientRefreshes(ctx, tx, current.ID); err != nil {
+				return fmt.Errorf("queue Client refresh after Gateway endpoint change: %w", err)
+			}
 		}
 		return nil
 	})

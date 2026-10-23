@@ -52,6 +52,9 @@ const businessMessages: Record<string, string> = {
   ZTNA_NODE_VERSION_CONFLICT: '节点信息已被其他操作修改，请刷新后重试。',
   ZTNA_NODE_TRANSITION_DENIED: '当前节点状态不允许执行此状态变更。',
   ZTNA_NODE_ACTIVATION_REQUIRES_REGISTRATION: '节点完成注册并提交公钥后才能启用。',
+  ZTNA_POLICY_INVALID_ARGUMENT: '访问策略或 ACL 规则无效，请检查网段、协议、端口和 Gateway。',
+  ZTNA_POLICY_NOT_FOUND: '访问策略不存在或已被删除。',
+  ZTNA_POLICY_VERSION_CONFLICT: '访问策略已被其他管理员修改，请刷新后重试。',
 };
 
 function errorMessage(error: RPCErrorPayload | null | undefined): string {

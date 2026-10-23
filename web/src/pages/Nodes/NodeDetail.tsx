@@ -52,26 +52,21 @@ export const NodeDetail: React.FC = () => {
   const [copied, setCopied] = useState(false);
   const [gatewayPools, setGatewayPools] = useState<IPAMPool[]>([]);
   const [gatewayLease, setGatewayLease] = useState<IPAMLease | null>(null);
-  const [gatewayTunnels, setGatewayTunnels] = useState<{ id: number; code: string; network_name?: string }[]>([]);
-  const [selectedGatewayTunnel, setSelectedGatewayTunnel] = useState('');
   const [gatewayIPAMLoading, setGatewayIPAMLoading] = useState(false);
   const [gatewayIPAMError, setGatewayIPAMError] = useState('');
   const [selectedGatewayPool, setSelectedGatewayPool] = useState('');
   const [requestedGatewayIP, setRequestedGatewayIP] = useState('');
   const [gatewayAddressSaving, setGatewayAddressSaving] = useState(false);
-  const [gatewayTunnelSaving, setGatewayTunnelSaving] = useState(false);
   const [publicEndpointInput, setPublicEndpointInput] = useState('');
   const [publicEndpointEditing, setPublicEndpointEditing] = useState(false);
   const [publicEndpointSaving, setPublicEndpointSaving] = useState(false);
-
   const loadGatewayAddress = async (gateway: VirtualNode) => {
     setGatewayIPAMLoading(true);
     setGatewayIPAMError('');
     try {
-      const [pools, leases, tunnels] = await Promise.all([
+      const [pools, leases] = await Promise.all([
         ipamApi.listPools(),
         ipamApi.listLeases(),
-        virtualNodeApi.listGatewayTunnelOptions(),
       ]);
       const activeGatewayPools = pools.filter((pool) => pool.type === 'Gateway' && pool.status === 'active');
       const activeGatewayLeases = leases
@@ -82,12 +77,6 @@ export const NodeDetail: React.FC = () => {
           ?? activeGatewayLeases.find((item) => item.target_name === gateway.node_name && !item.wireguard_pubkey)
         : activeGatewayLeases.find((item) => item.target_name === gateway.node_name);
       setGatewayPools(activeGatewayPools);
-      setGatewayTunnels(tunnels);
-      const currentTunnel = gateway.peers.find((peer) => peer.status === 'active')?.tunnel_id;
-      setSelectedGatewayTunnel((current) => {
-        if (currentTunnel && tunnels.some((tunnel) => tunnel.id === currentTunnel)) return String(currentTunnel);
-        return tunnels.some((tunnel) => String(tunnel.id) === current) ? current : String(tunnels[0]?.id ?? '');
-      });
       setGatewayLease(lease ?? null);
       setSelectedGatewayPool((current) => activeGatewayPools.some((pool) => String(pool.id) === current)
         ? current
@@ -118,8 +107,8 @@ export const NodeDetail: React.FC = () => {
         if (!manualRefresh) setTargetStatus('');
       }
       if (refreshGatewayDetails && result.node_type === 'gateway') {
-        const gatewayAddressLoading = loadGatewayAddress(result);
-        if (manualRefresh) await gatewayAddressLoading;
+        const detailLoad = loadGatewayAddress(result);
+        if (manualRefresh) await detailLoad;
       }
     } catch (err) {
       setRefreshFailed(true);
@@ -198,25 +187,6 @@ export const NodeDetail: React.FC = () => {
     }
   };
 
-  const assignGatewayTunnel = async () => {
-    if (!node || node.node_type !== 'gateway') return;
-    const tunnelID = Number(selectedGatewayTunnel);
-    if (!Number.isSafeInteger(tunnelID) || tunnelID <= 0) {
-      error('请选择活动的逻辑隧道');
-      return;
-    }
-    setGatewayTunnelSaving(true);
-    try {
-      await virtualNodeApi.assignGatewayTunnel(node, tunnelID);
-      success('Gateway 已加入逻辑隧道；HUB 将在控制通道同步配置。Client IP 由 IPAM 地址池员工组关联分配，Gateway 访问由访问策略控制');
-      await loadNode();
-    } catch (cause) {
-      error(cause instanceof Error ? cause.message : '加入逻辑隧道失败');
-    } finally {
-      setGatewayTunnelSaving(false);
-    }
-  };
-
   const copyPublicKey = async () => {
     if (!node?.public_key) return;
     try {
@@ -257,6 +227,7 @@ export const NodeDetail: React.FC = () => {
   const connectionStatus = refreshFailed ? 'unknown' : node.connection_status;
   const leasedGatewayAddress = gatewayLease ? `${gatewayLease.virtual_ip}/32` : '';
   const selectedPool = gatewayPools.find((pool) => String(pool.id) === selectedGatewayPool);
+  const gatewayGroups = node.gateway_groups;
 
   return (
     <div className="space-y-5">
@@ -275,7 +246,7 @@ export const NodeDetail: React.FC = () => {
           </div>
         </div>
         <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
-          <Button variant="outline" size="sm" disabled={refreshing || saving || gatewayAddressSaving || gatewayTunnelSaving} onClick={() => void loadNode(true)} className="gap-1.5">
+          <Button variant="outline" size="sm" disabled={refreshing || saving || gatewayAddressSaving} onClick={() => void loadNode(true)} className="gap-1.5">
             <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />刷新
           </Button>
           {approvalPending ? (
@@ -459,31 +430,30 @@ export const NodeDetail: React.FC = () => {
                 )}
               </div>
             )}
-            <div className="space-y-3 border-t border-slate-100 pt-4">
-              <div>
-                <div className="font-semibold text-slate-800">逻辑隧道成员关系</div>
-                <p className="mt-1 text-[11px] leading-relaxed text-slate-500">Gateway 加入逻辑隧道后，HUB 才能将该 Gateway Peer 下发给 Client，并依据关联网络生成访问路由。Client 的 IPAM 自动分配映射也要求隧道内存在已设置公网端点的活动 Gateway。</p>
+          </CardContent>
+        </Card>
+      )}
+
+      {node.node_type === 'gateway' && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Gateway 安全用户组准入</CardTitle>
+            <p className="text-xs text-slate-500">安全用户组绑定控制哪些 Client 可以建立到此 Gateway 的隧道连接。</p>
+          </CardHeader>
+          <CardContent className="space-y-2 text-xs">
+            {gatewayGroups === undefined ? (
+              <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-900">当前 Management 服务未返回安全用户组准入信息，请更新并重启 Management 服务后刷新此页面。</p>
+            ) : gatewayGroups.length > 0 ? (
+              <div className="flex flex-wrap gap-2">
+                {gatewayGroups.map((group) => (
+                  <Badge key={group.id} variant={group.status === 'active' ? 'success' : 'default'}>
+                    {group.name}{group.status !== 'active' ? ' · 已停用' : ''}
+                  </Badge>
+                ))}
               </div>
-              {node.peers.filter((peer) => peer.status === 'active').length > 0 && (
-                <div className="flex flex-wrap gap-2">
-                  {node.peers.filter((peer) => peer.status === 'active').map((peer) => (
-                    <Badge key={peer.id} variant="success">{peer.tunnel_code} · {peer.tunnel_ip}</Badge>
-                  ))}
-                </div>
-              )}
-              {gatewayTunnels.length > 0 ? (
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                  <Select value={selectedGatewayTunnel} onChange={(event) => setSelectedGatewayTunnel(event.target.value)} disabled={gatewayTunnelSaving} className="sm:max-w-md">
-                    <option value="">选择活动逻辑隧道</option>
-                    {gatewayTunnels.map((tunnel) => <option key={tunnel.id} value={tunnel.id}>{tunnel.code}{tunnel.network_name ? ` · ${tunnel.network_name}` : ''}</option>)}
-                  </Select>
-                  <Button onClick={() => void assignGatewayTunnel()} disabled={!selectedGatewayTunnel || !gatewayLease || !node.public_endpoint || gatewayTunnelSaving || gatewayIPAMLoading} isLoading={gatewayTunnelSaving} className="shrink-0">加入 / 切换隧道</Button>
-                </div>
-              ) : (
-                <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-900">系统还没有活动逻辑隧道，当前无法为此 Gateway 或 Client 建立可下发的隧道配置。</p>
-              )}
-              {(!gatewayLease || !node.public_endpoint) && <p className="text-[11px] text-amber-700">加入隧道前请先完成 Gateway IPAM 地址分配，并设置可被 Client 访问的公网 UDP 端点。</p>}
-            </div>
+            ) : (
+              <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-900">尚未绑定安全用户组。请到「零信任安全策略 → 安全用户组 → Gateway 准入」设置。</p>
+            )}
           </CardContent>
         </Card>
       )}
@@ -499,20 +469,14 @@ export const NodeDetail: React.FC = () => {
               <div className="space-y-3">
                 <div className="grid grid-cols-1 gap-3 rounded-lg border border-emerald-200 bg-emerald-50 p-4 sm:grid-cols-2">
                   <InfoRow label="IPAM 隧道地址" value={<span className="font-mono font-semibold">{node.ipam_address}/32</span>} />
-                  <InfoRow label="Peer 状态" value={node.peers.some((peer) => peer.status === 'active') ? '已加入活动隧道' : '尚未加入活动隧道'} />
+                  <InfoRow label="Gateway 准入" value="由员工所属安全用户组绑定决定" />
                 </div>
-                {node.peers.filter((peer) => peer.status === 'active').map((peer) => (
-                  <div key={peer.id} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                    <InfoRow label="逻辑隧道" value={peer.tunnel_code} />
-                    <InfoRow label="隧道地址" value={<span className="font-mono">{peer.tunnel_ip}</span>} />
-                  </div>
-                ))}
               </div>
             ) : (
               <div className="flex flex-col gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-amber-900 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <div className="font-semibold">HUB 尚未为此 Client 分配隧道 IP</div>
-                  <p className="mt-1 leading-relaxed">请确认员工已加入活动安全用户组；该组已配置活动的“用户组 → 隧道 → 动态 User-Device 地址池”规则；隧道中至少有一个已启用、已分配 Gateway IP 且设置了公网 UDP 端点的 Gateway。配置完成后，Client 保持连接或重新登录，HUB 会再次尝试分配。</p>
+                  <p className="mt-1 leading-relaxed">请确认员工所属的活动安全用户组已关联动态 User-Device 地址池。地址池负责分配 Overlay IP；Gateway 接入由安全用户组页面中的 Gateway 准入绑定决定。</p>
                 </div>
                 <Button variant="outline" size="sm" onClick={() => navigate('/ipam')} className="shrink-0">检查 IPAM 规则</Button>
               </div>

@@ -18,6 +18,8 @@ var methodPolicies = map[string]middleware.IAMMethodPolicy{
 	"GetNode":                  {Authenticated: true, Permission: "ztna.node.read"},
 	"GetAccessChangeStatus":    {Authenticated: true, Permission: "ztna.node.read"},
 	"ListGatewayTunnelOptions": {Authenticated: true, Permission: "ztna.tunnel.read"},
+	"ListGroupGatewayOptions":  {Authenticated: true, Permission: "ztna.node.read"},
+	"SetGroupGateways":         {Authenticated: true, Permission: "ztna.node.write"},
 	"CreateLogicalTunnel":      {Authenticated: true, Permission: "ztna.tunnel.write"},
 	"AssignGatewayTunnel":      {Authenticated: true, Permission: "ztna.tunnel.write"},
 	"SetNodeStatus":            {Authenticated: true, Permission: "ztna.node.write"},
@@ -102,6 +104,41 @@ func (h *Handler) ListGatewayTunnelOptions(ctx *jrpc.Context, _ *struct{}) (*Lis
 		return nil, err
 	}
 	return &ListGatewayTunnelOptionsReply{Items: items}, nil
+}
+
+type ListGroupGatewayOptionsArgs struct {
+	GroupID int64 `json:"group_id" validate:"required,gt=0"`
+}
+
+type ListGroupGatewayOptionsReply struct {
+	Items []model.GroupGatewayOption `json:"items"`
+}
+
+func (h *Handler) ListGroupGatewayOptions(ctx *jrpc.Context, args *ListGroupGatewayOptionsArgs) (*ListGroupGatewayOptionsReply, error) {
+	if args == nil {
+		return nil, errors.New("security-group ID is required")
+	}
+	items, err := h.service.ListGroupGatewayOptions(middleware.ServiceContext(ctx), args.GroupID)
+	if err != nil {
+		return nil, err
+	}
+	return &ListGroupGatewayOptionsReply{Items: items}, nil
+}
+
+type SetGroupGatewaysArgs struct {
+	GroupID         int64   `json:"group_id" validate:"required,gt=0"`
+	ExpectedVersion int64   `json:"expected_version" validate:"required,gt=0"`
+	GatewayIDs      []int64 `json:"gateway_ids" validate:"max=1000,dive,gt=0"`
+}
+
+func (h *Handler) SetGroupGateways(ctx *jrpc.Context, args *SetGroupGatewaysArgs) (*MutationReply, error) {
+	if args == nil {
+		return nil, errors.New("security-group Gateway binding arguments are required")
+	}
+	if err := h.service.SetGroupGateways(middleware.ServiceContext(ctx), args.GroupID, args.ExpectedVersion, args.GatewayIDs); err != nil {
+		return nil, err
+	}
+	return &MutationReply{Success: true}, nil
 }
 
 type CreateLogicalTunnelArgs struct {

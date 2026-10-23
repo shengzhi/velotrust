@@ -10,6 +10,8 @@ type Store interface {
 	GetNode(*servicecontext.Context, int64) (*model.VirtualNodeView, error)
 	GetAccessChangeStatus(*servicecontext.Context, string, int64) (*model.AccessChangeStatusView, error)
 	ListGatewayTunnelOptions(*servicecontext.Context) ([]model.GatewayTunnelOption, error)
+	ListGroupGatewayOptions(*servicecontext.Context, int64) ([]model.GroupGatewayOption, error)
+	SetGroupGateways(*servicecontext.Context, int64, int64, int64, []int64) error
 	CreateLogicalTunnel(*servicecontext.Context, int64, string, string) (*model.GatewayTunnelOption, error)
 	AssignGatewayTunnel(*servicecontext.Context, int64, int64, int64, int64) error
 	SetNodeStatus(*servicecontext.Context, int64, int64, string, int64) error

@@ -95,6 +95,7 @@ func (t Tunnel) EffectiveMTU() int {
 
 type Peer struct {
 	ID                  string   `json:"id,omitempty"`
+	PeerName            string   `json:"peer_name,omitempty"`
 	PublicKey           string   `json:"public_key"`
 	Endpoint            string   `json:"endpoint"`
 	AllowedIPs          []string `json:"allowed_ips"`

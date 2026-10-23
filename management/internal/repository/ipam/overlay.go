@@ -10,6 +10,7 @@ import (
 
 	servicecontext "velotrust/management/internal/context"
 	model "velotrust/management/internal/model/ipam"
+	accesschanges "velotrust/management/internal/repository/ztna"
 	"velotrust/shared/repository/database"
 	"xorm.io/xorm"
 )
@@ -190,7 +191,7 @@ func (r *Repository) CreatePool(ctx *servicecontext.Context, actorID int64, pool
 		if err := assertPoolCIDRAvailable(s, pool.NetworkCIDR, 0); err != nil {
 			return err
 		}
-		if err := validatePoolClientGroup(s, pool, 0); err != nil {
+		if err := validatePoolClientGroup(s, pool); err != nil {
 			return err
 		}
 		pool.Status = model.StatusActive
@@ -242,7 +243,7 @@ func (r *Repository) UpdatePool(ctx *servicecontext.Context, actorID int64, pool
 				return err
 			}
 		}
-		if err := validatePoolClientGroup(s, pool, pool.ID); err != nil {
+		if err := validatePoolClientGroup(s, pool); err != nil {
 			return err
 		}
 		pool.Update(ctx.UserName())
@@ -260,7 +261,7 @@ func (r *Repository) UpdatePool(ctx *servicecontext.Context, actorID int64, pool
 	})
 }
 
-func validatePoolClientGroup(session *xorm.Session, pool *model.Pool, currentPoolID int64) error {
+func validatePoolClientGroup(session *xorm.Session, pool *model.Pool) error {
 	if pool == nil || pool.ClientGroupID == nil {
 		return nil
 	}
@@ -277,16 +278,6 @@ func validatePoolClientGroup(session *xorm.Session, pool *model.Pool, currentPoo
 	}
 	if !found {
 		return errors.New("selected employee group is missing or disabled")
-	}
-	var other struct {
-		PoolName string `xorm:"'pool_name'"`
-	}
-	found, err = session.SQL("SELECT pool_name FROM t_ztna_address_pool WHERE client_group_id=? AND id<>? LIMIT 1", groupID, currentPoolID).Get(&other)
-	if err != nil {
-		return fmt.Errorf("check employee group address pool uniqueness: %w", err)
-	}
-	if found {
-		return fmt.Errorf("employee group is already associated with address pool %q", other.PoolName)
 	}
 	return nil
 }
@@ -453,6 +444,25 @@ func (r *Repository) AllocateAddress(ctx *servicecontext.Context, actorID int64,
 		if err := writeAudit(ctx, tx, audit); err != nil {
 			return fmt.Errorf("write IP address allocation audit: %w", err)
 		}
+		if lease.NodeType == "Gateway" {
+			var gateway struct {
+				ID int64 `xorm:"'id'"`
+			}
+			found, err := s.SQL(`SELECT id FROM public.t_ztna_node
+				WHERE node_type='gateway' AND ((?<>'' AND public_key=?) OR node_name=?)
+				ORDER BY id LIMIT 1`, lease.WireGuardPubKey, lease.WireGuardPubKey, lease.TargetName).Get(&gateway)
+			if err != nil {
+				return fmt.Errorf("resolve Gateway after IPAM address allocation: %w", err)
+			}
+			if found {
+				if _, err := accesschanges.CreateAccessChange(ctx, tx, "node", gateway.ID, "authorization_changed"); err != nil {
+					return fmt.Errorf("queue Gateway refresh after IPAM address allocation: %w", err)
+				}
+				if err := accesschanges.CreateGatewayGroupClientRefreshes(ctx, tx, gateway.ID); err != nil {
+					return fmt.Errorf("queue Client refresh after Gateway IPAM address allocation: %w", err)
+				}
+			}
+		}
 		return nil
 	})
 }
@@ -490,6 +500,23 @@ func (r *Repository) ReleaseLease(ctx *servicecontext.Context, actorID, leaseID 
 		audit.ChangesJSON = []byte(fmt.Sprintf(`{"address":"%s","status":"released"}`, lease.VirtualIP))
 		if err := writeAudit(ctx, tx, audit); err != nil {
 			return fmt.Errorf("write IP address release audit: %w", err)
+		}
+		if lease.NodeType == "Gateway" && lease.WireGuardPubKeyRaw != nil {
+			var gateway struct {
+				ID int64 `xorm:"'id'"`
+			}
+			found, err := s.SQL("SELECT id FROM public.t_ztna_node WHERE node_type='gateway' AND public_key=?", *lease.WireGuardPubKeyRaw).Get(&gateway)
+			if err != nil {
+				return fmt.Errorf("resolve Gateway after IPAM address release: %w", err)
+			}
+			if found {
+				if _, err := accesschanges.CreateAccessChange(ctx, tx, "node", gateway.ID, "authorization_changed"); err != nil {
+					return fmt.Errorf("queue Gateway refresh after IPAM address release: %w", err)
+				}
+				if err := accesschanges.CreateGatewayGroupClientRefreshes(ctx, tx, gateway.ID); err != nil {
+					return fmt.Errorf("queue Client refresh after Gateway IPAM address release: %w", err)
+				}
+			}
 		}
 		return nil
 	})
@@ -639,6 +666,9 @@ func (r *Repository) saveNATMapping(ctx *servicecontext.Context, actorID int64, 
 		audit.TargetID, audit.TargetName = fmt.Sprintf("%d", mapping.ID), mapping.NetworkName
 		if err := writeAudit(ctx, tx, audit); err != nil {
 			return fmt.Errorf("write NAT mapping audit: %w", err)
+		}
+		if err := accesschanges.CreateSitePolicyRefreshes(ctx, tx, mapping.NetworkID); err != nil {
+			return err
 		}
 		return nil
 	})

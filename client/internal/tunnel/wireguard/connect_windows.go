@@ -32,6 +32,7 @@ import (
 
 type configuredGateway struct {
 	id                 string
+	peerName           string
 	key                wgtypes.Key
 	configuredEndpoint string
 	endpoint           *net.UDPAddr
@@ -113,6 +114,7 @@ func ConnectWithReady(ctx context.Context, instanceID string, configPath string,
 	for _, gateway := range gateways {
 		slog.Debug("resolved gateway WireGuard endpoint",
 			"gateway_id", gateway.id,
+			"peer_name", gateway.peerName,
 			"configured_endpoint", gateway.configuredEndpoint,
 			"resolved_endpoint", gateway.endpoint.String(),
 			"peer_key_fingerprint", keyFingerprint(gateway.key),
@@ -175,6 +177,7 @@ func ConnectWithReady(ctx context.Context, instanceID string, configPath string,
 	for _, gateway := range gateways {
 		slog.Debug("configured client WireGuard peer",
 			"gateway_id", gateway.id,
+			"peer_name", gateway.peerName,
 			"peer_key_fingerprint", keyFingerprint(gateway.key),
 			"endpoint", gateway.endpoint.String(),
 			"allowed_ips", gateway.allowedIPs,
@@ -262,6 +265,7 @@ func prepareGateways(peers []clientconfig.Peer) ([]configuredGateway, []string, 
 		}
 		gateway := configuredGateway{
 			id:                 id,
+			peerName:           peer.PeerName,
 			key:                peerKey,
 			configuredEndpoint: peer.Endpoint,
 			endpoint:           endpoint,

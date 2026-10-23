@@ -375,6 +375,7 @@ func logHubConfiguration(snapshot *hubv1.ConfigSnapshot, desired config.Config) 
 		slog.Debug("HUB Gateway configuration peer",
 			"task_id", snapshot.GetTaskId(),
 			"peer_id", peer.ID,
+			"peer_name", peer.PeerName,
 			"public_key_fingerprint", gatewayPublicKeyFingerprint(peer.PublicKey),
 			"endpoint", peer.Endpoint,
 			"allowed_ips", peer.AllowedIPs,

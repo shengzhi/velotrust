@@ -104,6 +104,12 @@ func (r *AccessChangeRepository) DispatchPending(ctx context.Context, notify fun
 			(event.subject_type='node' AND node.id=event.subject_id)
 			OR (event.subject_type='device' AND device.id=event.subject_id)
 			OR (event.subject_type='user' AND device.owner_user_id=event.subject_id)
+			OR (event.subject_type='policy' AND EXISTS (
+				SELECT 1 FROM public.t_ztna_policy_subject AS subject
+				JOIN public.t_iam_user_group AS membership ON membership.group_id=subject.subject_id
+				WHERE subject.policy_id=event.subject_id AND subject.subject_type='group'
+				  AND membership.user_id=device.owner_user_id
+			))
 		)
 		ORDER BY node.node_code
 		LIMIT 1000
@@ -118,6 +124,28 @@ func (r *AccessChangeRepository) DispatchPending(ctx context.Context, notify fun
 		// Client Agents need an immediate local tunnel teardown on disable. The
 		// active node/device/user state remains authoritative if this wakeup is
 		// missed or the Client reconnects to another HUB instance.
+		notify(target.NodeCode, reason)
+	}
+	var gatewayTargets []struct {
+		NodeCode   string `xorm:"'node_code'"`
+		ChangeType string `xorm:"'change_type'"`
+	}
+	if err := s.SQL(`
+		SELECT DISTINCT node.node_code, event.change_type
+		FROM public.t_ztna_access_change_event AS event
+		JOIN public.t_ztna_node AS node ON node.id=event.subject_id
+		WHERE event.status='pending' AND event.subject_type='node'
+		  AND node.node_type='gateway' AND node.node_status='active'
+		ORDER BY node.node_code
+		LIMIT 1000
+	`).Find(&gatewayTargets); err != nil {
+		return fmt.Errorf("load Gateway nodes with pending authorization changes: %w", err)
+	}
+	for _, target := range gatewayTargets {
+		reason := "ACCESS_CONFIGURATION_CHANGED"
+		if target.ChangeType == "disabled" {
+			reason = "ACCESS_REVOKED"
+		}
 		notify(target.NodeCode, reason)
 	}
 	if _, err := s.Exec(`
@@ -191,6 +219,47 @@ func (r *AccessChangeRepository) initializeTargets(ctx context.Context, eventID 
 		ON CONFLICT (event_id, gateway_node_id) DO NOTHING
 	`, r.hubActor, r.hubActor, eventID); err != nil {
 		return fmt.Errorf("create Gateway access-change deliveries: %w", err)
+	}
+	if _, err := s.Exec(`
+		INSERT INTO public.t_ztna_access_change_delivery (event_id, gateway_node_id, status, created_by, updated_by)
+		SELECT event.id, gateway.id, 'pending', ?, ?
+		FROM public.t_ztna_access_change_event AS event
+		JOIN public.t_ztna_node AS gateway
+		  ON gateway.id=event.subject_id AND gateway.node_type='gateway' AND gateway.node_status='active'
+		WHERE event.id=? AND event.subject_type='node'
+		ON CONFLICT (event_id, gateway_node_id) DO NOTHING
+	`, r.hubActor, r.hubActor, eventID); err != nil {
+		return fmt.Errorf("create direct Gateway authorization delivery: %w", err)
+	}
+	if _, err := s.Exec(`
+		INSERT INTO public.t_ztna_access_change_delivery (event_id, gateway_node_id, status, created_by, updated_by)
+		SELECT DISTINCT event.id, gateway.id, 'pending', ?, ?
+		FROM public.t_ztna_access_change_event AS event
+		JOIN public.t_ztna_device AS device ON (
+			(event.subject_type='user' AND device.owner_user_id=event.subject_id)
+			OR (event.subject_type='device' AND device.id=event.subject_id)
+			OR (event.subject_type='node' AND device.node_id=event.subject_id)
+		)
+		JOIN public.t_iam_user_group AS membership ON membership.user_id=device.owner_user_id
+		JOIN public.t_ztna_gateway_group_binding AS binding ON binding.group_id=membership.group_id
+		JOIN public.t_ztna_node AS gateway
+		  ON gateway.id=binding.gateway_node_id AND gateway.node_type='gateway' AND gateway.node_status='active'
+		WHERE event.id=? AND event.subject_type IN ('user','device','node')
+		  AND device.owner_user_id IS NOT NULL
+		ON CONFLICT (event_id, gateway_node_id) DO NOTHING
+	`, r.hubActor, r.hubActor, eventID); err != nil {
+		return fmt.Errorf("create Gateway deliveries for security-group-admitted Clients: %w", err)
+	}
+	if _, err := s.Exec(`
+		INSERT INTO public.t_ztna_access_change_delivery (event_id, gateway_node_id, status, created_by, updated_by)
+		SELECT event.id, gateway.id, 'pending', ?, ?
+		FROM public.t_ztna_access_change_event AS event
+		JOIN public.t_ztna_node AS gateway
+		  ON gateway.node_type='gateway' AND gateway.node_status='active'
+		WHERE event.id=? AND event.subject_type='policy'
+		ON CONFLICT (event_id, gateway_node_id) DO NOTHING
+	`, r.hubActor, r.hubActor, eventID); err != nil {
+		return fmt.Errorf("create Gateway deliveries for access-policy change: %w", err)
 	}
 	if _, err := s.Exec(`
 		UPDATE public.t_ztna_access_change_event

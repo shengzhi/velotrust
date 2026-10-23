@@ -106,10 +106,10 @@ type OverlayNetwork struct {
 func (OverlayNetwork) TableName() string { return "t_ztna_overlay_network" }
 
 type PoolGroupOption struct {
-	ID        int64  `json:"id"`
-	Name      string `json:"name"`
-	Code      string `json:"code"`
-	UserCount int64  `json:"user_count"`
+	ID        int64  `xorm:"'id'" json:"id"`
+	Name      string `xorm:"'name'" json:"name"`
+	Code      string `xorm:"'code'" json:"code"`
+	UserCount int64  `xorm:"'user_count'" json:"user_count"`
 }
 
 type Overview struct {

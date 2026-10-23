@@ -18,7 +18,7 @@ import {
   TableRow,
 } from '../components/ui/table';
 import { AccessChangeStatus, VirtualNode, virtualNodeApi } from '../services/node';
-import { formatRelativeTime } from '../utils/format';
+import { formatDateTime } from '../utils/format';
 
 const effectiveStatus = (node: VirtualNode) => node.device_status ?? node.node_status;
 
@@ -34,18 +34,22 @@ export const Devices: React.FC = () => {
   const [accessNotice, setAccessNotice] = useState<AccessChangeStatus | null>(null);
   const userParam = searchParams.get('userId');
 
-  const loadNodes = async () => {
-    setLoading(true);
+  const loadNodes = async (background = false) => {
+    if (!background) setLoading(true);
     try {
       setNodes((await virtualNodeApi.list()).filter((node) => node.node_type === 'client_agent'));
     } catch (err) {
-      error(err instanceof Error ? err.message : '加载客户端设备失败。');
+      if (!background) error(err instanceof Error ? err.message : '加载客户端设备失败。');
     } finally {
-      setLoading(false);
+      if (!background) setLoading(false);
     }
   };
 
-  useEffect(() => { void loadNodes(); }, []);
+  useEffect(() => {
+    void loadNodes();
+    const timer = window.setInterval(() => void loadNodes(true), 15000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const filteredNodes = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
@@ -173,7 +177,7 @@ export const Devices: React.FC = () => {
             ) : filteredNodes.map((node) => {
               const status = effectiveStatus(node);
               const canToggle = ['active', 'disabled'].includes(status) && ['active', 'disabled'].includes(node.node_status);
-              const online = node.health_status === 'healthy' && node.last_heartbeat_at && Date.now() - new Date(node.last_heartbeat_at).getTime() < 60000;
+              const online = node.connection_status === 'online';
               return (
                 <TableRow key={node.id}>
                   <TableCell>
@@ -184,9 +188,13 @@ export const Devices: React.FC = () => {
                   <TableCell>
                     <Badge variant="outline" className="gap-1">{getDeviceIcon(node.device_type)}{node.device_platform ?? node.device_type ?? '客户端'}</Badge>
                   </TableCell>
-                  <TableCell className="font-mono text-xs">{node.peers[0]?.tunnel_ip ?? '—'}</TableCell>
+                  <TableCell className="font-mono text-xs">{node.ipam_address ?? node.peers[0]?.tunnel_ip ?? '—'}</TableCell>
                   <TableCell><StatusBadge status={status} label={online ? '在线' : status === 'active' ? '离线 · 已授权' : undefined} /></TableCell>
-                  <TableCell className="text-xs text-slate-500">{node.last_heartbeat_at ? formatRelativeTime(node.last_heartbeat_at) : '从未连接'}</TableCell>
+                  <TableCell className="text-xs text-slate-600">
+                    {node.last_heartbeat_at ? (
+                      formatDateTime(node.last_heartbeat_at)
+                    ) : '从未连接'}
+                  </TableCell>
                   <TableCell className="text-right">
                     <Button variant={status === 'active' ? 'danger' : 'outline'} size="sm" disabled={!canToggle} onClick={() => setTarget(node)}>
                       <Power className="h-3.5 w-3.5" />{status === 'active' ? '立即禁用' : '启用'}

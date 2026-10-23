@@ -71,6 +71,27 @@ func (s *Service) ListGatewayTunnelOptions(ctx *servicecontext.Context) ([]model
 	return s.store.ListGatewayTunnelOptions(ctx)
 }
 
+func (s *Service) ListGroupGatewayOptions(ctx *servicecontext.Context, groupID int64) ([]model.GroupGatewayOption, error) {
+	if _, err := s.authorize(ctx, readPermission); err != nil {
+		return nil, err
+	}
+	if groupID <= 0 {
+		return nil, invalid("group_id", "安全用户组 ID 必须大于零")
+	}
+	return s.store.ListGroupGatewayOptions(ctx, groupID)
+}
+
+func (s *Service) SetGroupGateways(ctx *servicecontext.Context, groupID, expectedVersion int64, gatewayIDs []int64) error {
+	actorID, err := s.authorize(ctx, writePermission)
+	if err != nil {
+		return err
+	}
+	if groupID <= 0 || expectedVersion <= 0 {
+		return invalid("group_gateways", "安全用户组 ID 和版本号必须有效")
+	}
+	return s.store.SetGroupGateways(ctx, actorID, groupID, expectedVersion, gatewayIDs)
+}
+
 func (s *Service) CreateLogicalTunnel(ctx *servicecontext.Context, code, description string) (*model.GatewayTunnelOption, error) {
 	actorID, err := s.authorize(ctx, tunnelWritePermission)
 	if err != nil {

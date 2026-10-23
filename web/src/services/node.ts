@@ -25,6 +25,13 @@ export interface VirtualNodePeer {
   last_handshake_at?: string | null;
 }
 
+export interface VirtualNodeGroup {
+  id: number;
+  name: string;
+  code: string;
+  status: 'active' | 'disabled';
+}
+
 export interface VirtualNode {
   id: number;
   version_no: number;
@@ -51,6 +58,7 @@ export interface VirtualNode {
   created_at: string;
   networks: VirtualNodeNetwork[];
   peers: VirtualNodePeer[];
+  gateway_groups?: VirtualNodeGroup[];
   device_id?: number | null;
   device_name?: string | null;
   device_type?: string | null;
@@ -78,6 +86,14 @@ export interface GatewayTunnelOption {
   network_name?: string;
 }
 
+export interface GroupGatewayOption {
+  id: number;
+  name: string;
+  node_code: string;
+  status: VirtualNodeStatus;
+  bound: boolean;
+}
+
 export const virtualNodeApi = {
   list: () =>
     jrpcCall<{ items?: VirtualNode[] | null }>('NODE_ListNodes', {}).then((result) =>
@@ -93,6 +109,16 @@ export const virtualNodeApi = {
     jrpcCall<{ items?: GatewayTunnelOption[] | null }>('NODE_ListGatewayTunnelOptions', {}).then((result) =>
       Array.isArray(result?.items) ? result.items : [],
     ),
+  listGroupGatewayOptions: (groupID: number) =>
+    jrpcCall<{ items?: GroupGatewayOption[] | null }>('NODE_ListGroupGatewayOptions', { group_id: groupID }).then((result) =>
+      Array.isArray(result?.items) ? result.items : [],
+    ),
+  setGroupGateways: (groupID: number, expectedVersion: number, gatewayIDs: number[]) =>
+    jrpcCall<{ success: boolean }>('NODE_SetGroupGateways', {
+      group_id: groupID,
+      expected_version: expectedVersion,
+      gateway_ids: gatewayIDs,
+    }),
   createLogicalTunnel: (code: string, description: string) =>
     jrpcCall<GatewayTunnelOption>('NODE_CreateLogicalTunnel', { tunnel_code: code, description }),
   assignGatewayTunnel: (node: VirtualNode, tunnelID: number) =>

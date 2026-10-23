@@ -63,7 +63,7 @@ erDiagram
 | `pool_type` | `VARCHAR(32)` | 否 | — | 用途：Gateway、User-Device、Service-VIP；大小写以 DDL 枚举为准。 |
 | `allocation_mode` | `VARCHAR(16)` | 否 | — | 分配模式：static、dynamic。 |
 | `idp_group` | `VARCHAR(128)` | 是 | — | 身份组绑定标签；字符串元数据，当前无 IAM 用户组外键。 |
-| `client_group_id` | `BIGINT` | 是 | — | 员工 IAM 用户组；仅动态 `User-Device` 池可设置。HUB 据此自动分配 Client Overlay IP，不授予 Gateway 访问权限。 |
+| `client_group_id` | `BIGINT` | 是 | — | 员工 IAM 用户组；仅动态 `User-Device` 池可设置。多个地址池可以关联同一员工组；HUB 据此自动分配 Client Overlay IP，不授予 Gateway 访问权限。 |
 | `gateway_binding` | `VARCHAR(128)` | 是 | — | 网关绑定标签；字符串元数据，当前无节点外键。 |
 | `color` | `CHAR(7)` | 否 | `'#10b981'` | 界面颜色，格式为 #RRGGBB。 |
 | `description` | `VARCHAR(512)` | 是 | — | 地址池用途说明。 |
@@ -89,7 +89,6 @@ erDiagram
 |---|---|
 | `ix_t_ztna_address_pool_status` | `(status, pool_name)` |
 | `ix_t_ztna_address_pool_cidr` | `(network_cidr)` |
-| `uq_t_ztna_address_pool_client_group` | `UNIQUE (client_group_id) WHERE client_group_id IS NOT NULL`，一个员工组最多关联一个地址池。 |
 
 说明：主键与 UNIQUE 约束也会形成相应唯一索引，上表只列额外显式创建的索引。
 

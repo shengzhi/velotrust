@@ -8,7 +8,7 @@
 
 ## 1. 模块职责与关系
 
-访问策略行保存当前生效规则；主体关系、资源关系和授权决策分别按各自生命周期维护。主体多态引用由业务校验，图中四种 subject 虚线仅在对应 subject_type 时成立。
+访问策略行保存当前授权动作；主体关系连接安全用户组，资源关系连接企业受保护资源。HUB 按活动策略解析组成员设备的 Overlay 租约作为来源，按资源目录、网络站点、Gateway 及 NAT 映射解析目标、协议和端口，再编译为 Gateway ACL。主体多态引用由业务校验；当前控制台首期仅允许安全用户组作为策略主体。
 
 本模块收录 6 张表。图中实线表示已声明的外键，虚线表示应用层校验的逻辑关系；跨模块表只作为关系上下文，其字段在所属文档定义。
 
@@ -52,9 +52,9 @@ erDiagram
 | `resource_type` | `VARCHAR(32)` | 否 | — | 资源类型：web_app、server、database、subnet、service。 |
 | `network_id` | `BIGINT` | 是 | — | 所属网络或站点，外键指向 t_ztna_network.id。 |
 | `host` | `VARCHAR(255)` | 是 | — | 目标域名或主机地址文本；至少 host/address 之一非空。 |
-| `address` | `VARCHAR(255)` | 是 | — | 目标地址或 CIDR 文本；按资源类型校验。 |
-| `port_start` | `INTEGER` | 是 | — | 端口范围起点；与 port_end 同时为空或形成合法范围。 |
-| `port_end` | `INTEGER` | 是 | — | 端口范围终点；不小于 port_start 且不大于 65535。 |
+| `address` | `VARCHAR(255)` | 是 | — | 目标 IPv4 地址或 CIDR；必须完整包含在所属网络站点的真实 CIDR 或启用的 NAT 影子 CIDR 中。 |
+| `port_start` | `INTEGER` | 是 | — | 端口范围起点；必须与 port_end 组成 1–65535 的合法范围。完整范围 `1–65535` 表示所选 TCP/UDP 协议的任意端口；空值表示资源尚未配置端口，不能用于活动策略。 |
+| `port_end` | `INTEGER` | 是 | — | 端口范围终点；不小于 port_start 且不大于 65535。完整范围 `1–65535` 表示任意端口。 |
 | `protocol` | `VARCHAR(16)` | 是 | — | 可选协议：tcp、udp、http、https。 |
 | `access_mode` | `VARCHAR(32)` | 否 | `'network'` | 接入模式：network、proxy。 |
 | `gateway_node_id` | `BIGINT` | 是 | — | 指定的入口网关，外键指向 t_ztna_node.id。 |
@@ -98,9 +98,9 @@ erDiagram
 | `policy_name` | `VARCHAR(128)` | 否 | — | 策略显示名称。 |
 | `policy_code` | `VARCHAR(64)` | 否 | — | 策略稳定编码，全表唯一。 |
 | `description` | `VARCHAR(512)` | 是 | — | 策略说明。 |
-| `priority` | `INTEGER` | 否 | `100` | 非负优先级；数值方向与冲突处理应由统一策略引擎约定。 |
+| `priority` | `INTEGER` | 否 | `100` | 非负策略优先级，数值较小者先应用。 |
 | `status` | `VARCHAR(24)` | 否 | `'draft'` | 策略状态：draft、active、disabled。 |
-| `rules_json` | `JSONB` | 否 | `'[]'::JSONB` | 当前策略规则，允许 JSON 数组或对象；策略更新时原位替换。 |
+| `rules_json` | `JSONB` | 否 | `'[]'::JSONB` | 当前唯一授权动作；数组中恰有一项，包含稳定 ID 和 allow/deny 动作。策略行的 `priority` 负责多策略冲突顺序。来源地址、目标地址、协议和端口由主体、资源和当前网络数据解析，不由管理员直接填写 ACL 网段。 |
 | `compiled_hash` | `VARCHAR(128)` | 是 | — | 当前规则规范化或编译结果的内容摘要，不是修订号。 |
 
 **数据库约束**
@@ -123,7 +123,7 @@ erDiagram
 
 **业务一致性与生命周期**
 
-策略状态、规则 JSON 和主体/资源关系应在同一事务中更新。`version_no` 是公共模型的乐观并发标记，不保存策略历史；优先级方向与冲突裁决由统一策略引擎约定。
+策略状态、单个授权动作和主体/资源关系在同一事务中更新。`version_no` 是公共模型的乐观并发标记，不保存策略历史。Management 校验活动策略关联一个活动安全用户组和一个活动企业资源；策略优先级较小者先应用，Gateway 未匹配 allow 时默认拒绝。
 
 ### 2.3 `t_ztna_policy_subject` — 策略主体关系
 

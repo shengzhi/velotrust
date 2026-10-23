@@ -28,6 +28,7 @@ const (
 	TableSecurityEvent            = "t_ztna_security_event"
 	TableAccessChangeEvent        = "t_ztna_access_change_event"
 	TableAccessChangeDelivery     = "t_ztna_access_change_delivery"
+	TableGatewayGroupBinding      = "t_ztna_gateway_group_binding"
 )
 
 type Device struct {
@@ -276,6 +277,26 @@ type TunnelPeer struct {
 
 func (TunnelPeer) TableName() string { return TableTunnelPeer }
 
+// GatewayGroupBinding grants members of an employee security group permission
+// to establish a WireGuard tunnel to a Gateway. It does not grant access to
+// networks or protected resources behind that Gateway.
+type GatewayGroupBinding struct {
+	database.BaseModel `xorm:"extends"`
+	ID                 int64 `xorm:"pk autoincr 'id'"`
+	GatewayNodeID      int64 `xorm:"'gateway_node_id'"`
+	GroupID            int64 `xorm:"'group_id'"`
+}
+
+func (GatewayGroupBinding) TableName() string { return TableGatewayGroupBinding }
+
+type GroupGatewayOption struct {
+	ID       int64  `xorm:"'id'" json:"id"`
+	Name     string `xorm:"'name'" json:"name"`
+	NodeCode string `xorm:"'node_code'" json:"node_code"`
+	Status   string `xorm:"'status'" json:"status"`
+	Bound    bool   `xorm:"'bound'" json:"bound"`
+}
+
 type NodeConfigTask struct {
 	database.BaseModel `xorm:"extends"`
 	ID                 int64      `xorm:"pk autoincr 'id'"`
@@ -387,6 +408,7 @@ var (
 	_ database.IModel = (*AuthorizationGrant)(nil)
 	_ database.IModel = (*Tunnel)(nil)
 	_ database.IModel = (*TunnelPeer)(nil)
+	_ database.IModel = (*GatewayGroupBinding)(nil)
 	_ database.IModel = (*NodeConfigTask)(nil)
 	_ database.IModel = (*NodeConfigTaskEvent)(nil)
 	_ database.IModel = (*NodeStatusReport)(nil)

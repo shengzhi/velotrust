@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math/big"
 	"net/netip"
+	"strconv"
 	"time"
 
 	"velotrust/hub/internal/model"
@@ -159,6 +160,9 @@ func ensureClientAddressLease(tx *database.DBTransaction, userID, nodeID, device
 		if _, err := tx.Save(&lease); err != nil {
 			return fmt.Errorf("save automatic Client Overlay lease: %w", err)
 		}
+		if err := queueGatewayPeerRefreshesForClient(tx, userID, nodeCode); err != nil {
+			return err
+		}
 		slog.Info("automatically assigned Client Overlay address", "node_id", nodeCode,
 			"tunnel_ip", netip.PrefixFrom(address, 32).String(), "pool_id", candidate.PoolID,
 			"group_code", candidate.GroupCode)
@@ -166,6 +170,52 @@ func ensureClientAddressLease(tx *database.DBTransaction, userID, nodeID, device
 	}
 	if len(candidates) > 0 {
 		slog.Warn("Client automatic address assignment has no free dynamic address", "node_id", nodeCode, "candidate_count", len(candidates))
+	}
+	return nil
+}
+
+func queueGatewayPeerRefreshesForClient(tx *database.DBTransaction, userID int64, nodeCode string) error {
+	if tx == nil || userID <= 0 || nodeCode == "" {
+		return errors.New("Client identity is required to refresh Gateway peers")
+	}
+	var gateways []struct {
+		ID int64 `xorm:"'id'"`
+	}
+	if err := tx.Session.SQL(`SELECT DISTINCT gateway.id AS id
+		FROM public.t_iam_user_group AS membership
+		JOIN public.t_iam_group AS employee_group
+		  ON employee_group.id=membership.group_id AND employee_group.status='active'
+		JOIN (
+			SELECT binding.group_id, binding.gateway_node_id
+			FROM public.t_ztna_gateway_group_binding AS binding
+			UNION
+			SELECT subject.subject_id AS group_id, network.gateway_node_id AS gateway_node_id
+			FROM public.t_ztna_access_policy AS policy
+			JOIN public.t_ztna_policy_subject AS subject ON subject.policy_id=policy.id AND subject.subject_type='group'
+			JOIN public.t_ztna_policy_resource AS policy_resource ON policy_resource.policy_id=policy.id
+			JOIN public.t_ztna_protected_resource AS resource ON resource.id=policy_resource.protected_resource_id AND resource.status='active'
+			JOIN public.t_ztna_network AS network ON network.id=resource.network_id
+			  AND network.network_type='site' AND network.status='active' AND network.is_del=FALSE
+			WHERE policy.status='active' AND network.gateway_node_id IS NOT NULL
+		) AS admission ON admission.group_id=employee_group.id
+		JOIN public.t_ztna_node AS gateway
+		  ON gateway.id=admission.gateway_node_id AND gateway.node_type='gateway' AND gateway.node_status='active'
+		WHERE membership.user_id=?
+		ORDER BY gateway.id`, userID).Find(&gateways); err != nil {
+		return fmt.Errorf("find Gateways for newly assigned Client peer: %w", err)
+	}
+	for _, gateway := range gateways {
+		event := model.AccessChangeEvent{
+			SubjectType: "node", SubjectID: gateway.ID,
+			ChangeType: "authorization_changed", Status: "pending",
+		}
+		event.CreateNew(nodeAuditActor("client_agent", nodeCode))
+		if _, err := tx.Save(&event); err != nil {
+			return fmt.Errorf("queue Gateway %d refresh after Client address allocation: %w", gateway.ID, err)
+		}
+		if _, err := tx.Session.Exec("SELECT pg_notify('velotrust_access_change', ?)", strconv.FormatInt(event.ID, 10)); err != nil {
+			return fmt.Errorf("notify Gateway %d after Client address allocation: %w", gateway.ID, err)
+		}
 	}
 	return nil
 }

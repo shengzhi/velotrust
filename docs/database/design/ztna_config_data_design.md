@@ -15,7 +15,7 @@
 - `routes` 来自 `gateway_node_id` 绑定到该 Gateway 的活动网络站点。
 - NAT 来自这些网络站点的启用映射及 Overlay 全局网段。
 - 接口名、监听端口、私钥和 HUB 连接参数保留在 Gateway 本机配置。
-- 访问策略规则目前没有稳定的机器编译格式，因此 HUB 生成空 ACL 规则集；Gateway 将其解释为默认拒绝。
+- Management 通过 `t_ztna_policy_subject` 关联安全用户组、通过 `t_ztna_policy_resource` 关联企业资源；`rules_json` 仅保存策略优先级下的 allow/deny 动作。HUB 根据组成员设备租约解析来源，根据资源地址、服务端口、网络站点 Gateway 和 NAT 映射解析目标，并同步 Gateway ACL、Client Peer 和路由。没有匹配 allow 的转发流量由 Gateway 默认拒绝。
 
 每次编译的摘要用于检测业务数据变化和判断节点是否收敛。只有分发任务和事件、节点状态快照写入运行状态表，不保存第二份配置内容。
 
@@ -118,5 +118,5 @@ erDiagram
 
 - 迁移 018 曾将旧配置修订压缩到 `t_ztna_config`，以支持过渡期手工 JSON 发布。
 - 迁移 019 删除 `t_ztna_config` 及 `ztna.config.read` / `ztna.config.write` 权限。旧表内容不再是权威数据，业务数据表成为唯一输入源。
-- `t_ztna_access_policy.rules_json` 暂无稳定的 Gateway ACL 编译协议；当前下发空规则集并默认拒绝。实现规则编译前，不应把管理策略状态误报为已在数据面强制执行。
+- 当前策略支持安全用户组与 IPv4 企业服务资源的 L3/L4 授权编译；IPv6 Overlay、FQDN/动态 DNS 资源以及姿态条件尚未纳入 Gateway ACL 编译范围。活动策略变更经访问变更 outbox 通知相关 Client 和 Gateway，并在节点配置回执后确认收敛。
 - 任务表未记录 HUB 实例租约或归属，多实例 HA 的任务抢占和连接恢复仍需后续设计。

@@ -674,11 +674,15 @@ Overlay 地址池不得与业务网段重叠；不同企业业务网段允许重
 
 约束建议：`public_key` 按适用范围唯一；隧道地址在同一地址域内唯一；`allowed_ips` 的冲突需要在配置生成时校验，不能仅依赖数据库唯一索引。
 
-Client 首次登录时，HUB 根据设备所有者直接所属的 IAM 用户组匹配 `t_ztna_address_pool.client_group_id`，为 Client 分配动态 `User-Device` IPAM 租约。地址池关联只决定 Overlay IP，不创建 WireGuard Peer，也不选择 Gateway；Peer 与可访问 Gateway 应由访问策略配置决定。重复登录和配置同步时复用仍有效的租约。
+Client 首次登录时，HUB 根据设备所有者直接所属的 IAM 用户组匹配 `t_ztna_address_pool.client_group_id`，为 Client 分配动态 `User-Device` IPAM 租约。地址池关联只决定 Overlay IP。Client 可连接的 Gateway 来自两种当前授权关系：`t_ztna_gateway_group_binding` 提供组级隧道准入；启用的访问策略关联安全用户组与企业资源时，HUB 也会按资源站点关联的 Gateway 生成 Peer 和路由。无论何种关系，Gateway 后方资源流量仍由策略编译出的 ACL 控制，缺少匹配 allow 规则时默认拒绝。重复登录和配置同步时复用仍有效的租约。
+
+### 9.2.1 `t_ztna_gateway_group_binding` — Gateway 安全组准入
+
+字段：`id`、`gateway_node_id`、`group_id`、公共字段。`(gateway_node_id, group_id)` 唯一；外键分别引用 `t_ztna_node.id` 与 `t_iam_group.id`。Management 只允许绑定 Gateway 节点和活动安全用户组；停用用户组后，HUB 不再据此下发该 Gateway Peer。准入变更触发 Gateway 与受影响 Client 的配置刷新。
 
 ### 9.3 Gateway 配置编译 — 不建立配置 JSON 表
 
-HUB 从业务主表编译 Gateway 当前期望状态，不另外维护 `t_ztna_config` JSON 副本。隧道地址来自节点公钥关联的有效 IPAM 租约；Peer 来自 Gateway 关联活动隧道中的活动 Peer；`routes` 来自绑定 Gateway 的活动网络站点 CIDR；NAT 来自这些站点的启用映射及 Overlay 全局网段。接口名、监听端口、私钥和 HUB 连接参数属于 Gateway 本机配置。
+HUB 从业务主表编译 Gateway 当前期望状态，不另外维护 `t_ztna_config` JSON 副本。隧道地址来自节点公钥关联的有效 IPAM 租约；Peer 包含活动逻辑隧道中的非 Client 节点，以及其所有者属于 Gateway 已绑定活动安全组的 Client；Client 隧道地址来自有效 IPAM 租约。`routes` 来自绑定 Gateway 的活动网络站点 CIDR；NAT 来自这些站点的启用映射及 Overlay 全局网段。Client 侧只为准入 Gateway 配置 Gateway 隧道地址路由；访问站点资源仍必须由策略授权及 Gateway ACL 放行。接口名、监听端口、私钥和 HUB 连接参数属于 Gateway 本机配置。
 
 HUB 对规范化编译结果计算摘要，以 `t_ztna_node_config_task.target_config_hash`、`t_ztna_node.last_config_hash` 和 `actual_config_hash` 进行幂等下发和收敛判断。数据库仅记录分发任务、任务事件和状态报告，不记录第二份期望 JSON。策略规则暂未定义稳定的 Gateway 编译输入，生成空规则集并默认拒绝。
 

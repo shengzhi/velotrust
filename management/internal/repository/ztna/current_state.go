@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	servicecontext "velotrust/management/internal/context"
@@ -17,6 +18,8 @@ import (
 type Repository struct {
 	db *database.Database
 }
+
+var accessPolicyRuleIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 // New creates a ZTNA repository backed by PostgreSQL.
 func New(db *database.Database) (*Repository, error) {
@@ -48,9 +51,10 @@ func (r *Repository) SaveAccessPolicy(ctx *servicecontext.Context, policy *model
 
 	err := r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
 		s := tx.Session
-		if err := validatePolicyRelationTargets(s, subjects, resourceIDs); err != nil {
+		if err := validatePolicyRelationTargets(s, subjects, resourceIDs, working.Status == "active"); err != nil {
 			return err
 		}
+		previousStatus := ""
 
 		if working.ID == 0 {
 			if working.VersionNo != 0 {
@@ -72,6 +76,7 @@ func (r *Repository) SaveAccessPolicy(ctx *servicecontext.Context, policy *model
 			if !found || current.VersionNo != working.VersionNo {
 				return errors.New("access policy was not found or changed; refresh and try again")
 			}
+			previousStatus = current.Status
 			current.PolicyName = working.PolicyName
 			current.PolicyCode = working.PolicyCode
 			current.Description = working.Description
@@ -93,12 +98,81 @@ func (r *Repository) SaveAccessPolicy(ctx *servicecontext.Context, policy *model
 		if err := replacePolicyResources(ctx, tx, working.ID, resourceIDs); err != nil {
 			return err
 		}
+		if previousStatus == "active" || working.Status == "active" {
+			if _, err := CreateAccessChange(ctx, tx, "policy", working.ID, "authorization_changed"); err != nil {
+				return fmt.Errorf("queue Gateway refresh for access-policy change: %w", err)
+			}
+		}
 		return nil
 	})
 	if err == nil {
 		*policy = working
 	}
 	return err
+}
+
+// DeleteAccessPolicy removes the current policy row and its relationship rows
+// atomically. Active policies enqueue a Gateway refresh in the same transaction
+// so the next snapshot removes their ACL rules.
+func (r *Repository) DeleteAccessPolicy(ctx *servicecontext.Context, id, expectedVersion int64) error {
+	if ctx == nil || strings.TrimSpace(ctx.UserName()) == "" || id <= 0 || expectedVersion <= 0 {
+		return errors.New("authenticated context, policy ID, and expected version are required")
+	}
+	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		var policy model.AccessPolicy
+		found, err := tx.Session.SQL("SELECT * FROM "+model.TableAccessPolicy+" WHERE id=? FOR UPDATE", id).Get(&policy)
+		if err != nil {
+			return fmt.Errorf("lock access policy for deletion: %w", err)
+		}
+		if !found || policy.VersionNo != expectedVersion {
+			return errors.New("access policy was not found or changed; refresh and try again")
+		}
+		if policy.Status == "active" {
+			if _, err := CreateAccessChange(ctx, tx, "policy", id, "authorization_changed"); err != nil {
+				return fmt.Errorf("queue Gateway refresh for access-policy deletion: %w", err)
+			}
+		}
+		var subjects []model.PolicySubject
+		if err := tx.Session.SQL("SELECT * FROM "+model.TablePolicySubject+" WHERE policy_id=? FOR UPDATE", id).Find(&subjects); err != nil {
+			return fmt.Errorf("lock access-policy subjects for deletion: %w", err)
+		}
+		for i := range subjects {
+			subjects[i].HardDelete()
+			if _, err := tx.Save(&subjects[i]); err != nil {
+				return fmt.Errorf("delete access-policy subject: %w", err)
+			}
+		}
+		var resources []model.PolicyResource
+		if err := tx.Session.SQL("SELECT * FROM "+model.TablePolicyResource+" WHERE policy_id=? FOR UPDATE", id).Find(&resources); err != nil {
+			return fmt.Errorf("lock access-policy resources for deletion: %w", err)
+		}
+		for i := range resources {
+			resources[i].HardDelete()
+			if _, err := tx.Save(&resources[i]); err != nil {
+				return fmt.Errorf("delete access-policy resource: %w", err)
+			}
+		}
+		policy.HardDelete()
+		if _, err := tx.Save(&policy); err != nil {
+			return fmt.Errorf("delete access policy: %w", err)
+		}
+		return nil
+	})
+}
+
+func (r *Repository) ListPolicyGateways(ctx *servicecontext.Context) ([]model.PolicyGatewayOption, error) {
+	if ctx == nil {
+		return nil, errors.New("service context is required")
+	}
+	var items []model.PolicyGatewayOption
+	s := r.db.Engine().NewSession().Context(ctx)
+	defer s.Close()
+	if err := s.SQL(`SELECT id, node_name AS name, node_code, node_status AS status
+		FROM public.t_ztna_node WHERE node_type='gateway' AND node_status IN ('active','disabled')
+		ORDER BY node_name, id`).Find(&items); err != nil {
+		return nil, fmt.Errorf("list Gateway options for access policies: %w", err)
+	}
+	return items, nil
 }
 
 // GetAccessPolicy returns the current policy row and its current relationship
@@ -175,10 +249,35 @@ func validateAccessPolicy(policy *model.AccessPolicy) error {
 		return errors.New("policy status must be draft, active, or disabled")
 	}
 	rules := strings.TrimSpace(string(policy.RulesJSON))
-	if rules == "" || !json.Valid([]byte(rules)) || (rules[0] != '[' && rules[0] != '{') {
-		return errors.New("policy rules must be a valid JSON array or object")
+	if rules == "" || !json.Valid([]byte(rules)) || rules[0] != '[' {
+		return errors.New("policy rules must be a valid JSON array")
 	}
 	policy.RulesJSON = []byte(rules)
+	var decoded []model.AccessPolicyRule
+	if err := json.Unmarshal(policy.RulesJSON, &decoded); err != nil {
+		return fmt.Errorf("decode policy ACL rules: %w", err)
+	}
+	if len(decoded) != 1 {
+		return errors.New("an access policy must contain exactly one authorization outcome")
+	}
+	seenIDs := make(map[string]struct{}, len(decoded))
+	seenPriorities := make(map[uint32]struct{}, len(decoded))
+	for index, rule := range decoded {
+		if !accessPolicyRuleIDPattern.MatchString(rule.ID) {
+			return fmt.Errorf("rules[%d].id is invalid", index)
+		}
+		if _, exists := seenIDs[rule.ID]; exists {
+			return fmt.Errorf("rules[%d].id is duplicated", index)
+		}
+		seenIDs[rule.ID] = struct{}{}
+		if _, exists := seenPriorities[rule.Priority]; exists {
+			return fmt.Errorf("rules[%d].priority is duplicated", index)
+		}
+		seenPriorities[rule.Priority] = struct{}{}
+		if rule.Action != "allow" && rule.Action != "deny" {
+			return fmt.Errorf("rules[%d].action must be allow or deny", index)
+		}
+	}
 	return nil
 }
 
@@ -212,7 +311,7 @@ func validatePolicyRelations(subjects []model.PolicySubjectRef, resources []int6
 	return nil
 }
 
-func validatePolicyRelationTargets(s *xorm.Session, subjects []model.PolicySubjectRef, resourceIDs []int64) error {
+func validatePolicyRelationTargets(s *xorm.Session, subjects []model.PolicySubjectRef, resourceIDs []int64, requireActive bool) error {
 	for _, subject := range subjects {
 		var table string
 		switch subject.Type {
@@ -228,7 +327,12 @@ func validatePolicyRelationTargets(s *xorm.Session, subjects []model.PolicySubje
 		var result struct {
 			ID int64 `xorm:"'id'"`
 		}
-		found, err := s.SQL("SELECT id FROM "+table+" WHERE id=? FOR KEY SHARE", subject.ID).Get(&result)
+		query := "SELECT id FROM " + table + " WHERE id=?"
+		if requireActive && subject.Type == "group" {
+			query += " AND status='active'"
+		}
+		query += " FOR KEY SHARE"
+		found, err := s.SQL(query, subject.ID).Get(&result)
 		if err != nil {
 			return fmt.Errorf("validate policy %s subject %d: %w", subject.Type, subject.ID, err)
 		}
@@ -240,7 +344,21 @@ func validatePolicyRelationTargets(s *xorm.Session, subjects []model.PolicySubje
 		var result struct {
 			ID int64 `xorm:"'id'"`
 		}
-		found, err := s.SQL("SELECT id FROM "+model.TableProtectedResource+" WHERE id=? FOR KEY SHARE", id).Get(&result)
+		query := "SELECT id FROM " + model.TableProtectedResource + " WHERE id=?"
+		if requireActive {
+			query = `SELECT resource.id FROM public.t_ztna_protected_resource AS resource
+				JOIN public.t_ztna_network AS network ON network.id=resource.network_id
+				JOIN public.t_ztna_node AS gateway ON gateway.id=network.gateway_node_id
+				WHERE resource.id=? AND resource.status='active' AND network.network_type='site'
+				  AND network.status='active' AND network.is_del=FALSE
+				  AND gateway.node_type='gateway' AND gateway.node_status='active'
+				  AND resource.address IS NOT NULL AND BTRIM(resource.address) <> ''
+				  AND resource.protocol IN ('tcp', 'udp')
+				  AND resource.port_start BETWEEN 1 AND 65535
+				  AND resource.port_end BETWEEN resource.port_start AND 65535`
+		}
+		query += " FOR KEY SHARE"
+		found, err := s.SQL(query, id).Get(&result)
 		if err != nil {
 			return fmt.Errorf("validate protected resource %d: %w", id, err)
 		}

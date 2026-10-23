@@ -16,7 +16,9 @@ VALUES
     ('IPAM 网络目录', 'ipam.network', 'management', '管理 Overlay 地址池和地址租约', 'active', 'seed', 'seed'),
     ('网络站点', 'ztna.site', 'management', '管理网络站点、云网络及其归属网关', 'active', 'seed', 'seed'),
     ('虚拟节点', 'ztna.node', 'management', '查询运行节点并管理节点生命周期状态', 'active', 'seed', 'seed'),
-    ('逻辑隧道', 'ztna.tunnel', 'management', '管理 WireGuard 逻辑隧道及 Gateway 成员关系', 'active', 'seed', 'seed')
+    ('逻辑隧道', 'ztna.tunnel', 'management', '管理 WireGuard 逻辑隧道及 Gateway 成员关系', 'active', 'seed', 'seed'),
+    ('访问策略与 ACL', 'ztna.policy', 'management', '将安全用户组授权给企业资源并生成 Gateway ACL', 'active', 'seed', 'seed'),
+    ('企业资源管理中心', 'ztna.resource', 'management', '维护可授权给安全用户组的受保护网络服务资源', 'active', 'seed', 'seed')
 ON CONFLICT (resource_code) DO UPDATE SET
     resource_name = EXCLUDED.resource_name,
     resource_type = EXCLUDED.resource_type,
@@ -52,7 +54,11 @@ CROSS JOIN (VALUES
     ('查看虚拟节点', 'ztna.node.read', 'read', '查看虚拟节点身份、端点、网络关联和运行状态', 'ztna.node'),
     ('管理虚拟节点', 'ztna.node.write', 'write', '启用、禁用、隔离或撤销虚拟节点', 'ztna.node'),
     ('查看逻辑隧道', 'ztna.tunnel.read', 'read', '查看逻辑隧道和 Gateway Peer 成员', 'ztna.tunnel'),
-    ('管理逻辑隧道', 'ztna.tunnel.write', 'write', '创建逻辑隧道并管理 Gateway Peer 成员关系', 'ztna.tunnel')
+    ('管理逻辑隧道', 'ztna.tunnel.write', 'write', '创建逻辑隧道并管理 Gateway Peer 成员关系', 'ztna.tunnel'),
+    ('查看访问策略', 'ztna.policy.read', 'read', '查看策略、安全用户组、资源和生成的 ACL', 'ztna.policy'),
+    ('管理访问策略', 'ztna.policy.write', 'write', '创建、修改、启停和删除访问策略并触发 Gateway ACL 同步', 'ztna.policy'),
+    ('查看企业资源', 'ztna.resource.read', 'read', '查看策略可选择的受保护网络资源', 'ztna.resource'),
+    ('管理企业资源', 'ztna.resource.write', 'write', '创建、修改和删除受保护网络资源', 'ztna.resource')
 ) AS seed(permission_name, permission_code, action_code, description, resource_code)
 WHERE resource.resource_code = seed.resource_code
 ON CONFLICT (permission_code) DO UPDATE SET

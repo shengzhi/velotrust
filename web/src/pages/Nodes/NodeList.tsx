@@ -17,7 +17,7 @@ import {
   TableRow,
 } from '../../components/ui/table';
 import { useToast } from '../../components/ui/toast';
-import { formatRelativeTime } from '../../utils/format';
+import { formatDateTime } from '../../utils/format';
 import { VirtualNode, VirtualNodeStatus, virtualNodeApi } from '../../services/node';
 
 const typeLabels: Record<VirtualNode['node_type'], string> = {
@@ -125,7 +125,7 @@ export const NodeList: React.FC = () => {
     return counts;
   }, {}), [nodes]);
 
-  const lastSeenLabel = (value?: string | null) => value ? formatRelativeTime(value) : '从未上报';
+  const lastSeenLabel = (value?: string | null) => value ? formatDateTime(value) : '从未上报';
   const displayedConnectionStatus = (node: VirtualNode) => refreshFailed ? 'unknown' : node.connection_status;
 
   return (

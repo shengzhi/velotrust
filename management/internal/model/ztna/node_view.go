@@ -30,6 +30,7 @@ type VirtualNodeView struct {
 	CreatedAt          time.Time            `json:"created_at"`
 	Networks           []VirtualNodeNetwork `json:"networks"`
 	Peers              []VirtualNodePeer    `json:"peers"`
+	GatewayGroups      []VirtualNodeGroup   `json:"gateway_groups"`
 	DeviceID           *int64               `json:"device_id,omitempty"`
 	DeviceName         *string              `json:"device_name,omitempty"`
 	DeviceType         *string              `json:"device_type,omitempty"`
@@ -57,6 +58,13 @@ type VirtualNodePeer struct {
 	Endpoint        *string    `json:"endpoint,omitempty"`
 	Status          string     `json:"status"`
 	LastHandshakeAt *time.Time `json:"last_handshake_at,omitempty"`
+}
+
+type VirtualNodeGroup struct {
+	ID     int64  `json:"id"`
+	Name   string `json:"name"`
+	Code   string `json:"code"`
+	Status string `json:"status"`
 }
 
 type GatewayTunnelOption struct {

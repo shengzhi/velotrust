@@ -13,6 +13,7 @@ import (
 	ipamModel "velotrust/management/internal/model/ipam"
 	model "velotrust/management/internal/model/site"
 	ipamRepository "velotrust/management/internal/repository/ipam"
+	accesschanges "velotrust/management/internal/repository/ztna"
 	"velotrust/shared/repository/database"
 	"xorm.io/xorm"
 )
@@ -168,6 +169,7 @@ func (r *Repository) SaveSite(ctx *servicecontext.Context, actorID int64, site *
 			return errors.New("site CIDR cannot be changed after creation")
 		}
 		gatewayChanged := !sameGatewayNodeID(site.GatewayNodeID, network.GatewayNodeID)
+		configurationChanged := gatewayChanged || site.Status != network.Status
 		if gatewayChanged && site.GatewayNodeID != nil && site.Status != model.StatusActive {
 			return errors.New("only active network sites can be assigned to a gateway")
 		}
@@ -198,6 +200,11 @@ func (r *Repository) SaveSite(ctx *servicecontext.Context, actorID int64, site *
 			"local_subnet": network.CIDR, "status": network.Status, "gateway_node_id": network.GatewayNodeID,
 		}); err != nil {
 			return err
+		}
+		if configurationChanged {
+			if err := accesschanges.CreateSitePolicyRefreshes(ctx, tx, network.ID); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -233,6 +240,9 @@ func (r *Repository) DeleteSite(ctx *servicecontext.Context, actorID, siteID, ex
 		deleted := model.PhysicalSite{}
 		fillSiteFromNetwork(&deleted, &network)
 		if err := saveAudit(ctx, tx, actorID, "ztna.site.delete", &deleted, map[string]any{"is_del": true}); err != nil {
+			return err
+		}
+		if err := accesschanges.CreateSitePolicyRefreshes(ctx, tx, network.ID); err != nil {
 			return err
 		}
 		return nil

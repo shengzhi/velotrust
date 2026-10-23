@@ -113,7 +113,9 @@ export const Ipam: React.FC = () => {
       setOverview({ ...summary, ipam_pools: poolRows, active_leases: Array.isArray(summary?.active_leases) ? summary.active_leases : [] });
       setPools(poolRows);
       setLeases(Array.isArray(leaseRows) ? leaseRows : []);
-      setEmployeeGroups(Array.isArray(groupRows) ? groupRows : []);
+      setEmployeeGroups(Array.isArray(groupRows)
+        ? groupRows.filter((group) => Number.isSafeInteger(group.id) && group.id > 0)
+        : []);
       setAllocationForm((form) => ({
         ...form,
         pool_id: poolRows.some((pool) => pool.id === form.pool_id && pool.status === 'active')
@@ -191,7 +193,9 @@ export const Ipam: React.FC = () => {
       cidr: pool.cidr,
       pool_type: pool.type,
       allocation_mode: pool.allocation_mode,
-      client_group_id: pool.client_group_id ?? null,
+      // Treat legacy or malformed zero IDs as an unassociated pool. The API
+      // accepts null for this optional association and rejects an explicit 0.
+      client_group_id: pool.client_group_id && pool.client_group_id > 0 ? pool.client_group_id : null,
       gateway_binding: pool.gateway_binding ?? '',
       color: pool.color,
       description: pool.description ?? '',
@@ -210,7 +214,12 @@ export const Ipam: React.FC = () => {
       ...poolForm,
       pool_name: poolForm.pool_name.trim(),
       cidr: poolForm.cidr.trim(),
-      client_group_id: poolForm.pool_type === 'User-Device' && poolForm.allocation_mode === 'dynamic'
+      client_group_id: (
+        poolForm.pool_type === 'User-Device'
+        && poolForm.allocation_mode === 'dynamic'
+        && poolForm.client_group_id !== null
+        && poolForm.client_group_id > 0
+      )
         ? poolForm.client_group_id
         : null,
       gateway_binding: poolForm.gateway_binding?.trim(),
@@ -630,9 +639,9 @@ export const Ipam: React.FC = () => {
               </Select>
             </Field>
             {poolForm.pool_type === 'User-Device' && poolForm.allocation_mode === 'dynamic' && (
-              <Field label="员工用户组">
+              <Field label="安全用户组">
                 <Select value={poolForm.client_group_id ?? ''} onChange={(event) => setPoolForm({ ...poolForm, client_group_id: event.target.value ? Number(event.target.value) : null })} className="text-xs">
-                  <option value="">不关联员工组</option>
+                  <option value="">不关联安全用户组</option>
                   {employeeGroups.map((group) => <option key={group.id} value={group.id}>{group.name}（{group.user_count} 名员工）</option>)}
                 </Select>
               </Field>
@@ -640,7 +649,7 @@ export const Ipam: React.FC = () => {
           </div>
           {poolForm.pool_type === 'User-Device' && poolForm.allocation_mode === 'dynamic' && selectedPoolGroup && (
             <p className="rounded-lg border border-blue-200 bg-blue-50/70 p-3 text-[11px] leading-relaxed text-blue-800">
-              HUB 登录时按设备所有者的员工组匹配此地址池并自动分配 Overlay IP。该关联只负责 IP 分配；客户端可连接的 Gateway 由访问策略决定。
+              HUB 登录时按设备所有者的员工组匹配此地址池并自动分配 Overlay IP。该关联只负责 IP 分配；Gateway 隧道准入在安全用户组页面配置，资源访问仍由访问策略控制。
             </p>
           )}
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">

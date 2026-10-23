@@ -12,13 +12,27 @@ export function formatBytes(bytes: number, decimals = 1): string {
   return `${parseFloat((bytes / Math.pow(k, index)).toFixed(dm))} ${sizes[index]}`;
 }
 
+function parseDateInput(dateInput: string | number | Date): Date {
+  if (dateInput instanceof Date || typeof dateInput === 'number') return new Date(dateInput);
+
+  const value = dateInput.trim();
+  if (!value) return new Date(Number.NaN);
+
+  // Backend timestamps are UTC. If an ISO timestamp arrives without an offset,
+  // interpret it as UTC instead of letting the browser treat it as local time.
+  const normalized = value.replace(/^(\d{4}-\d{2}-\d{2}) /, '$1T');
+  const isDateTime = /^\d{4}-\d{2}-\d{2}T/.test(normalized);
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(normalized);
+  return new Date(isDateTime && !hasTimezone ? `${normalized}Z` : normalized);
+}
+
 /**
  * Returns a Chinese relative time string (e.g. 刚刚, 5分钟前, 2小时前, 3天前)
  */
 export function formatRelativeTime(dateInput: string | number | Date): string {
   if (!dateInput) return '-';
   const now = new Date().getTime();
-  const date = new Date(dateInput).getTime();
+  const date = parseDateInput(dateInput).getTime();
   const diffInSeconds = Math.floor((now - date) / 1000);
 
   if (diffInSeconds < 0 || diffInSeconds < 30) {
@@ -51,7 +65,7 @@ export function formatRelativeTime(dateInput: string | number | Date): string {
  */
 export function formatDateTime(dateInput: string | number | Date): string {
   if (!dateInput) return '-';
-  const d = new Date(dateInput);
+  const d = parseDateInput(dateInput);
   if (isNaN(d.getTime())) return String(dateInput);
 
   const pad = (n: number) => (n < 10 ? `0${n}` : n);

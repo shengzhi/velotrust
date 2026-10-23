@@ -54,6 +54,6 @@ Start the Linux agent with:
 gateway-agent run --config /etc/velotrust/gateway/gateway.json --health-listen 127.0.0.1:8765
 ```
 
-The service needs permission to create/configure the tunnel, routes, nftables rules, and forwarding sysctls. The health listener defaults to loopback. HUB currently sends an empty ACL because policy rules do not yet have a stable compiler format, so forwarded traffic stays denied. The reconciler remains fail-closed when a config or dataplane step fails.
+The service needs permission to create/configure the tunnel, routes, nftables rules, and forwarding sysctls. The health listener defaults to loopback. In HUB mode, Management's active access-policy rules are compiled into Gateway ACL rules; an empty ACL still means deny all forwarded traffic. The reconciler remains fail-closed when a config or dataplane step fails.
 
 Replace the config atomically to avoid exposing partial writes to the watcher. The Agent detects changes from the config content and private-key file digest; no manual revision field is required. The current implementation has not been validated with privileged end-to-end packet forwarding in this development environment. Forced process termination can leave the last kernel tunnel and firewall state active until service recovery; config leases are not implemented. See [the network config contract](../docs/VeloTrust-网络配置契约.md) for the shared Client/Gateway field meanings and [the gateway implementation plan](../docs/VeloTrust-网关节点技术实现方案.md) for backend behavior and current limitations.

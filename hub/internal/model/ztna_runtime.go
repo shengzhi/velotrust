@@ -11,6 +11,7 @@ const (
 	TableNodeStatusReport    = "t_ztna_node_status_report"
 	TableNodeConfigTask      = "t_ztna_node_config_task"
 	TableNodeConfigTaskEvent = "t_ztna_node_config_task_event"
+	TableAccessChangeEvent   = "t_ztna_access_change_event"
 )
 
 // Node is the HUB persistence projection of the Management-owned node table.
@@ -88,9 +89,25 @@ type NodeConfigTaskEvent struct {
 
 func (NodeConfigTaskEvent) TableName() string { return TableNodeConfigTaskEvent }
 
+// AccessChangeEvent is the HUB projection of the shared durable authorization
+// outbox. HUB appends node-scoped refresh events when a Client receives a new
+// Overlay lease so all bound Gateways install the corresponding WireGuard peer.
+type AccessChangeEvent struct {
+	database.BaseModel `xorm:"extends"`
+	ID                 int64  `xorm:"pk autoincr 'id'"`
+	SubjectType        string `xorm:"'subject_type'"`
+	SubjectID          int64  `xorm:"'subject_id'"`
+	ChangeType         string `xorm:"'change_type'"`
+	Status             string `xorm:"'status'"`
+	TargetsInitialized bool   `xorm:"'targets_initialized'"`
+}
+
+func (AccessChangeEvent) TableName() string { return TableAccessChangeEvent }
+
 var (
 	_ database.IModel = (*Node)(nil)
 	_ database.IModel = (*NodeStatusReport)(nil)
 	_ database.IModel = (*NodeConfigTask)(nil)
 	_ database.IModel = (*NodeConfigTaskEvent)(nil)
+	_ database.IModel = (*AccessChangeEvent)(nil)
 )

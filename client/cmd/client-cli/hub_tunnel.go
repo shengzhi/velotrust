@@ -75,6 +75,20 @@ func (m *hubTunnelManager) Apply(ctx context.Context, snapshot *hubv1.ConfigSnap
 	if configuration.SchemaVersion != 1 {
 		return fmt.Errorf("unsupported HUB Client configuration schema version %d", configuration.SchemaVersion)
 	}
+	if len(configuration.Tunnel.Peers) == 0 {
+		slog.Warn("HUB delivered Client tunnel configuration without authorized Gateway Peers",
+			"instance_id", m.instanceID, "config_hash", snapshot.GetConfigHash())
+		if err := m.stop(); err != nil {
+			return fmt.Errorf("stop Client tunnel after Gateway access was revoked: %w", err)
+		}
+		m.mu.Lock()
+		m.appliedHash = snapshot.GetConfigHash()
+		m.wireguard, m.health, m.lastError = "down", "degraded", "no_authorized_gateway"
+		m.mu.Unlock()
+		return nil
+	}
+	slog.Info("HUB delivered Client Gateway Peer configuration", "instance_id", m.instanceID,
+		"peer_count", len(configuration.Tunnel.Peers), "config_hash", snapshot.GetConfigHash())
 	profile := clientconfig.Tunnel{
 		InterfaceName: "VeloTrust", Address: configuration.Tunnel.Address,
 		PrivateKeyFile: m.keyFile, MTU: configuration.Tunnel.MTU,

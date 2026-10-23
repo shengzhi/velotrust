@@ -3,17 +3,17 @@
 - 文档版本：1.0
 - 数据库：PostgreSQL
 - 文档范围：设备、节点、网络站点、Overlay IPAM、访问策略、隧道、配置分发、授权变更投递和安全事件。
-- 结构与审计语义基线：仓库中迁移 006–024 的累计结果；不是对运行数据库已迁移状态的断言。
+- 结构与审计语义基线：仓库中迁移 006–029 的累计结果；不是对运行数据库已迁移状态的断言。
 - 业务依据：[VeloTrust 数据模型设计文档](../../VeloTrust_数据模型设计文档_最终版.md)
 
 ## 1. 模块划分与文档入口
 
-当前有效业务表共 **26 张**，按九个功能模块编写。每张表只在所属模块详细定义；跨模块 E-R 关系保留外键目标名称，便于追踪。公共字段集中说明，逐表文档列出业务字段、数据类型、可空性、默认值、约束、索引和生命周期要求。
+当前有效业务表共 **27 张**，按九个功能模块编写。每张表只在所属模块详细定义；跨模块 E-R 关系保留外键目标名称，便于追踪。公共字段集中说明，逐表文档列出业务字段、数据类型、可空性、默认值、约束、索引和生命周期要求。
 
 | 功能模块 | 表数 | 设计文档 |
 |---|---|---|
 | 设备身份与可信状态 | 3 | [设备身份与可信状态](ztna_device_data_design.md) |
-| 运行节点与网关注册 | 2 | [运行节点与网关注册](ztna_node_data_design.md) |
+| 运行节点与网关注册 | 3 | [运行节点与网关注册](ztna_node_data_design.md) |
 | 网络站点与 NAT | 2 | [网络站点与 NAT](ztna_network_data_design.md) |
 | Overlay IPAM 地址管理 | 3 | [Overlay IPAM 地址管理](ztna_ipam_data_design.md) |
 | 受保护资源与访问授权 | 6 | [受保护资源与访问授权](ztna_policy_data_design.md) |
@@ -29,6 +29,7 @@ IAM 用户、角色、用户组和管理审计表见 [IAM 数据库设计](iam_d
 ```mermaid
 flowchart LR
     IAM["IAM 用户与用户组"] --> DEVICE["设备身份与可信状态"]
+    IAM --> NODE["Gateway 组准入"]
     IAM --> POLICY["受保护资源与访问授权"]
     DEVICE --> POLICY
     SITE["网络站点与 NAT"] --> POLICY
@@ -79,6 +80,7 @@ flowchart LR
 | `t_ztna_access_change_delivery` | [授权变更与 Gateway 确认](ztna_access_change_data_design.md) | Gateway 当前配置应用确认 |
 | `t_ztna_node` | [运行节点与网关注册](ztna_node_data_design.md) | 运行节点 |
 | `t_gateway_registration_token` | [运行节点与网关注册](ztna_node_data_design.md) | 网关一次性注册凭证 |
+| `t_ztna_gateway_group_binding` | [运行节点与网关注册](ztna_node_data_design.md) | 员工安全用户组的 Gateway 隧道准入绑定，不直接授予资源访问权 |
 | `t_ztna_network` | [网络站点与 NAT](ztna_network_data_design.md) | 网络与网络站点 |
 | `t_ztna_nat_mapping` | [网络站点与 NAT](ztna_network_data_design.md) | 网络 NAT 映射 |
 | `t_ztna_overlay_network` | [Overlay IPAM 地址管理](ztna_ipam_data_design.md) | Overlay 全局地址范围 |
@@ -124,6 +126,8 @@ flowchart LR
 | [025](../../../management/migrations/postgresql/025_ztna_client_group_assignment.sql) | 增加员工用户组到 Client 逻辑隧道及动态地址池的自动分配映射。 |
 | [026](../../../management/migrations/postgresql/026_iam_group_management_permissions.sql) | 为平台管理员补齐员工安全用户组和成员管理权限。 |
 | [027](../../../management/migrations/postgresql/027_ztna_address_pool_client_group.sql) | 将员工组关联迁移至地址池，移除 Client 用户组到隧道的独立映射表。 |
+| [028](../../../management/migrations/postgresql/028_ztna_address_pools_per_client_group.sql) | 允许多个动态地址池关联同一员工组。 |
+| [029](../../../management/migrations/postgresql/029_ztna_gateway_group_binding.sql) | 新增员工安全用户组到 Gateway 的隧道准入绑定。 |
 
 - `t_gateway_node`、`t_gateway_node_network` 已由迁移 015 删除，不列为当前有效表；网关身份使用 `t_ztna_node`；网络归属随后由迁移 016 统一至网络表。
 - 注册凭证保留 `t_gateway_registration_token` 表名，目标列由 `gateway_row_id` 改为 `node_id`，引用统一节点。
@@ -142,6 +146,7 @@ flowchart LR
 - JSON CHECK 多数只检查对象/数组形状；地址、公钥、策略语义、状态迁移及跨记录一致性需要服务层验证。
 - 准入、信任、审批或策略状态无法验证时默认拒绝；凭证消费、地址分配和状态更新使用事务与并发条件保护。
 - 用户、设备或节点禁用状态与授权变更事件在同一事务提交；HUB 使用数据库通知加周期扫描推动在线 Gateway 刷新配置，离线 Gateway 重连后应用当前配置。
+- Gateway 组准入只决定 Client WireGuard Peer 是否下发；Gateway 后方网络和资源继续由访问策略及防火墙 ACL 控制。
 
 ## 7. 当前未纳入独立表的能力
 

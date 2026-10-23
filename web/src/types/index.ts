@@ -335,6 +335,8 @@ export interface ProtectedResource {
   protocol: ResourceProtocol;
   host: string;
   port: number;
+  portEnd?: number;
+  portMode?: 'single' | 'range' | 'any' | 'unconfigured';
   url?: string;
   siteId: string;
   siteName: string;

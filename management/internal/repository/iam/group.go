@@ -9,6 +9,7 @@ import (
 	"github.com/lib/pq"
 	servicecontext "velotrust/management/internal/context"
 	"velotrust/management/internal/model/iam"
+	accesschanges "velotrust/management/internal/repository/ztna"
 	"velotrust/shared/repository/database"
 )
 
@@ -46,6 +47,7 @@ func (r *Repository) SaveGroup(ctx *servicecontext.Context, group *iam.Group, ex
 		return errors.New("IAM group and audit event are required")
 	}
 	return r.db.WithSaveTransaction(ctx, func(tx *database.DBTransaction) error {
+		statusChanged := false
 		if group.ID == 0 {
 			group.CreateNew(ctx.UserName())
 			if _, err := tx.Save(group); err != nil {
@@ -63,6 +65,7 @@ func (r *Repository) SaveGroup(ctx *servicecontext.Context, group *iam.Group, ex
 			if expectedVersion <= 0 || current.VersionNo != expectedVersion {
 				return ErrGroupVersionConflict
 			}
+			statusChanged = current.Status != group.Status
 			current.GroupName, current.GroupCode = group.GroupName, group.GroupCode
 			current.Description, current.Status, current.SortOrder = group.Description, group.Status, group.SortOrder
 			current.Update(ctx.UserName())
@@ -79,6 +82,26 @@ func (r *Repository) SaveGroup(ctx *servicecontext.Context, group *iam.Group, ex
 		audit.TargetID = stringPtr(fmt.Sprintf("%d", group.ID))
 		if err := insertAudit(ctx, tx, audit); err != nil {
 			return fmt.Errorf("write IAM group audit: %w", err)
+		}
+		if statusChanged {
+			if err := accesschanges.CreateGroupGatewayRefreshes(ctx, tx, group.ID); err != nil {
+				return fmt.Errorf("queue Gateway refresh after security-group status change: %w", err)
+			}
+			var users []struct {
+				ID int64 `xorm:"'id'"`
+			}
+			if err := tx.Session.SQL(`SELECT DISTINCT membership.user_id AS id
+				FROM public.`+iam.TableUserGroup+` AS membership
+				JOIN public.`+iam.TableUser+` AS employee ON employee.id=membership.user_id
+				WHERE membership.group_id=? AND employee.account_type='employee' AND employee.user_status='active'
+				ORDER BY membership.user_id`, group.ID).Find(&users); err != nil {
+				return fmt.Errorf("find employees affected by security-group status change: %w", err)
+			}
+			for _, user := range users {
+				if _, err := accesschanges.CreateAccessChange(ctx, tx, "user", user.ID, "authorization_changed"); err != nil {
+					return fmt.Errorf("queue Client refresh after security-group status change for employee %d: %w", user.ID, err)
+				}
+			}
 		}
 		return nil
 	})
@@ -185,8 +208,32 @@ func (r *Repository) SetGroupMembers(ctx *servicecontext.Context, groupID int64,
 		if err := insertAudit(ctx, tx, audit); err != nil {
 			return fmt.Errorf("write IAM group membership audit: %w", err)
 		}
+		affectedUserIDs := append(append([]int64(nil), currentIDs...), userIDs...)
+		affectedUserIDs = uniqueIDs(affectedUserIDs)
+		for _, userID := range affectedUserIDs {
+			if _, err := accesschanges.CreateAccessChange(ctx, tx, "user", userID, "authorization_changed"); err != nil {
+				return fmt.Errorf("queue Client refresh after security-group membership change for employee %d: %w", userID, err)
+			}
+		}
+		if err := accesschanges.CreateGroupGatewayRefreshes(ctx, tx, groupID); err != nil {
+			return fmt.Errorf("queue Gateway refresh after security-group membership change: %w", err)
+		}
 		return nil
 	})
+}
+
+func uniqueIDs(values []int64) []int64 {
+	if len(values) == 0 {
+		return nil
+	}
+	sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
+	result := values[:1]
+	for _, value := range values[1:] {
+		if value != result[len(result)-1] {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func groupWriteError(err error) error {

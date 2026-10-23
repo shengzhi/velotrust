@@ -8,34 +8,24 @@ import {
   Monitor,
   Search,
   Plus,
-  Activity,
-  CheckCircle2,
-  AlertTriangle,
   Lock,
-  ExternalLink,
   RefreshCw,
   Edit2,
   Trash2,
   Sliders,
   Layers,
-  ChevronRight,
-  Send,
-  Zap,
-  Info,
-  Copy,
   Cpu,
-  Boxes,
   Users,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { mockApi } from '../../data/mock';
+import { protectedResourceApi } from '../../services/protectedResource';
+import { siteApi } from '../../services/site';
 import {
   ProtectedResource,
   ResourceCategory,
   ResourceProtocol,
-  SensitivityLevel,
   Site,
-  Node,
   ApiResource,
   ApiRequestMethod,
   ResourceRiskLevel,
@@ -46,6 +36,29 @@ import { Dialog } from '../../components/ui/dialog';
 import { Badge } from '../../components/ui/badge';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
+
+interface IPv4Range {
+  first: number;
+  last: number;
+}
+
+function parseIPv4Range(value: string): IPv4Range | null {
+  const parts = value.trim().split('/');
+  if (parts.length > 2 || !parts[0]) return null;
+  const octetParts = parts[0].split('.');
+  if (octetParts.length !== 4 || octetParts.some((part) => !/^\d{1,3}$/.test(part) || Number(part) > 255 || String(Number(part)) !== part)) return null;
+  const octets = octetParts.map(Number);
+  const address = octets.reduce((result, octet) => result * 256 + octet, 0);
+  const bits = parts.length === 1 ? 32 : Number(parts[1]);
+  if (!Number.isInteger(bits) || bits < 0 || bits > 32 || (parts.length === 2 && !/^\d{1,2}$/.test(parts[1]))) return null;
+  const size = 2 ** (32 - bits);
+  const first = Math.floor(address / size) * size;
+  return { first, last: first + size - 1 };
+}
+
+function isRangeWithin(child: IPv4Range, parent: IPv4Range): boolean {
+  return child.first >= parent.first && child.last <= parent.last;
+}
 
 export const Resources: React.FC = () => {
   const { hasPermission } = useAuth();
@@ -58,13 +71,11 @@ export const Resources: React.FC = () => {
   // --- ZTNA Business Assets State ---
   const [resources, setResources] = useState<ProtectedResource[]>([]);
   const [sites, setSites] = useState<Site[]>([]);
-  const [nodes, setNodes] = useState<Node[]>([]);
   const [loading, setLoading] = useState(true);
 
   // Filters for ZTNA assets
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
-  const [selectedSensitivity, setSelectedSensitivity] = useState<string>('all');
   const [selectedSite, setSelectedSite] = useState<string>('all');
 
   // Edit / Create ZTNA Asset Modal State
@@ -76,27 +87,16 @@ export const Resources: React.FC = () => {
     protocol: 'HTTPS',
     host: '',
     port: 443,
+    portEnd: 443,
+    portMode: 'single',
     url: '',
     siteId: '',
     siteName: '',
     gatewayNodeId: '',
     gatewayNodeName: '',
-    sensitivity: 'Internal',
-    department: '',
-    owner: '',
-    healthCheckType: 'HTTP_GET',
     tags: [],
     description: '',
   });
-
-  // Probe Simulation State
-  const [probingId, setProbingId] = useState<string | null>(null);
-  const [probeResult, setProbeResult] = useState<{
-    resource: ProtectedResource;
-    latencyMs: number;
-    details: string;
-    statusText: string;
-  } | null>(null);
 
   // --- API Resources State ---
   const [apiResources, setApiResources] = useState<ApiResource[]>([]);
@@ -124,15 +124,13 @@ export const Resources: React.FC = () => {
   const loadData = async () => {
     setLoading(true);
     try {
-      const [resList, sList, nList, apiList] = await Promise.all([
-        mockApi.getProtectedResources(),
-        mockApi.getSites(),
-        mockApi.getNodes(),
+      const [resList, sList, apiList] = await Promise.all([
+        protectedResourceApi.list(),
+        siteApi.listSites(),
         mockApi.getApiResources(),
       ]);
       setResources(resList);
       setSites(sList);
-      setNodes(nList.filter((n) => n.type === 'gateway'));
       setApiResources(apiList);
     } catch {
       addToast('加载资源数据失败', 'error');
@@ -151,15 +149,13 @@ export const Resources: React.FC = () => {
       res.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       res.host.toLowerCase().includes(searchQuery.toLowerCase()) ||
       res.code.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      res.owner.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      res.department.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      res.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
       res.tags.some((t) => t.toLowerCase().includes(searchQuery.toLowerCase()));
 
     const matchesCategory = selectedCategory === 'all' || res.category === selectedCategory;
-    const matchesSensitivity = selectedSensitivity === 'all' || res.sensitivity === selectedSensitivity;
     const matchesSite = selectedSite === 'all' || res.siteId === selectedSite;
 
-    return matchesSearch && matchesCategory && matchesSensitivity && matchesSite;
+    return matchesSearch && matchesCategory && matchesSite;
   });
 
   // Filter API resources
@@ -195,41 +191,9 @@ export const Resources: React.FC = () => {
     }
   };
 
-  const getSensitivityBadge = (level: SensitivityLevel) => {
-    switch (level) {
-      case 'TopSecret':
-        return (
-          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-50 text-rose-700 border border-rose-200 flex items-center gap-1">
-            <Lock className="w-3 h-3 text-rose-600" />
-            绝密 (TopSecret)
-          </span>
-        );
-      case 'Confidential':
-        return (
-          <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-50 text-amber-700 border border-amber-200 flex items-center gap-1">
-            <Lock className="w-3 h-3 text-amber-600" />
-            机密 (Confidential)
-          </span>
-        );
-      case 'Internal':
-        return (
-          <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-700 border border-blue-200">
-            内部通用 (Internal)
-          </span>
-        );
-      case 'Public':
-        return (
-          <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-slate-50 text-slate-700 border border-slate-200">
-            公开 (Public)
-          </span>
-        );
-    }
-  };
-
   // Handlers for ZTNA Assets
   const handleOpenCreate = () => {
-    const defaultSite = sites[0] || { id: 'site-bj', name: '北京总部核心区' };
-    const defaultGateway = nodes[0] || { id: 'node-hub-bj', name: 'gw-bj-hub-01' };
+    const defaultSite = sites.find((site) => site.status === 'active' && Boolean(site.gatewayNodeId));
 
     setEditingResource({
       name: '',
@@ -238,15 +202,13 @@ export const Resources: React.FC = () => {
       protocol: 'HTTPS',
       host: '',
       port: 443,
+      portEnd: 443,
+      portMode: 'single',
       url: '',
-      siteId: defaultSite.id,
-      siteName: defaultSite.name,
-      gatewayNodeId: defaultGateway.id,
-      gatewayNodeName: defaultGateway.name,
-      sensitivity: 'Confidential',
-      department: '基础平台架构组',
-      owner: '管理员',
-      healthCheckType: 'HTTP_GET',
+      siteId: defaultSite?.id || '',
+      siteName: defaultSite?.name || '',
+      gatewayNodeId: defaultSite?.gatewayNodeId || '',
+      gatewayNodeName: defaultSite?.gatewayNodeName || '',
       tags: ['生产就绪', 'ZTNA受保护'],
       description: '',
     });
@@ -259,13 +221,38 @@ export const Resources: React.FC = () => {
   };
 
   const handleSaveResource = async () => {
-    if (!editingResource.name || !editingResource.host) {
-      addToast('资产名称和内部主机地址(Host/IP)为必填项', 'warning');
+    if (!editingResource.name?.trim() || !editingResource.host?.trim() || !editingResource.code?.trim() || !editingResource.siteId || !editingResource.gatewayNodeId) {
+      addToast('请填写资源名称、编码、IP/CIDR，并选择已绑定 Gateway 的网络站点', 'warning');
       return;
     }
 
+    const selectedSite = sites.find((site) => site.id === editingResource.siteId);
+    const targetRange = parseIPv4Range(editingResource.host);
+    const siteRange = selectedSite ? parseIPv4Range(selectedSite.localSubnet) : null;
+    const natRange = selectedSite?.natMapping?.enabled ? parseIPv4Range(selectedSite.natMapping.virtualCidr) : null;
+    if (!selectedSite || !targetRange || !siteRange || !(
+      isRangeWithin(targetRange, siteRange) || (natRange && isRangeWithin(targetRange, natRange))
+    )) {
+      addToast('目标 IPv4 地址或网段必须完整位于所选网络站点的真实网段或已启用的 NAT 影子网段内', 'warning');
+      return;
+    }
+
+    const portMode = editingResource.portMode || 'single';
+    if (portMode === 'unconfigured') {
+      addToast('请为该资源选择单端口、端口范围或任意端口', 'warning');
+      return;
+    }
+    if (portMode !== 'any') {
+      const portStart = Number(editingResource.port);
+      const portEnd = portMode === 'range' ? Number(editingResource.portEnd) : portStart;
+      if (!Number.isInteger(portStart) || !Number.isInteger(portEnd) || portStart < 1 || portEnd < portStart || portEnd > 65535) {
+        addToast('端口必须是 1–65535 之间的有效端口，且范围结束端口不能小于起始端口', 'warning');
+        return;
+      }
+    }
+
     try {
-      const saved = await mockApi.saveProtectedResource(editingResource as any);
+      const saved = await protectedResourceApi.save(editingResource as any);
       addToast(`受保护业务资产「${saved.name}」已成功保存并同步至网关`, 'success');
       setIsModalOpen(false);
       loadData();
@@ -274,33 +261,15 @@ export const Resources: React.FC = () => {
     }
   };
 
-  const handleDeleteResource = async (id: string, name: string) => {
-    if (confirm(`确定要从受保护业务目录中移除「${name}」吗？`)) {
+  const handleDeleteResource = async (resource: ProtectedResource) => {
+    if (confirm(`确定要从受保护业务目录中移除「${resource.name}」吗？`)) {
       try {
-        await mockApi.deleteProtectedResource(id);
-        addToast(`业务资产「${name}」已成功移除`, 'success');
+        await protectedResourceApi.delete(resource);
+        addToast(`业务资产「${resource.name}」已成功移除`, 'success');
         loadData();
       } catch (err: any) {
         addToast(err.message || '删除失败', 'error');
       }
-    }
-  };
-
-  const handleProbeHealth = async (res: ProtectedResource) => {
-    setProbingId(res.id);
-    try {
-      const result = await mockApi.probeResourceHealth(res.id);
-      setProbeResult({
-        resource: res,
-        latencyMs: result.latencyMs,
-        details: result.details,
-        statusText: result.statusText,
-      });
-      loadData();
-    } catch {
-      addToast('连通性健康探测执行异常', 'error');
-    } finally {
-      setProbingId(null);
     }
   };
 
@@ -354,15 +323,6 @@ export const Resources: React.FC = () => {
     }
   };
 
-  // Metrics computation for ZTNA assets
-  const totalCount = resources.length;
-  const topSecretCount = resources.filter((r) => r.sensitivity === 'TopSecret').length;
-  const avgLatency =
-    totalCount > 0
-      ? Math.round(resources.reduce((sum, r) => sum + r.latencyMs, 0) / totalCount)
-      : 0;
-  const distinctGatewaysCount = new Set(resources.map((r) => r.gatewayNodeId)).size;
-
   return (
     <div className="space-y-4 max-w-7xl mx-auto">
       {/* Clean Header - No Top Summary Banner / No KPI Stats Cards */}
@@ -388,7 +348,7 @@ export const Resources: React.FC = () => {
           >
             <RefreshCw className="w-3.5 h-3.5" />
           </button>
-          {activeTab === 'ztna_assets' && (
+          {activeTab === 'ztna_assets' && hasPermission('ztna.resource.write') && (
             <button
               onClick={handleOpenCreate}
               className="flex items-center gap-1.5 px-3.5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors"
@@ -457,7 +417,7 @@ export const Resources: React.FC = () => {
                 <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
                   type="text"
-                  placeholder="搜索资产名称、代码、内网域名/IP、负责人、标签..."
+                  placeholder="搜索资源名称、编码、地址、说明或标签..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
@@ -473,7 +433,7 @@ export const Resources: React.FC = () => {
                   className="py-1.5 px-3 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 focus:outline-none"
                 >
                   <option value="all">全部网络站点 ({resources.length})</option>
-                  {sites.map((s) => (
+                  {sites.filter((site) => site.status === 'active' && Boolean(site.gatewayNodeId)).map((s) => (
                     <option key={s.id} value={s.id}>
                       {s.name} ({s.localSubnet})
                     </option>
@@ -507,37 +467,14 @@ export const Resources: React.FC = () => {
                 </button>
               ))}
 
-              <div className="ml-auto flex items-center gap-1.5">
-                <span className="text-[11px] text-slate-400">敏感级别:</span>
-                {(['all', 'TopSecret', 'Confidential', 'Internal', 'Public'] as const).map((lvl) => (
-                  <button
-                    key={lvl}
-                    onClick={() => setSelectedSensitivity(lvl)}
-                    className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
-                      selectedSensitivity === lvl
-                        ? 'bg-slate-900 text-white font-semibold'
-                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                    }`}
-                  >
-                    {lvl === 'all'
-                      ? '全部'
-                      : lvl === 'TopSecret'
-                      ? '绝密'
-                      : lvl === 'Confidential'
-                      ? '机密'
-                      : lvl === 'Internal'
-                      ? '内部'
-                      : '公开'}
-                  </button>
-                ))}
-              </div>
             </div>
           </div>
 
           {/* Cards Grid */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {filteredResources.map((res) => {
-              const isProbing = probingId === res.id;
+            {loading ? <div className="col-span-full py-12 text-center text-sm text-slate-500">正在加载企业资源目录…</div>
+              : filteredResources.length === 0 ? <div className="col-span-full rounded-xl border border-dashed border-slate-300 bg-white py-12 text-center text-sm text-slate-500">没有符合条件的受保护资源。请先登记服务，并关联已绑定 Gateway 的网络站点。</div>
+              : filteredResources.map((res) => {
               return (
                 <div
                   key={res.id}
@@ -557,21 +494,24 @@ export const Resources: React.FC = () => {
                             <span className="font-mono text-[10px] font-bold text-slate-500 bg-slate-100 px-1.5 py-0.2 rounded">
                               {res.code}
                             </span>
-                            <span className="text-[10px] text-slate-400">·</span>
-                            <span className="text-[10px] text-slate-500">{res.department}</span>
                           </div>
                         </div>
                       </div>
-                      {getSensitivityBadge(res.sensitivity)}
                     </div>
 
                     <p className="text-xs text-slate-500 line-clamp-2 leading-relaxed">{res.description}</p>
 
                     <div className="p-3 bg-slate-50/70 border border-slate-100 rounded-xl space-y-1.5 text-xs">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="shrink-0 text-slate-400">目标地址:</span>
+                        <span className="truncate text-right font-mono font-medium text-slate-800">
+                          {res.host}
+                        </span>
+                      </div>
                       <div className="flex items-center justify-between">
-                        <span className="text-slate-400">内部寻址 (Host:Port):</span>
+                        <span className="text-slate-400">开放服务:</span>
                         <span className="font-mono font-medium text-slate-800">
-                          {res.protocol}://{res.host}:{res.port}
+                          {res.protocol} / {res.portMode === 'any' ? '任意端口' : res.portMode === 'unconfigured' ? '未配置' : res.portMode === 'range' ? `${res.port}-${res.portEnd}` : res.port}
                         </span>
                       </div>
                       <div className="flex items-center justify-between">
@@ -599,19 +539,10 @@ export const Resources: React.FC = () => {
                   <div className="pt-4 mt-4 border-t border-slate-100 space-y-3">
                     <div className="flex items-center justify-between text-xs">
                       <div className="flex items-center gap-1.5">
-                        <span
-                          className={`w-2 h-2 rounded-full ${
-                            res.status === 'healthy'
-                              ? 'bg-emerald-500'
-                              : res.status === 'degraded'
-                              ? 'bg-amber-500'
-                              : 'bg-rose-500'
-                          }`}
-                        />
+                        <span className={`w-2 h-2 rounded-full ${res.status === 'healthy' ? 'bg-emerald-500' : 'bg-slate-400'}`} />
                         <span className="text-slate-600 font-medium">
-                          {res.status === 'healthy' ? '连通健康' : res.status === 'degraded' ? '告警延迟' : '不可达'}
+                          {res.status === 'healthy' ? '已启用' : '未启用'}
                         </span>
-                        <span className="text-slate-400 font-mono text-[11px]">({res.latencyMs}ms)</span>
                       </div>
 
                       <span className="text-[11px] text-blue-600 font-medium bg-blue-50 px-2 py-0.5 rounded">
@@ -621,15 +552,6 @@ export const Resources: React.FC = () => {
 
                     <div className="flex items-center justify-between gap-2">
                       <button
-                        onClick={() => handleProbeHealth(res)}
-                        disabled={isProbing}
-                        className="flex-1 py-1.5 px-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50"
-                      >
-                        <Activity className={`w-3.5 h-3.5 ${isProbing ? 'animate-spin' : ''}`} />
-                        <span>{isProbing ? '探测中...' : '网关探针测试'}</span>
-                      </button>
-
-                      <button
                         onClick={() => navigate('/policies')}
                         title="配置与查看该资产的访问策略"
                         className="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-slate-50 rounded-lg border border-slate-200 transition-colors"
@@ -637,21 +559,21 @@ export const Resources: React.FC = () => {
                         <Sliders className="w-3.5 h-3.5" />
                       </button>
 
-                      <button
+                      {hasPermission('ztna.resource.write') && <button
                         onClick={() => handleOpenEdit(res)}
                         title="编辑业务资产"
                         className="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-slate-50 rounded-lg border border-slate-200 transition-colors"
                       >
                         <Edit2 className="w-3.5 h-3.5" />
-                      </button>
+                      </button>}
 
-                      <button
-                        onClick={() => handleDeleteResource(res.id, res.name)}
+                      {hasPermission('ztna.resource.write') && <button
+                        onClick={() => handleDeleteResource(res)}
                         title="移除资产"
                         className="p-1.5 text-slate-500 hover:text-rose-600 hover:bg-rose-50 rounded-lg border border-slate-200 transition-colors"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                      </button>}
                     </div>
                   </div>
                 </div>
@@ -952,61 +874,100 @@ export const Resources: React.FC = () => {
                 <label className="block text-xs font-semibold text-slate-700 mb-1">传输协议</label>
                 <select
                   value={editingResource.protocol}
-                  onChange={(e) =>
-                    setEditingResource({ ...editingResource, protocol: e.target.value as ResourceProtocol })
-                  }
+                  onChange={(e) => setEditingResource({ ...editingResource, protocol: e.target.value as ResourceProtocol })}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 focus:outline-none"
                 >
-                  <option value="HTTPS">HTTPS (443)</option>
-                  <option value="HTTP">HTTP (80)</option>
-                  <option value="SSH">SSH (22)</option>
-                  <option value="RDP">RDP (3389)</option>
-                  <option value="MySQL">MySQL (3306)</option>
-                  <option value="PostgreSQL">PostgreSQL (5432)</option>
-                  <option value="TCP">通用 TCP</option>
+                  {(editingResource.portMode || 'single') === 'single' ? <>
+                    <option value="HTTPS">HTTPS (443)</option>
+                    <option value="HTTP">HTTP (80)</option>
+                    <option value="SSH">SSH (22)</option>
+                    <option value="RDP">RDP (3389)</option>
+                    <option value="MySQL">MySQL (3306)</option>
+                    <option value="PostgreSQL">PostgreSQL (5432)</option>
+                    <option value="TCP">通用 TCP</option>
+                    <option value="UDP">通用 UDP</option>
+                  </> : <>
+                    <option value="TCP">TCP</option>
+                    <option value="UDP">UDP</option>
+                  </>}
                 </select>
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">敏感等级</label>
-                <select
-                  value={editingResource.sensitivity}
-                  onChange={(e) =>
-                    setEditingResource({ ...editingResource, sensitivity: e.target.value as SensitivityLevel })
-                  }
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 focus:outline-none"
-                >
-                  <option value="TopSecret">绝密 (TopSecret)</option>
-                  <option value="Confidential">机密 (Confidential)</option>
-                  <option value="Internal">内部通用 (Internal)</option>
-                  <option value="Public">公开 (Public)</option>
-                </select>
-              </div>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div className="sm:col-span-2">
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  内部目标主机 (Host / IP) <span className="text-rose-500">*</span>
+                  目标地址（IPv4 主机或网段） <span className="text-rose-500">*</span>
                 </label>
                 <input
                   type="text"
-                  placeholder="例如：10.100.2.18 或 sap-core.vpc.internal"
+                  placeholder="例如 172.31.2.5 或 172.31.0.0/16"
                   value={editingResource.host || ''}
                   onChange={(e) => setEditingResource({ ...editingResource, host: e.target.value })}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
                 />
+                <p className="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+                  可填写 IPv4 单地址或 CIDR 网段，也可填写该站点 NAT 影子网段中的地址。填写网段时，策略将作用于整个网段的所选协议和端口；地址必须属于所选网络站点。
+                </p>
               </div>
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">端口</label>
-                <input
+                <select
+                  value={editingResource.portMode || 'single'}
+                  onChange={(event) => {
+                    const mode = event.target.value as 'single' | 'range' | 'any';
+                    setEditingResource((current) => {
+                      const start = current.port && current.port > 0 ? current.port : 443;
+                      return {
+                        ...current,
+                        portMode: mode,
+                        protocol: mode === 'single' || current.protocol === 'UDP' ? current.protocol : 'TCP',
+                        port: mode === 'any' ? 0 : start,
+                        portEnd: mode === 'any' ? 0 : mode === 'range' ? Math.max(start, current.portEnd || start) : start,
+                      };
+                    });
+                  }}
+                  className="mb-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700 focus:outline-none"
+                >
+                  {editingResource.portMode === 'unconfigured' && <option value="unconfigured" disabled>未配置</option>}
+                  <option value="single">单端口</option>
+                  <option value="range">端口范围</option>
+                  <option value="any">任意端口</option>
+                </select>
+                {(editingResource.portMode || 'single') === 'single' && <input
                   type="number"
+                  min={1}
+                  max={65535}
                   placeholder="443"
-                  value={editingResource.port || 443}
-                  onChange={(e) => setEditingResource({ ...editingResource, port: parseInt(e.target.value, 10) || 80 })}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono text-slate-800 focus:outline-none"
-                />
+                  value={editingResource.port ?? ''}
+                  onChange={(event) => setEditingResource({ ...editingResource, port: Number(event.target.value), portEnd: Number(event.target.value) })}
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-mono text-slate-800 focus:outline-none"
+                />}
+                {editingResource.portMode === 'range' && <div className="grid grid-cols-2 gap-2">
+                  <input
+                    type="number"
+                    min={1}
+                    max={65535}
+                    aria-label="起始端口"
+                    placeholder="起始"
+                    value={editingResource.port ?? ''}
+                    onChange={(event) => setEditingResource({ ...editingResource, port: Number(event.target.value) })}
+                    className="min-w-0 w-full rounded-xl border border-slate-200 bg-slate-50 px-2 py-2 text-xs font-mono text-slate-800 focus:outline-none"
+                  />
+                  <input
+                    type="number"
+                    min={1}
+                    max={65535}
+                    aria-label="结束端口"
+                    placeholder="结束"
+                    value={editingResource.portEnd ?? ''}
+                    onChange={(event) => setEditingResource({ ...editingResource, portEnd: Number(event.target.value) })}
+                    className="min-w-0 w-full rounded-xl border border-slate-200 bg-slate-50 px-2 py-2 text-xs font-mono text-slate-800 focus:outline-none"
+                  />
+                </div>}
+                {editingResource.portMode === 'any' && <p className="rounded-lg bg-amber-50 px-2.5 py-2 text-[11px] leading-relaxed text-amber-800">将允许所选 TCP 或 UDP 协议的所有端口。</p>}
               </div>
             </div>
 
@@ -1021,62 +982,31 @@ export const Resources: React.FC = () => {
                       ...editingResource,
                       siteId: e.target.value,
                       siteName: st ? st.name : '',
+                      gatewayNodeId: st ? st.gatewayNodeId : '',
+                      gatewayNodeName: st ? st.gatewayNodeName : '',
                     });
                   }}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 focus:outline-none"
                 >
-                  {sites.map((s) => (
+                  <option value="" disabled>请选择已绑定 Gateway 的网络站点</option>
+                  {sites.filter((site) => site.status === 'active' && Boolean(site.gatewayNodeId)).map((s) => (
                     <option key={s.id} value={s.id}>
                       {s.name} ({s.localSubnet})
                     </option>
                   ))}
                 </select>
+                {(() => {
+                  const site = sites.find((item) => item.id === editingResource.siteId);
+                  if (!site) return null;
+                  const ranges = [site.localSubnet];
+                  if (site.natMapping?.enabled && site.natMapping.virtualCidr) ranges.push(site.natMapping.virtualCidr);
+                  return <p className="mt-1.5 text-[11px] text-slate-500">允许的目标范围：<span className="font-mono">{ranges.join('、')}</span></p>;
+                })()}
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">出向代理网关 (Gateway)</label>
-                <select
-                  value={editingResource.gatewayNodeId}
-                  onChange={(e) => {
-                    const nd = nodes.find((n) => n.id === e.target.value);
-                    setEditingResource({
-                      ...editingResource,
-                      gatewayNodeId: e.target.value,
-                      gatewayNodeName: nd ? nd.name : '',
-                    });
-                  }}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 focus:outline-none"
-                >
-                  {nodes.map((n) => (
-                    <option key={n.id} value={n.id}>
-                      {n.name} ({n.virtualIp})
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">业务归属部门</label>
-                <input
-                  type="text"
-                  placeholder="例如：财务中心与合规部"
-                  value={editingResource.department || ''}
-                  onChange={(e) => setEditingResource({ ...editingResource, department: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">资产技术负责人</label>
-                <input
-                  type="text"
-                  placeholder="例如：张伟 (基础运维组)"
-                  value={editingResource.owner || ''}
-                  onChange={(e) => setEditingResource({ ...editingResource, owner: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none"
-                />
+                <label className="block text-xs font-semibold text-slate-700 mb-1">由网络站点关联的 Gateway</label>
+                <input readOnly value={editingResource.gatewayNodeName || '先选择已绑定 Gateway 的网络站点'} className="w-full cursor-not-allowed rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-xs text-slate-600" />
               </div>
             </div>
 
@@ -1269,51 +1199,6 @@ export const Resources: React.FC = () => {
         </Dialog>
       )}
 
-      {/* ================= MODAL: Health Probe Inspection Result ================= */}
-      {probeResult && (
-        <Dialog
-          isOpen={!!probeResult}
-          onClose={() => setProbeResult(null)}
-          title={`网关实时探针回执 · ${probeResult.resource.name}`}
-          maxWidth="md"
-        >
-          <div className="space-y-4">
-            <div className="p-4 rounded-xl bg-slate-50 border border-slate-100 space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-slate-500 font-medium">目标协议与地址:</span>
-                <span className="font-mono text-xs font-bold text-slate-800">
-                  {probeResult.resource.protocol}://{probeResult.resource.host}:{probeResult.resource.port}
-                </span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-slate-500 font-medium">执行探测网关:</span>
-                <span className="font-mono text-xs text-blue-600 font-semibold">
-                  {probeResult.resource.gatewayNodeName}
-                </span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-slate-500 font-medium">探针响应往返时延:</span>
-                <span className="font-mono text-sm font-bold text-emerald-600">{probeResult.latencyMs} ms</span>
-              </div>
-            </div>
-
-            <div className="p-3.5 rounded-xl bg-slate-900 text-slate-300 font-mono text-xs leading-relaxed space-y-1">
-              <div className="text-slate-400 text-[11px] mb-1">--- Mesh Enforcer Probe Log ---</div>
-              <div>{probeResult.details}</div>
-            </div>
-
-            <div className="flex justify-end pt-2">
-              <button
-                type="button"
-                onClick={() => setProbeResult(null)}
-                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold"
-              >
-                关闭报告
-              </button>
-            </div>
-          </div>
-        </Dialog>
-      )}
     </div>
   );
 };

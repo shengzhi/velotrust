@@ -76,7 +76,7 @@ sudo /usr/local/bin/gateway-agent validate --config /etc/velotrust/gateway/gatew
 }
 ```
 
-HUB 模式下，本机配置只负责隧道接口名、WireGuard UDP 监听端口、私钥和 HUB 连接参数；隧道地址、Peer、关联站点网段和 NAT 由 HUB 从 IPAM、隧道、网络站点及 NAT 业务数据编译。Gateway 必须先分配 IPAM 隧道地址，且关联站点网络应有本机物理或静态路由。策略规则尚未接入 Gateway 编译，当前 ACL 默认拒绝。首个有效快照应用前转发保持阻断。业务数据修改后，HUB 在 Gateway 心跳或重连时重新编译并发送摘要不同的配置。
+HUB 模式下，本机配置只负责隧道接口名、WireGuard UDP 监听端口、私钥和 HUB 连接参数；隧道地址、Peer、关联站点网段、NAT 和 ACL 由 HUB 从 Management 当前业务数据编译。Gateway 必须先分配 IPAM 隧道地址，且关联站点网络应有本机物理或静态路由。没有匹配 Gateway 的活动 `allow` 规则时，转发默认拒绝。首个有效快照应用前转发保持阻断。业务数据修改后，HUB 重新编译配置并通知 Gateway 对账。
 
 以前台方式启动：
 
@@ -161,6 +161,29 @@ sudo nft list chain inet velotrust_gateway_nat gateway_postrouting
 
 规则应显示隧道入口、指定出口、源/目标前缀和 `snat to` 地址。可在出口接口抓包确认 LAN 主机看到的来源地址是 `to_address`；回包应经 Gateway 的连接跟踪还原后进入 WireGuard 隧道。
 
+## Management 控制台
+
+### 配置访问策略与 Gateway ACL
+
+先在“企业资源管理中心”登记受保护服务：选择网络站点、填写 IPv4 地址或 CIDR，并设置协议和单端口、端口范围或任意端口。目标地址必须完整落在该站点的真实网段内；如果站点启用了影子网段 DNAT，也可以填写完整落在该影子网段内的地址。任意端口仍只匹配所选的 TCP 或 UDP 协议。随后在“零信任安全策略 → 访问策略与 ACL”选择安全用户组、企业资源和允许/拒绝动作。策略页面不填写客户端或资源网段。
+
+HUB 根据安全用户组成员、活动设备和 Overlay 租约计算 ACL 来源；根据企业资源的网络站点找到 Gateway，并从资源记录读取目标地址、协议和端口。若目标地址位于影子网段，HUB 会按站点 NAT 映射把它转换成 DNAT 后的真实目标，供 Gateway 转发 ACL 匹配。Gateway Peer、Client 路由及 ACL 都由活动策略关系驱动；Gateway 默认拒绝没有匹配 allow 规则的流量。
+
+例如站点真实网段为 `172.16.0.0/16`，影子网段为 `172.31.0.0/16`，SSH 主机真实地址为 `172.16.2.5`：
+
+- 企业资源：地址 `172.31.2.5`，协议 TCP，端口 22，选择该站点
+- 访问策略：选择允许访问的安全用户组和此 SSH 资源，添加“允许”动作并启用策略
+
+保存或启用策略后，HUB 会通知相关 Client 和 Gateway 更新配置。可在节点详情检查下发与实际配置摘要是否一致，再从组内 Client 验证：
+
+```powershell
+Test-NetConnection 172.31.2.5 -Port 22
+```
+
+Client 使用 `172.31.0.0/16` 影子路由；Gateway 先将目标 DNAT 到 `172.16.2.5`，再由编译后的 ACL 按组内设备 Overlay 地址、真实目标和 TCP/22 匹配。SNAT 只负责回程地址转换，不会代替策略授权。
+
+部署此版本前先执行 Management 数据库迁移。原来直接填写源/目标网段的活动策略无法安全转换为资源授权策略，迁移会将其改为草稿；请在企业资源管理中心登记服务，再重新关联安全用户组和资源后启用。
+
 ## Windows Client CLI
 
 Windows Client 有两种连接方式：推荐的 **HUB 管理模式**由员工账号密码登录，HUB 完成设备登记、身份认证和配置下发；静态模式由管理员把 Gateway Peer 写入本机配置，适合现有手工联调。
@@ -222,7 +245,7 @@ $ClientConfig = Join-Path $ClientDir "client.json"
 
 首次登录后，HUB 会根据设备所有者的活动用户组，查找 IPAM 动态 `User-Device` 地址池的员工组关联并创建地址租约；重连时复用有效租约。此步骤只分配 IP，不选择 Gateway，也不创建隧道 Peer。Client 可连接的 Gateway 应由访问策略决定；策略配置下发尚未完成前，HUB 不会下发隧道配置。若没有获得地址，请检查员工是否属于活动用户组、该组是否关联了启用的动态终端地址池，以及池中是否还有可用地址。收到有效 Gateway 配置后，Client 会创建 `VeloTrust` 接口并显示各 Gateway 握手状态。随后可按策略测试获准资源：
 
-管理员先在「零信任安全策略 → 安全用户组」创建用户组并将员工加入该组，再在「IPAM → Overlay 地址池」创建动态 `User-Device` 地址池并选择该员工组。HUB 后续登录时会按设备所有者的组成员关系分配地址；移除员工组关联或员工成员关系后，下次认证/同步会释放不再符合条件的旧租约。Gateway 访问授权通过访问策略配置。
+管理员先在「零信任安全策略 → 安全用户组」创建用户组并加入员工，再在「IPAM → Overlay 地址池」创建动态 `User-Device` 地址池并选择该用户组。Overlay 地址池分配隧道 IP；访问策略关联用户组和企业资源后，HUB 会为该组相关设备生成 Gateway Peer、路由及 ACL。现有“Gateway 准入”绑定仍可作为额外的组级准入配置。
 
 ```powershell
 Test-NetConnection 10.20.0.10 -Port 443
@@ -341,4 +364,4 @@ Resolve-DnsName www.example.com -DnsOnly
 
 ## 当前边界
 
-HUB 管理模式已有员工密码登录、Client 设备首次登记、X25519 身份认证、配置同步、运行状态上报和在线撤销清理。当前控制台尚未提供隧道 Peer 关联管理，因此需要后续实现后才能从 Management 完成端到端隧道配置；HUB 会话租约也仍是单实例内存状态。Windows Client 仍以前台进程运行，macOS/Linux DNS 接管、Windows 网络切换验证及休眠恢复尚未实现。DNS 接管通过 Windows DNS Client/NRPT 工作；自行发送 DNS、DoH 和 DoT 的应用不在当前范围。Gateway 访问策略尚未编译为 ACL，因此 Gateway 数据面继续默认拒绝。
+HUB 管理模式已有员工密码登录、Client 设备首次登记、X25519 身份认证、配置同步、运行状态上报和在线撤销清理。HUB 会话租约仍是单实例内存状态。Windows Client 仍以前台进程运行，macOS/Linux DNS 接管、Windows 网络切换验证及休眠恢复尚未实现。DNS 接管通过 Windows DNS Client/NRPT 工作；自行发送 DNS、DoH 和 DoT 的应用不在当前范围。Management 当前访问策略已编译为 Gateway ACL；没有匹配允许规则的转发仍默认拒绝。
